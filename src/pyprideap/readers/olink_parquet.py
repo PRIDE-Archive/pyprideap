@@ -8,6 +8,7 @@ from pyprideap.core import AffinityDataset, Platform
 
 _SAMPLE_COLS = {"SampleID", "SampleType", "WellID", "PlateID", "SampleQC", "DataAnalysisRefID"}
 _FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "Block", "Normalization"}
+_REQUIRED_COLS = {"SampleID", "OlinkID", "NPX"}
 
 
 def read_olink_parquet(path: str | Path) -> AffinityDataset:
@@ -16,6 +17,9 @@ def read_olink_parquet(path: str | Path) -> AffinityDataset:
         raise FileNotFoundError(f"File not found: {path}")
 
     df = pd.read_parquet(path)
+    missing = _REQUIRED_COLS - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")
 
     sample_cols = [c for c in df.columns if c in _SAMPLE_COLS]
     samples = df[sample_cols].drop_duplicates(subset=["SampleID"]).reset_index(drop=True)

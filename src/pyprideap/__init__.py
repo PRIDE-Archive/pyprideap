@@ -1,6 +1,6 @@
 """pyprideap — Python library for PRIDE Affinity Proteomics (PAD) archive data."""
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 from pyprideap.core import AffinityDataset, Level, Platform, ValidationResult
 from pyprideap.filtering import filter_controls, filter_qc
@@ -10,7 +10,10 @@ from pyprideap.readers.registry import read
 from pyprideap.stats import DatasetStats, compute_stats
 from pyprideap.validators import validate
 
-__version__ = version("pyprideap")
+try:
+    __version__ = version("pyprideap")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "__version__",

@@ -14,6 +14,15 @@ class PrideClient:
         self.timeout = timeout
         self._session = requests.Session()
 
+    def __enter__(self) -> PrideClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._session.close()
+
     def get_project(self, accession: str) -> dict:  # type: ignore[type-arg]
         resp = self._session.get(f"{self.base_url}/projects/{accession}", timeout=self.timeout)
         resp.raise_for_status()

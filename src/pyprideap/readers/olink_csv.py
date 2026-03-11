@@ -8,6 +8,7 @@ from pyprideap.core import AffinityDataset, Platform
 
 _SAMPLE_COLS = {"SampleID", "PlateID", "WellID", "SampleType", "SampleQC", "PlateQC"}
 _FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "LOD"}
+_REQUIRED_COLS = {"SampleID", "OlinkID", "NPX"}
 
 
 def read_olink_csv(path: str | Path) -> AffinityDataset:
@@ -16,6 +17,9 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
         raise FileNotFoundError(f"File not found: {path}")
 
     df = pd.read_csv(path)
+    missing = _REQUIRED_COLS - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")
 
     sample_cols = [c for c in df.columns if c in _SAMPLE_COLS]
     samples = df[sample_cols].drop_duplicates(subset=["SampleID"]).reset_index(drop=True)

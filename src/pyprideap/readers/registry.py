@@ -38,15 +38,15 @@ def detect_format(path: str | Path) -> str:
         df_head = pd.read_csv(path, nrows=1)
         cols = set(df_head.columns)
         has_seqid_cols = any(c.startswith("SeqId.") for c in cols)
-        if has_seqid_cols or _SOMASCAN_MARKER_COLS.intersection(cols):
+        if has_seqid_cols or _SOMASCAN_MARKER_COLS.issubset(cols):
             return "somascan_csv"
-        if _OLINK_MARKER_COLS.intersection(cols):
+        if _OLINK_MARKER_COLS.issubset(cols):
             return "olink_csv"
 
     if suffix == ".xlsx":
         df_head = pd.read_excel(path, nrows=1)
         cols = set(df_head.columns)
-        if _OLINK_MARKER_COLS.intersection(cols):
+        if _OLINK_MARKER_COLS.issubset(cols):
             return "olink_xlsx"
 
     raise ValueError(f"Cannot detect format for file: {path}")

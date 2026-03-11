@@ -50,3 +50,8 @@ class TestAutoRead:
         ds = read(olink_xlsx_path)
         assert isinstance(ds, AffinityDataset)
         assert ds.platform == Platform.OLINK_EXPLORE
+
+    def test_read_somascan_csv(self, somascan_csv_path):
+        ds = read(somascan_csv_path)
+        assert isinstance(ds, AffinityDataset)
+        assert ds.platform == Platform.SOMASCAN

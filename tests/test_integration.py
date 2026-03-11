@@ -10,6 +10,8 @@ def test_read_validate_stats_olink(olink_csv_path):
     assert stats.n_samples > 0
     assert stats.n_features > 0
     assert isinstance(results, list)
+    errors = [r for r in results if r.level == pyprideap.Level.ERROR]
+    assert len(errors) == 0, f"Unexpected validation errors: {[r.message for r in errors]}"
 
 
 def test_read_validate_stats_somascan(somascan_adat_path):
@@ -19,6 +21,8 @@ def test_read_validate_stats_somascan(somascan_adat_path):
     assert stats.n_samples > 0
     assert stats.n_features > 0
     assert isinstance(results, list)
+    errors = [r for r in results if r.level == pyprideap.Level.ERROR]
+    assert len(errors) == 0, f"Unexpected validation errors: {[r.message for r in errors]}"
 
 
 def test_read_validate_stats_parquet(olink_parquet_path):
@@ -28,6 +32,8 @@ def test_read_validate_stats_parquet(olink_parquet_path):
     assert stats.n_samples > 0
     assert stats.n_features > 0
     assert isinstance(results, list)
+    errors = [r for r in results if r.level == pyprideap.Level.ERROR]
+    assert len(errors) == 0, f"Unexpected validation errors: {[r.message for r in errors]}"
 
 
 def test_read_validate_stats_somascan_csv(somascan_csv_path):

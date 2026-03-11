@@ -174,6 +174,15 @@ class TestOlinkTargetValidator:
         errors = [r for r in results if r.level == Level.ERROR]
         assert any("qc_consistency" in r.rule for r in errors)
 
+    def test_rule_prefix_rewritten(self):
+        ds = _make_olink_target_dataset(
+            features=pd.DataFrame({"OlinkID": ["OID1"]}),
+        )
+        results = OlinkTargetValidator().validate(ds)
+        for r in results:
+            assert not r.rule.startswith("olink."), f"Rule should use olink_target prefix: {r.rule}"
+            assert r.rule.startswith("olink_target."), f"Unexpected rule prefix: {r.rule}"
+
 
 def _make_somascan_dataset(**overrides) -> AffinityDataset:
     defaults = {

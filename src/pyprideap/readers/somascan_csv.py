@@ -15,13 +15,23 @@ def read_somascan_csv(path: str | Path) -> AffinityDataset:
     df = pd.read_csv(path)
 
     seq_cols = [c for c in df.columns if c.startswith("SeqId.")]
+    if not seq_cols:
+        raise ValueError(f"No SeqId.* columns found in {path.name}")
+
     meta_cols = [c for c in df.columns if c not in seq_cols]
 
     samples = df[meta_cols].reset_index(drop=True)
     expression = df[seq_cols].astype(float).reset_index(drop=True)
 
     seq_ids = [c.replace("SeqId.", "") for c in seq_cols]
-    features = pd.DataFrame({"SeqId": seq_ids})
+    features = pd.DataFrame(
+        {
+            "SeqId": seq_ids,
+            "UniProt": pd.Series([pd.NA] * len(seq_ids), dtype="string"),
+            "Target": pd.Series([pd.NA] * len(seq_ids), dtype="string"),
+            "Dilution": pd.Series([pd.NA] * len(seq_ids), dtype="string"),
+        }
+    )
 
     return AffinityDataset(
         platform=Platform.SOMASCAN,
