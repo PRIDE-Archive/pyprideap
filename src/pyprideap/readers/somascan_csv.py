@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pyap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset, Platform
 
 
 def read_somascan_csv(path: str | Path) -> AffinityDataset:

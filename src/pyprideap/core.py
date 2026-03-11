@@ -24,7 +24,7 @@ class ValidationResult:
     level: Level
     rule: str
     message: str
-    details: dict | None = None
+    details: dict[str, object] | None = None
 
 
 @dataclass
@@ -33,4 +33,4 @@ class AffinityDataset:
     samples: pd.DataFrame
     features: pd.DataFrame
     expression: pd.DataFrame
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)

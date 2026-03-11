@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from pyap.core import AffinityDataset, Level, Platform
-from pyap.validators.olink_explore import OlinkExploreValidator
-from pyap.validators.olink_target import OlinkTargetValidator
-from pyap.validators.somascan import SomaScanValidator
+from pyprideap.core import AffinityDataset, Level, Platform
+from pyprideap.validators.olink_explore import OlinkExploreValidator
+from pyprideap.validators.olink_target import OlinkTargetValidator
+from pyprideap.validators.somascan import SomaScanValidator
 
 
 def _make_olink_dataset(**overrides) -> AffinityDataset:

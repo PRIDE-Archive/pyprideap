@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from pyap.core import AffinityDataset
+from pyprideap.core import AffinityDataset
 
 
 @dataclass
@@ -18,7 +18,7 @@ class DatasetStats:
     sample_types: dict[str, int]
     panels: dict[str, int]
     qc_summary: dict[str, int]
-    value_distribution: dict
+    value_distribution: dict[str, float]
 
     def summary(self) -> str:
         lines = [
@@ -56,8 +56,7 @@ def compute_stats(dataset: AffinityDataset) -> DatasetStats:
     if "SampleQC" in dataset.samples.columns:
         qc_summary = {str(k): int(v) for k, v in dataset.samples["SampleQC"].value_counts().items()}
 
-    flat = expr.values.flatten().astype(float)
-    flat = flat[~np.isnan(flat)]
+    flat = np.asarray(pd.to_numeric(pd.Series(expr.values.flatten()), errors="coerce").dropna())
     value_distribution = {
         "mean": float(np.mean(flat)) if len(flat) > 0 else 0.0,
         "median": float(np.median(flat)) if len(flat) > 0 else 0.0,

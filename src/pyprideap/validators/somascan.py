@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
-from pyap.core import AffinityDataset, Level, ValidationResult
+from pyprideap.core import AffinityDataset, Level, ValidationResult
 
 _REQUIRED_FEATURE_COLS = {"SeqId", "UniProt", "Target", "Dilution"}
 _REQUIRED_SAMPLE_COLS = {"SampleId", "SampleType"}
@@ -45,8 +46,7 @@ class SomaScanValidator:
     def _check_rfu_positive(self, ds: AffinityDataset) -> list[ValidationResult]:
         if ds.expression.empty:
             return []
-        values = ds.expression.values.flatten().astype(float)
-        values = values[~np.isnan(values)]
+        values = np.asarray(pd.to_numeric(pd.Series(ds.expression.values.flatten()), errors="coerce").dropna())
         if len(values) == 0:
             return []
         negative = values < 0

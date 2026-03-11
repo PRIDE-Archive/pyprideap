@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyap.pride import PrideClient
+from pyprideap.pride import PrideClient
 
 
 class TestPrideClient:
@@ -14,7 +14,7 @@ class TestPrideClient:
             "title": "Test Project",
             "projectDescription": "A test",
         }
-        with patch("pyap.pride.requests.get", return_value=mock_response):
+        with patch("pyprideap.pride.requests.Session.get", return_value=mock_response):
             client = PrideClient()
             project = client.get_project("PAD000001")
             assert project["accession"] == "PAD000001"
@@ -27,7 +27,7 @@ class TestPrideClient:
             {"fileName": "olink_npx.csv", "fileSizeBytes": 4535478},
             {"fileName": "checksum.txt", "fileSizeBytes": 252},
         ]
-        with patch("pyap.pride.requests.get", return_value=mock_response):
+        with patch("pyprideap.pride.requests.Session.get", return_value=mock_response):
             client = PrideClient()
             files = client.list_files("PAD000001")
             assert len(files) == 2
@@ -37,7 +37,7 @@ class TestPrideClient:
         mock_response = MagicMock()
         mock_response.status_code = 404
         mock_response.raise_for_status.side_effect = Exception("404 Not Found")
-        with patch("pyap.pride.requests.get", return_value=mock_response):
+        with patch("pyprideap.pride.requests.Session.get", return_value=mock_response):
             client = PrideClient()
             with pytest.raises(Exception, match="404"):
                 client.get_project("PAD999999")
@@ -56,7 +56,7 @@ class TestPrideClient:
                 ],
             },
         ]
-        with patch("pyap.pride.requests.get", return_value=mock_response):
+        with patch("pyprideap.pride.requests.Session.get", return_value=mock_response):
             client = PrideClient()
             urls = client.get_download_urls("PAD000001")
             assert "olink_npx.csv" in urls

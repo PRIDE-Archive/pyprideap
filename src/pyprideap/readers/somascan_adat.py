@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pyap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset, Platform
 
 
 def read_somascan_adat(path: str | Path) -> AffinityDataset:
@@ -37,7 +37,7 @@ def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     row_lines: list[str] = []
     current_section = None
 
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
             if line.startswith("^HEADER"):
@@ -64,6 +64,11 @@ def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     # Strip leading \! or ! from header lines
     def strip_meta(s: str) -> str:
         return s.lstrip("\\").lstrip("!")
+
+    if not col_lines:
+        raise ValueError(f"ADAT file has no COL_DATA section content: {path}")
+    if not row_lines:
+        raise ValueError(f"ADAT file has no ROW_DATA section content: {path}")
 
     col_header = strip_meta(col_lines[0]).split("\t")
     col_rows = [line.split("\t") for line in col_lines[1:]]

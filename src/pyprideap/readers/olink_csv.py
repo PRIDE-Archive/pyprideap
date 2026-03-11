@@ -4,18 +4,18 @@ from pathlib import Path
 
 import pandas as pd
 
-from pyap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset, Platform
 
-_SAMPLE_COLS = {"SampleID", "SampleType", "WellID", "PlateID", "SampleQC", "DataAnalysisRefID"}
-_FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "Block", "Normalization"}
+_SAMPLE_COLS = {"SampleID", "PlateID", "WellID", "SampleType", "SampleQC", "PlateQC"}
+_FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "LOD"}
 
 
-def read_olink_parquet(path: str | Path) -> AffinityDataset:
+def read_olink_csv(path: str | Path) -> AffinityDataset:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    df = pd.read_parquet(path)
+    df = pd.read_csv(path)
 
     sample_cols = [c for c in df.columns if c in _SAMPLE_COLS]
     samples = df[sample_cols].drop_duplicates(subset=["SampleID"]).reset_index(drop=True)
@@ -29,10 +29,12 @@ def read_olink_parquet(path: str | Path) -> AffinityDataset:
         values="NPX",
         aggfunc="first",
     )
-    expression = expression.loc[samples["SampleID"].values].reset_index(drop=True)
+    expression = expression.reindex(samples["SampleID"].values).reset_index(drop=True)
+
+    platform = Platform.OLINK_EXPLORE
 
     return AffinityDataset(
-        platform=Platform.OLINK_EXPLORE_HT,
+        platform=platform,
         samples=samples,
         features=features,
         expression=expression,

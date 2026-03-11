@@ -21,5 +21,10 @@ def somascan_adat_path():
 
 
 @pytest.fixture
+def olink_xlsx_path():
+    return DATA_DIR / "olink_sample.xlsx"
+
+
+@pytest.fixture
 def somascan_csv_path():
     return DATA_DIR / "somascan_sample.csv"

@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pyap.core import AffinityDataset, Platform
-from pyap.stats import compute_stats
+from pyprideap.core import AffinityDataset, Platform
+from pyprideap.stats import compute_stats
 
 
 def _make_dataset():

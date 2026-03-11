@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pyap.core import AffinityDataset, ValidationResult
+from pyprideap.core import AffinityDataset, ValidationResult
 
 
 class BaseValidator(Protocol):

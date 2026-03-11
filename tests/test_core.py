@@ -1,6 +1,6 @@
 import pandas as pd
 
-from pyap.core import AffinityDataset, Level, Platform, ValidationResult
+from pyprideap.core import AffinityDataset, Level, Platform, ValidationResult
 
 
 def test_platform_enum_values():

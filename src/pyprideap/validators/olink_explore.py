@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
-from pyap.core import AffinityDataset, Level, ValidationResult
+from pyprideap.core import AffinityDataset, Level, ValidationResult
 
 _REQUIRED_SAMPLE_COLS = {"SampleID", "SampleType", "SampleQC"}
 _REQUIRED_FEATURE_COLS = {"OlinkID", "UniProt", "Panel"}
@@ -95,8 +96,7 @@ class OlinkExploreValidator:
     def _check_npx_range(self, ds: AffinityDataset) -> list[ValidationResult]:
         if ds.expression.empty:
             return []
-        values = ds.expression.values.flatten()
-        values = values[~np.isnan(values.astype(float))]
+        values = np.asarray(pd.to_numeric(pd.Series(ds.expression.values.flatten()), errors="coerce").dropna())
         if len(values) == 0:
             return []
         out_of_range = (values < _NPX_MIN) | (values > _NPX_MAX)

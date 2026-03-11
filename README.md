@@ -1,4 +1,4 @@
-# pyap
+# pyprideap
 
 Python library for reading, validating, and analyzing affinity proteomics datasets from the [PRIDE Affinity Archive (PAD)](https://www.ebi.ac.uk/pride/).
 
@@ -7,14 +7,14 @@ Supports **Olink** (Explore, Explore HT, Target) and **SomaScan** platforms.
 ## Installation
 
 ```bash
-pip install pyap
+pip install pyprideap
 ```
 
 Or for development:
 
 ```bash
-git clone https://github.com/PRIDE-Archive/pyap.git
-cd pyap
+git clone https://github.com/PRIDE-Archive/pyprideap.git
+cd pyprideap
 pip install -e ".[dev]"
 ```
 
@@ -23,18 +23,18 @@ pip install -e ".[dev]"
 ### Read a dataset
 
 ```python
-import pyap
+import pyprideap
 
 # Auto-detect format from file extension and content
-dataset = pyap.read("olink_npx.csv")
-dataset = pyap.read("raw_data.adat")
-dataset = pyap.read("data.parquet")
+dataset = pyprideap.read("olink_npx.csv")
+dataset = pyprideap.read("raw_data.adat")
+dataset = pyprideap.read("data.parquet")
 ```
 
 ### Validate against PRIDE-AP guidelines
 
 ```python
-results = pyap.validate(dataset)
+results = pyprideap.validate(dataset)
 
 for r in results:
     print(f"[{r.level.value}] {r.rule}: {r.message}")
@@ -43,7 +43,7 @@ for r in results:
 ### Compute statistics
 
 ```python
-stats = pyap.compute_stats(dataset)
+stats = pyprideap.compute_stats(dataset)
 print(stats.summary())
 
 # Individual stats
@@ -55,7 +55,7 @@ print(f"Detection rate: {stats.detection_rate:.1%}")
 ### Fetch from PRIDE Archive
 
 ```python
-client = pyap.PrideClient()
+client = pyprideap.PrideClient()
 project = client.get_project("PAD000001")
 files = client.list_files("PAD000001")
 urls = client.get_download_urls("PAD000001")
@@ -65,11 +65,11 @@ urls = client.get_download_urls("PAD000001")
 
 | Format | Platform | Reader |
 |--------|----------|--------|
-| `.npx.csv` | Olink Explore / Target | `pyap.readers.read_olink_csv()` |
-| `.parquet` | Olink Explore HT | `pyap.readers.read_olink_parquet()` |
-| `.xlsx` | Olink | `pyap.readers.read_olink_xlsx()` |
-| `.adat` | SomaScan | `pyap.readers.read_somascan_adat()` |
-| `.csv` (SomaScan) | SomaScan | `pyap.readers.read_somascan_csv()` |
+| `.npx.csv` | Olink Explore / Target | `pyprideap.readers.read_olink_csv()` |
+| `.parquet` | Olink Explore HT | `pyprideap.readers.read_olink_parquet()` |
+| `.xlsx` | Olink | `pyprideap.readers.read_olink_xlsx()` |
+| `.adat` | SomaScan | `pyprideap.readers.read_somascan_adat()` |
+| `.csv` (SomaScan) | SomaScan | `pyprideap.readers.read_somascan_csv()` |
 
 ## Validation Rules
 
@@ -105,7 +105,7 @@ ruff check src/ tests/
 ruff format src/ tests/
 
 # Type check
-mypy src/pyap/
+mypy src/pyprideap/
 ```
 
 ## License
