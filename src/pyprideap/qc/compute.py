@@ -10,18 +10,31 @@ from pyprideap.core import AffinityDataset, Platform
 
 @dataclass
 class DistributionData:
-    values: list[float]
+    """Per-sample NPX/RFU distribution curves."""
+
+    sample_ids: list[str]
+    sample_values: list[list[float]]
     xlabel: str
-    ylabel: str = "Count"
+    ylabel: str = "Number of Proteins"
     title: str = "Expression Distribution"
     platform: str = ""
 
 
 @dataclass
-class QcSummaryData:
+class MissingFrequencyData:
+    """Histogram of per-assay missing frequency."""
+
+    missing_freq: list[float]
+    title: str = "Missing Frequency"
+
+
+@dataclass
+class QcLodSummaryData:
+    """QC status crossed with LOD: stacked bar."""
+
     categories: list[str]
     counts: list[int]
-    title: str = "QC Summary"
+    title: str = "QC and LOD Summary"
 
 
 @dataclass
@@ -73,36 +86,105 @@ class DetectionRateData:
     title: str = "Detection Rate per Sample"
 
 
+# Keep old name for backwards compat in tests
+QcSummaryData = QcLodSummaryData
+
+
+# ---------------------------------------------------------------------------
+# Compute functions
+# ---------------------------------------------------------------------------
+
+
+def _sample_id_col(dataset: AffinityDataset) -> str:
+    return "SampleID" if "SampleID" in dataset.samples.columns else "SampleId"
+
+
+def _sample_ids(dataset: AffinityDataset) -> list[str]:
+    col = _sample_id_col(dataset)
+    if col in dataset.samples.columns:
+        return dataset.samples[col].astype(str).tolist()
+    return [f"S{i}" for i in range(len(dataset.samples))]
+
+
 def compute_distribution(dataset: AffinityDataset) -> DistributionData:
+    """Per-sample NPX/RFU value lists for overlaid density curves."""
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
-    flat = numeric.values.flatten()
-    flat = flat[~np.isnan(flat)]
 
     is_somascan = dataset.platform == Platform.SOMASCAN
+    sample_ids = _sample_ids(dataset)
+    sample_values: list[list[float]] = []
+
+    for idx in range(len(numeric)):
+        row = numeric.iloc[idx].dropna().values
+        if is_somascan:
+            row = np.log10(row[row > 0])
+        sample_values.append(row.tolist())
+
     if is_somascan:
-        flat = np.log10(flat[flat > 0])
         xlabel = "log10(RFU)"
         title = "RFU Distribution (log10)"
     else:
-        xlabel = "NPX (log2)"
+        xlabel = "NPX Value"
         title = "NPX Distribution"
 
     return DistributionData(
-        values=flat.tolist(),
+        sample_ids=sample_ids,
+        sample_values=sample_values,
         xlabel=xlabel,
         title=title,
         platform=dataset.platform.value,
     )
 
 
-def compute_qc_summary(dataset: AffinityDataset) -> QcSummaryData | None:
+def compute_missing_frequency(dataset: AffinityDataset) -> MissingFrequencyData:
+    """Per-assay missing frequency (fraction of samples with NaN)."""
+    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    freq = numeric.isna().mean(axis=0).tolist()
+    return MissingFrequencyData(missing_freq=freq)
+
+
+def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
+    """QC status × LOD stacked bar. Falls back to simple QC counts if no LOD."""
     if "SampleQC" not in dataset.samples.columns:
         return None
-    counts = dataset.samples["SampleQC"].value_counts()
-    return QcSummaryData(
-        categories=counts.index.tolist(),
-        counts=counts.values.tolist(),
-    )
+
+    from pyprideap.lod import get_lod_values
+
+    lod = get_lod_values(dataset)
+    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+
+    if lod is not None and len(lod) > 0:
+        # Cross QC status with above/below LOD
+        categories: list[str] = []
+        counts: list[int] = []
+
+        for qc_val in ["PASS", "WARN", "FAIL"]:
+            mask = dataset.samples["SampleQC"] == qc_val
+            if mask.sum() == 0:
+                continue
+            expr_subset = numeric.loc[mask]
+
+            above = 0
+            below = 0
+            for col in expr_subset.columns:
+                if col in lod.index:
+                    vals = expr_subset[col].dropna()
+                    above += int((vals > lod[col]).sum())
+                    below += int((vals <= lod[col]).sum())
+
+            if above > 0:
+                categories.append(f"{qc_val} & NPX > LOD")
+                counts.append(above)
+            if below > 0:
+                categories.append(f"{qc_val} & NPX ≤ LOD")
+                counts.append(below)
+
+        if categories:
+            return QcLodSummaryData(categories=categories, counts=counts)
+
+    # Fallback: simple QC counts
+    vc = dataset.samples["SampleQC"].value_counts()
+    return QcLodSummaryData(categories=vc.index.tolist(), counts=vc.values.tolist())
 
 
 def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
@@ -160,17 +242,18 @@ def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | No
     pca = PCA(n_components=n_comp)
     transformed = pca.fit_transform(imputed)
 
-    id_col = "SampleID" if "SampleID" in dataset.samples.columns else "SampleId"
-    labels = (
-        dataset.samples[id_col].astype(str).tolist()
-        if id_col in dataset.samples.columns
-        else [f"S{i}" for i in range(len(dataset.samples))]
-    )
-    groups = (
-        dataset.samples["SampleType"].astype(str).tolist()
-        if "SampleType" in dataset.samples.columns
-        else [""] * len(labels)
-    )
+    labels = _sample_ids(dataset)
+
+    # Use SampleQC for color if all SampleType values are the same
+    groups: list[str]
+    if "SampleType" in dataset.samples.columns:
+        types = dataset.samples["SampleType"].unique()
+        if len(types) == 1 and "SampleQC" in dataset.samples.columns:
+            groups = dataset.samples["SampleQC"].astype(str).tolist()
+        else:
+            groups = dataset.samples["SampleType"].astype(str).tolist()
+    else:
+        groups = [""] * len(labels)
 
     return PcaData(
         pc1=transformed[:, 0].tolist(),
@@ -189,7 +272,7 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
 
     corr = numeric.T.corr().fillna(0)
 
-    id_col = "SampleID" if "SampleID" in dataset.samples.columns else "SampleId"
+    id_col = _sample_id_col(dataset)
     if id_col in dataset.samples.columns:
         labels = dataset.samples.loc[numeric.index, id_col].astype(str).tolist()
     else:
@@ -208,12 +291,7 @@ def compute_missing_values(dataset: AffinityDataset) -> MissingValuesData:
     per_sample = is_missing.mean(axis=1).tolist()
     per_feature = is_missing.mean(axis=0).tolist()
 
-    id_col = "SampleID" if "SampleID" in dataset.samples.columns else "SampleId"
-    sample_ids = (
-        dataset.samples[id_col].astype(str).tolist()
-        if id_col in dataset.samples.columns
-        else [f"S{i}" for i in range(len(dataset.samples))]
-    )
+    sample_ids = _sample_ids(dataset)
     feature_ids = numeric.columns.tolist()
 
     return MissingValuesData(
@@ -251,20 +329,14 @@ def compute_detection_rate(dataset: AffinityDataset) -> DetectionRateData:
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     rates = numeric.notna().mean(axis=1).tolist()
 
-    id_col = "SampleID" if "SampleID" in dataset.samples.columns else "SampleId"
-    sample_ids = (
-        dataset.samples[id_col].astype(str).tolist()
-        if id_col in dataset.samples.columns
-        else [f"S{i}" for i in range(len(dataset.samples))]
-    )
-
-    return DetectionRateData(sample_ids=sample_ids, rates=rates)
+    return DetectionRateData(sample_ids=_sample_ids(dataset), rates=rates)
 
 
 def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     """Compute all applicable QC plot data for the dataset."""
     results: dict[str, object] = {}
     results["distribution"] = compute_distribution(dataset)
+    results["missing_frequency"] = compute_missing_frequency(dataset)
     results["qc_summary"] = compute_qc_summary(dataset)
     results["lod_analysis"] = compute_lod_analysis(dataset)
     results["pca"] = compute_pca(dataset)

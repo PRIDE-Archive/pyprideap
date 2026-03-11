@@ -8,9 +8,10 @@ from pyprideap.qc.compute import (  # noqa: E402
     DetectionRateData,
     DistributionData,
     LodAnalysisData,
+    MissingFrequencyData,
     MissingValuesData,
     PcaData,
-    QcSummaryData,
+    QcLodSummaryData,
 )
 from pyprideap.qc.render import (  # noqa: E402
     render_correlation,
@@ -18,6 +19,7 @@ from pyprideap.qc.render import (  # noqa: E402
     render_detection_rate,
     render_distribution,
     render_lod_analysis,
+    render_missing_frequency,
     render_missing_values,
     render_pca,
     render_qc_summary,
@@ -26,12 +28,29 @@ from pyprideap.qc.render import (  # noqa: E402
 
 class TestRenderFunctions:
     def test_render_distribution(self):
-        data = DistributionData(values=[1.0, 2.0, 3.0], xlabel="NPX (log2)")
+        data = DistributionData(
+            sample_ids=["S1", "S2"],
+            sample_values=[[1.0, 2.0, 3.0], [1.5, 2.5, 3.5]],
+            xlabel="NPX Value",
+        )
         fig = render_distribution(data)
         assert fig is not None
 
-    def test_render_qc_summary(self):
-        data = QcSummaryData(categories=["PASS", "FAIL"], counts=[10, 2])
+    def test_render_missing_frequency(self):
+        data = MissingFrequencyData(missing_freq=[0.0, 0.1, 0.3, 0.5, 1.0])
+        fig = render_missing_frequency(data)
+        assert fig is not None
+
+    def test_render_qc_summary_with_lod(self):
+        data = QcLodSummaryData(
+            categories=["PASS & NPX > LOD", "PASS & NPX ≤ LOD", "WARN & NPX > LOD"],
+            counts=[80, 15, 5],
+        )
+        fig = render_qc_summary(data)
+        assert fig is not None
+
+    def test_render_qc_summary_simple(self):
+        data = QcLodSummaryData(categories=["PASS", "FAIL"], counts=[10, 2])
         fig = render_qc_summary(data)
         assert fig is not None
 

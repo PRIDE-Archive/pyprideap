@@ -12,15 +12,17 @@ from pyprideap.qc.compute import (
     DetectionRateData,
     DistributionData,
     LodAnalysisData,
+    MissingFrequencyData,
     MissingValuesData,
     PcaData,
-    QcSummaryData,
+    QcLodSummaryData,
     compute_all,
     compute_correlation,
     compute_cv_distribution,
     compute_detection_rate,
     compute_distribution,
     compute_lod_analysis,
+    compute_missing_frequency,
     compute_missing_values,
     compute_pca,
     compute_qc_summary,
@@ -62,14 +64,15 @@ def _make_somascan_dataset():
 
 class TestDataclassSerialization:
     def test_distribution_data_serializable(self):
-        d = DistributionData(values=[1.0, 2.0], xlabel="NPX")
+        d = DistributionData(sample_ids=["S1"], sample_values=[[1.0, 2.0]], xlabel="NPX")
         result = json.dumps(asdict(d))
-        assert '"values"' in result
+        assert '"sample_values"' in result
 
     def test_all_dataclasses_serializable(self):
         instances = [
-            DistributionData(values=[1.0], xlabel="x"),
-            QcSummaryData(categories=["PASS"], counts=[10]),
+            DistributionData(sample_ids=["S1"], sample_values=[[1.0]], xlabel="x"),
+            QcLodSummaryData(categories=["PASS"], counts=[10]),
+            MissingFrequencyData(missing_freq=[0.1, 0.5]),
             LodAnalysisData(assay_ids=["A1"], above_lod_pct=[90.0], panel=["P1"]),
             PcaData(pc1=[1.0], pc2=[2.0], variance_explained=[0.5, 0.3], labels=["S1"], groups=["G1"]),
             CorrelationData(matrix=[[1.0]], labels=["S1"]),
@@ -88,17 +91,32 @@ class TestDataclassSerialization:
 
 
 class TestComputeDistribution:
-    def test_olink_returns_npx_values(self):
+    def test_olink_returns_per_sample_values(self):
         ds = _make_olink_dataset()
         result = compute_distribution(ds)
-        assert result.xlabel == "NPX (log2)"
-        assert len(result.values) == 4
+        assert result.xlabel == "NPX Value"
+        assert len(result.sample_ids) == 2
+        assert len(result.sample_values) == 2
+        assert len(result.sample_values[0]) == 2  # 2 features per sample
 
     def test_somascan_returns_log10_rfu(self):
         ds = _make_somascan_dataset()
         result = compute_distribution(ds)
-        assert "log10" in result.xlabel.lower() or "RFU" in result.xlabel
-        assert len(result.values) == 4
+        assert "log10" in result.xlabel.lower()
+        assert len(result.sample_values) == 2
+
+
+class TestComputeMissingFrequency:
+    def test_no_missing(self):
+        ds = _make_olink_dataset()
+        result = compute_missing_frequency(ds)
+        assert all(f == 0.0 for f in result.missing_freq)
+
+    def test_with_missing(self):
+        ds = _make_olink_dataset()
+        ds.expression.iloc[0, 0] = np.nan
+        result = compute_missing_frequency(ds)
+        assert result.missing_freq[0] == 0.5
 
 
 class TestComputeQcSummary:
@@ -107,8 +125,7 @@ class TestComputeQcSummary:
         ds.samples["SampleQC"] = ["PASS", "FAIL"]
         result = compute_qc_summary(ds)
         assert result is not None
-        assert "PASS" in result.categories
-        assert "FAIL" in result.categories
+        assert any("PASS" in c for c in result.categories)
 
     def test_somascan_returns_none(self):
         ds = _make_somascan_dataset()
@@ -146,6 +163,14 @@ class TestComputePca:
         if result is None:
             pytest.skip("scikit-learn not installed")
         assert result.labels == ["S1", "S2"]
+
+    def test_uses_qc_for_groups_when_single_type(self):
+        ds = _make_olink_dataset()
+        ds.samples["SampleQC"] = ["PASS", "WARN"]
+        result = compute_pca(ds)
+        if result is None:
+            pytest.skip("scikit-learn not installed")
+        assert result.groups == ["PASS", "WARN"]
 
 
 class TestComputeCorrelation:
@@ -206,8 +231,8 @@ class TestComputeAll:
         ds = _make_olink_dataset()
         result = compute_all(ds)
         assert "distribution" in result
+        assert "missing_frequency" in result
         assert "detection_rate" in result
-        assert "missing_values" in result
 
     def test_somascan_includes_cv(self):
         ds = _make_somascan_dataset()

@@ -8,9 +8,10 @@ from pyprideap.qc.compute import (
     DetectionRateData,
     DistributionData,
     LodAnalysisData,
+    MissingFrequencyData,
     MissingValuesData,
     PcaData,
-    QcSummaryData,
+    QcLodSummaryData,
 )
 
 if TYPE_CHECKING:
@@ -27,21 +28,107 @@ def _import_plotly():
         raise ImportError("Plotly is required for rendering. Install with: pip install pyprideap[plots]") from None
 
 
-_QC_COLORS = {"PASS": "#2ecc71", "WARN": "#f39c12", "FAIL": "#e74c3c", "NA": "#95a5a6"}
+_QC_LOD_COLORS = {
+    "PASS & NPX > LOD": "#2ecc71",
+    "PASS & NPX ≤ LOD": "#3498db",
+    "WARN & NPX > LOD": "#f39c12",
+    "WARN & NPX ≤ LOD": "#e74c3c",
+    "FAIL & NPX > LOD": "#95a5a6",
+    "FAIL & NPX ≤ LOD": "#7f8c8d",
+    "PASS": "#2ecc71",
+    "WARN": "#f39c12",
+    "FAIL": "#e74c3c",
+    "NA": "#95a5a6",
+}
 
 
 def render_distribution(data: DistributionData) -> Figure:
+    """Per-sample overlaid density curves (KDE-like via histograms with histnorm)."""
     go, _ = _import_plotly()
-    fig = go.Figure(data=[go.Histogram(x=data.values, nbinsx=50)])
-    fig.update_layout(title=data.title, xaxis_title=data.xlabel, yaxis_title=data.ylabel)
+    fig = go.Figure()
+
+    for sid, vals in zip(data.sample_ids, data.sample_values):
+        if len(vals) == 0:
+            continue
+        fig.add_trace(
+            go.Histogram(
+                x=vals,
+                name=sid,
+                opacity=0.6,
+                nbinsx=80,
+                histnorm="",
+            )
+        )
+
+    fig.update_layout(
+        title=data.title,
+        xaxis_title=data.xlabel,
+        yaxis_title=data.ylabel,
+        barmode="overlay",
+        legend_title="Sample",
+    )
     return fig
 
 
-def render_qc_summary(data: QcSummaryData) -> Figure:
+def render_missing_frequency(data: MissingFrequencyData) -> Figure:
+    """Histogram of per-assay missing frequency with 30% threshold line."""
     go, _ = _import_plotly()
-    colors = [_QC_COLORS.get(c, "#3498db") for c in data.categories]
-    fig = go.Figure(data=[go.Bar(x=data.categories, y=data.counts, marker_color=colors)])
-    fig.update_layout(title=data.title, xaxis_title="QC Status", yaxis_title="Count")
+    fig = go.Figure(
+        data=[
+            go.Histogram(
+                x=data.missing_freq,
+                nbinsx=40,
+                marker_color="#17a2b8",
+                name="Count of Assays",
+            )
+        ]
+    )
+    fig.add_vline(
+        x=0.3,
+        line_dash="dash",
+        line_color="red",
+        annotation_text="30% Threshold",
+        annotation_position="top right",
+    )
+    fig.update_layout(
+        title=data.title,
+        xaxis_title="Missing Frequency",
+        yaxis_title="Count of Assays",
+        yaxis_type="log",
+    )
+    return fig
+
+
+def render_qc_summary(data: QcLodSummaryData) -> Figure:
+    """QC × LOD stacked bar or simple QC bar chart."""
+    go, _ = _import_plotly()
+
+    total = sum(data.counts)
+    colors = [_QC_LOD_COLORS.get(c, "#3498db") for c in data.categories]
+
+    fig = go.Figure()
+    cumulative = 0.0
+    for cat, cnt, color in zip(data.categories, data.counts, colors):
+        pct = cnt / total * 100 if total > 0 else 0
+        fig.add_trace(
+            go.Bar(
+                x=["Samples"],
+                y=[pct],
+                name=f"{cat} {cnt} ({pct:.1f}%)",
+                marker_color=color,
+                text=f"{pct:.1f}%",
+                textposition="inside",
+            )
+        )
+        cumulative += pct
+
+    fig.update_layout(
+        title=data.title,
+        barmode="stack",
+        yaxis_title="Percentage of Samples",
+        yaxis=dict(range=[0, 100], ticksuffix="%"),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3),
+    )
     return fig
 
 
@@ -51,7 +138,7 @@ def render_lod_analysis(data: LodAnalysisData) -> Figure:
 
     df = pd.DataFrame({"Assay": data.assay_ids, "% Above LOD": data.above_lod_pct, "Panel": data.panel})
     fig = px.bar(df, x="Assay", y="% Above LOD", color="Panel", title=data.title)
-    fig.update_layout(xaxis_tickangle=-45)
+    fig.update_layout(xaxis_tickangle=-45, showlegend=True)
     return fig
 
 
@@ -66,6 +153,7 @@ def render_pca(data: PcaData) -> Figure:
         x="PC1",
         y="PC2",
         color="Group",
+        text="Label",
         hover_data=["Label"],
         title=data.title,
         labels={
@@ -73,6 +161,7 @@ def render_pca(data: PcaData) -> Figure:
             "PC2": f"PC2 ({ve[1] * 100:.1f}%)" if len(ve) > 1 else "PC2",
         },
     )
+    fig.update_traces(textposition="top center", marker=dict(size=10))
     return fig
 
 

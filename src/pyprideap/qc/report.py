@@ -9,9 +9,10 @@ from pyprideap.qc.compute import (
     DetectionRateData,
     DistributionData,
     LodAnalysisData,
+    MissingFrequencyData,
     MissingValuesData,
     PcaData,
-    QcSummaryData,
+    QcLodSummaryData,
     compute_all,
 )
 
@@ -30,7 +31,8 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
 
     _RENDERERS = {
         "distribution": (DistributionData, R.render_distribution),
-        "qc_summary": (QcSummaryData, R.render_qc_summary),
+        "missing_frequency": (MissingFrequencyData, R.render_missing_frequency),
+        "qc_summary": (QcLodSummaryData, R.render_qc_summary),
         "lod_analysis": (LodAnalysisData, R.render_lod_analysis),
         "pca": (PcaData, R.render_pca),
         "correlation": (CorrelationData, R.render_correlation),
