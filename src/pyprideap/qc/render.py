@@ -135,10 +135,52 @@ def render_qc_summary(data: QcLodSummaryData) -> Figure:
 def render_lod_analysis(data: LodAnalysisData) -> Figure:
     go, px = _import_plotly()
     import pandas as pd
+    from plotly.subplots import make_subplots
 
     df = pd.DataFrame({"Assay": data.assay_ids, "% Above LOD": data.above_lod_pct, "Panel": data.panel})
-    fig = px.bar(df, x="Assay", y="% Above LOD", color="Panel", title=data.title)
-    fig.update_layout(xaxis_tickangle=-45, showlegend=True)
+    df = df.sort_values("% Above LOD", ascending=False).reset_index(drop=True)
+    df["Rank"] = range(1, len(df) + 1)
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=["Assays Ranked by % Above LOD", "Distribution of % Above LOD"],
+        column_widths=[0.6, 0.4],
+    )
+
+    panels = sorted(df["Panel"].unique())
+    colors = px.colors.qualitative.Set2
+    panel_colors = {p: colors[i % len(colors)] for i, p in enumerate(panels)}
+
+    for panel in panels:
+        sub = df[df["Panel"] == panel]
+        fig.add_trace(
+            go.Scatter(
+                x=sub["Rank"],
+                y=sub["% Above LOD"],
+                mode="markers",
+                marker=dict(size=4, color=panel_colors[panel]),
+                name=panel,
+                text=sub["Assay"],
+                hovertemplate="%{text}<br>%{y:.1f}% above LOD<extra></extra>",
+            ),
+            row=1, col=1,
+        )
+
+    fig.add_trace(
+        go.Histogram(
+            x=df["% Above LOD"],
+            nbinsx=20,
+            marker_color="#3498db",
+            showlegend=False,
+        ),
+        row=1, col=2,
+    )
+
+    fig.update_xaxes(title_text="Assay Rank", row=1, col=1)
+    fig.update_yaxes(title_text="% Samples Above LOD", row=1, col=1)
+    fig.update_xaxes(title_text="% Above LOD", row=1, col=2)
+    fig.update_yaxes(title_text="Count of Assays", row=1, col=2)
+    fig.update_layout(title=data.title, legend=dict(orientation="h", yanchor="bottom", y=-0.25))
     return fig
 
 
@@ -185,6 +227,10 @@ def render_missing_values(data: MissingValuesData) -> Figure:
     go, _ = _import_plotly()
     from plotly.subplots import make_subplots
 
+    all_zero = all(r == 0.0 for r in data.missing_rate_per_sample) and all(
+        r == 0.0 for r in data.missing_rate_per_feature
+    )
+
     fig = make_subplots(rows=1, cols=2, subplot_titles=["Per Sample", "Per Feature"])
     fig.add_trace(go.Bar(x=data.sample_ids, y=data.missing_rate_per_sample, name="Samples"), row=1, col=1)
     fig.add_trace(
@@ -192,6 +238,14 @@ def render_missing_values(data: MissingValuesData) -> Figure:
     )
     fig.update_layout(title=data.title, showlegend=False)
     fig.update_yaxes(title_text="Missing Rate", row=1, col=1)
+
+    if all_zero:
+        fig.add_annotation(
+            text="No missing values detected",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=18, color="#999"),
+        )
+
     return fig
 
 

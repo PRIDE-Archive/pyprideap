@@ -16,7 +16,7 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, sep=None, engine="python")
     missing = _REQUIRED_COLS - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")
@@ -25,7 +25,11 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     samples = df[sample_cols].drop_duplicates(subset=["SampleID"]).reset_index(drop=True)
 
     feature_cols = [c for c in df.columns if c in _FEATURE_COLS]
-    features = df[feature_cols].drop_duplicates(subset=["OlinkID"]).reset_index(drop=True)
+    # Drop LOD from per-assay features since it varies per plate/sample
+    feature_cols_no_lod = [c for c in feature_cols if c != "LOD"]
+    features = df[feature_cols_no_lod].drop_duplicates(subset=["OlinkID"]).reset_index(drop=True)
+
+    sample_order = samples["SampleID"].values
 
     expression = df.pivot_table(
         index="SampleID",
@@ -33,7 +37,20 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
         values="NPX",
         aggfunc="first",
     )
-    expression = expression.reindex(samples["SampleID"].values).reset_index(drop=True)
+    expression = expression.reindex(sample_order).reset_index(drop=True)
+
+    metadata: dict[str, object] = {"source_file": str(path)}
+
+    # Build per-sample × per-assay LOD matrix if LOD column exists
+    if "LOD" in df.columns:
+        lod_matrix = df.pivot_table(
+            index="SampleID",
+            columns="OlinkID",
+            values="LOD",
+            aggfunc="first",
+        )
+        lod_matrix = lod_matrix.reindex(sample_order).reset_index(drop=True)
+        metadata["lod_matrix"] = lod_matrix
 
     platform = Platform.OLINK_EXPLORE
 
@@ -42,5 +59,5 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
         samples=samples,
         features=features,
         expression=expression,
-        metadata={"source_file": str(path)},
+        metadata=metadata,
     )

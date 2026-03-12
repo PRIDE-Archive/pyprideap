@@ -25,15 +25,30 @@ def read_olink_xlsx(path: str | Path) -> AffinityDataset:
     samples = df[sample_cols].drop_duplicates(subset=["SampleID"]).reset_index(drop=True)
 
     feature_cols = [c for c in df.columns if c in _FEATURE_COLS]
-    features = df[feature_cols].drop_duplicates(subset=["OlinkID"]).reset_index(drop=True)
+    feature_cols_no_lod = [c for c in feature_cols if c != "LOD"]
+    features = df[feature_cols_no_lod].drop_duplicates(subset=["OlinkID"]).reset_index(drop=True)
+
+    sample_order = samples["SampleID"].values
 
     expression = df.pivot_table(index="SampleID", columns="OlinkID", values="NPX", aggfunc="first")
-    expression = expression.reindex(samples["SampleID"].values).reset_index(drop=True)
+    expression = expression.reindex(sample_order).reset_index(drop=True)
+
+    metadata: dict[str, object] = {"source_file": str(path)}
+
+    if "LOD" in df.columns:
+        lod_matrix = df.pivot_table(
+            index="SampleID",
+            columns="OlinkID",
+            values="LOD",
+            aggfunc="first",
+        )
+        lod_matrix = lod_matrix.reindex(sample_order).reset_index(drop=True)
+        metadata["lod_matrix"] = lod_matrix
 
     return AffinityDataset(
         platform=Platform.OLINK_EXPLORE,
         samples=samples,
         features=features,
         expression=expression,
-        metadata={"source_file": str(path)},
+        metadata=metadata,
     )

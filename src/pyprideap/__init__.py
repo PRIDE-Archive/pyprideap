@@ -4,7 +4,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from pyprideap.core import AffinityDataset, Level, Platform, ValidationResult
 from pyprideap.filtering import filter_controls, filter_qc
-from pyprideap.lod import LodStats, compute_lod_from_controls, compute_lod_stats, get_valid_proteins
+from pyprideap.lod import LodMethod, LodStats, compute_lod_from_controls, compute_nclod, compute_lod_stats, get_bundled_fixed_lod_path, get_reported_lod, get_valid_proteins, load_fixed_lod
 from pyprideap.pride import PrideClient
 from pyprideap.qc.compute import compute_all as compute_qc
 from pyprideap.qc.report import qc_report
@@ -26,10 +26,15 @@ __all__ = [
     "Platform",
     "PrideClient",
     "ValidationResult",
+    "LodMethod",
     "compute_lod_from_controls",
+    "compute_nclod",
     "compute_lod_stats",
     "compute_qc",
+    "get_bundled_fixed_lod_path",
     "compute_stats",
+    "get_reported_lod",
+    "load_fixed_lod",
     "qc_report",
     "filter_controls",
     "filter_qc",

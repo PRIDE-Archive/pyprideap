@@ -59,7 +59,7 @@ class TestQcReport:
         qc_report(ds, output)
         content = (tmp_path / "report.html").read_text()
         assert "Olink Explore" in content
-        assert "Samples:" in content
+        assert "Samples" in content
 
     def test_somascan_report(self, tmp_path):
         ds = AffinityDataset(

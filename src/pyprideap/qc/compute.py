@@ -158,13 +158,14 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     if "SampleQC" not in dataset.samples.columns:
         return None
 
-    from pyprideap.lod import get_lod_values
+    from pyprideap.lod import _above_lod_matrix, get_lod_values
 
     lod = get_lod_values(dataset)
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
 
-    if lod is not None and len(lod) > 0:
-        # Cross QC status with above/below LOD
+    if lod is not None and (isinstance(lod, pd.DataFrame) or len(lod) > 0):
+        above_lod, has_lod = _above_lod_matrix(numeric, lod)
+
         categories: list[str] = []
         counts: list[int] = []
 
@@ -172,15 +173,12 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
             mask = dataset.samples["SampleQC"] == qc_val
             if mask.sum() == 0:
                 continue
-            expr_subset = numeric.loc[mask]
 
-            above = 0
-            below = 0
-            for col in expr_subset.columns:
-                if col in lod.index:
-                    vals = expr_subset[col].dropna()
-                    above += int((vals > lod[col]).sum())
-                    below += int((vals <= lod[col]).sum())
+            above_subset = above_lod.loc[mask] & has_lod.loc[mask]
+            valid_subset = numeric.loc[mask].notna() & has_lod.loc[mask]
+
+            above = int(above_subset.sum().sum())
+            below = int(valid_subset.sum().sum()) - above
 
             if above > 0:
                 categories.append(f"{qc_val} & NPX > LOD")
@@ -198,7 +196,7 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
 
 
 def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
-    from pyprideap.lod import compute_lod_from_controls, get_lod_values
+    from pyprideap.lod import _above_lod_matrix, compute_lod_from_controls, get_lod_values
 
     lod = get_lod_values(dataset)
     if lod is None:
@@ -208,6 +206,8 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
             return None
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    above_lod, has_lod = _above_lod_matrix(numeric, lod)
+
     assay_ids = []
     above_lod_pct = []
     panels = []
@@ -216,13 +216,15 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
     id_col = "OlinkID" if "OlinkID" in dataset.features.columns else dataset.features.columns[0]
 
     for i, col in enumerate(numeric.columns):
-        if col not in lod.index:
+        # Skip assays with no LOD for any sample
+        if not has_lod[col].any():
             continue
-        vals = numeric[col].dropna()
-        if len(vals) == 0:
+        vals_valid = numeric[col].notna() & has_lod[col]
+        n_valid = int(vals_valid.sum())
+        if n_valid == 0:
             pct = 0.0
         else:
-            pct = float((vals > lod[col]).sum() / len(vals) * 100)
+            pct = float(above_lod.loc[vals_valid, col].sum() / n_valid * 100)
 
         assay_ids.append(str(dataset.features[id_col].iloc[i]) if i < len(dataset.features) else col)
         above_lod_pct.append(pct)

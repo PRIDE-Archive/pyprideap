@@ -1,17 +1,62 @@
-"""LOD (Limit of Detection) computation and analysis for Olink datasets."""
+"""LOD (Limit of Detection) computation and analysis for Olink datasets.
+
+Implements three LOD sources following the OlinkAnalyze R package
+(https://cran.r-project.org/web/packages/OlinkAnalyze/vignettes/LOD.html):
+
+* **NCLOD** — computed from the project's own negative control samples:
+  ``LOD = median(NC_NPX) + max(0.2, 3 * SD(NC_NPX))``
+  When PlateID is available, a per-plate intensity-normalization
+  adjustment is applied so the LOD becomes plate-specific.
+  OlinkAnalyze recommends this method when ≥10 negative controls are
+  available.
+
+* **FixedLOD** — pre-computed LOD from an **external CSV** provided by
+  Olink (downloaded from the Document Download Center at olink.com).
+  These values are specific to the *Data Analysis Reference ID* and
+  reagent lot, not project-specific.  The CSV contains columns
+  ``OlinkID``, ``DataAnalysisRefID``, ``LODNPX``, ``LODCount``,
+  ``LODMethod``.  OlinkAnalyze recommends this when <10 negative
+  controls are available.
+
+* **Reported LOD** — LOD values already present in the NPX data file
+  (the ``LOD`` column).  These are read by the readers and stored as a
+  sample × assay ``lod_matrix`` in ``dataset.metadata``.  This is
+  *not* the same as FixedLOD.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, Platform
 from pyprideap.filtering import _CONTROL_SAMPLE_TYPES
 
 _MIN_CONTROLS_FOR_LOD = 10
 _MIN_STD_FLOOR = 0.2
+_NEGATIVE_CONTROL_TYPES = frozenset({
+    "negative",
+    "negative control",
+    "negative_control",
+    "neg",
+})
+
+
+class LodMethod(Enum):
+    """LOD source/method, following OlinkAnalyze conventions.
+
+    * ``NCLOD`` — computed from negative controls in the project data.
+    * ``FIXED`` — from an external Olink FixedLOD CSV (reagent-lot specific).
+    * ``REPORTED`` — LOD values already present in the NPX data file.
+    """
+
+    NCLOD = "NCLOD"
+    FIXED = "FIXED"
+    REPORTED = "REPORTED"
 
 
 @dataclass
@@ -38,54 +83,153 @@ class LodStats:
         return "\n".join(lines)
 
 
-def compute_lod_from_controls(dataset: AffinityDataset) -> pd.Series:
-    """Calculate LOD per assay from negative control samples.
+def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
+    """Return a boolean mask over ``dataset.samples`` for negative controls.
 
-    LOD = median(NPX) + max(0.2, 3 * std(NPX)) for each assay, computed
-    over samples whose SampleType indicates a negative control.
-    This follows the Olink OlinkAnalyze R package methodology.
-
-    Returns a Series indexed by feature (column) name with LOD values.
-    Raises ValueError if no negative controls are found or too few exist.
+    Raises ``ValueError`` when no suitable controls are found.
     """
     if "SampleType" not in dataset.samples.columns:
         raise ValueError("SampleType column required to identify negative controls")
 
-    is_control = dataset.samples["SampleType"].astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+    st = dataset.samples["SampleType"].astype(str).str.lower().str.strip()
 
-    # Further narrow to negative controls only
-    is_negative = (
-        dataset.samples["SampleType"]
-        .astype(str)
-        .str.lower()
-        .str.strip()
-        .isin({"negative", "negative control", "negative_control", "neg"})
-    )
+    is_negative = st.isin(_NEGATIVE_CONTROL_TYPES)
+    if is_negative.any():
+        return is_negative
 
-    control_mask = is_negative if is_negative.any() else is_control
+    # Fallback: use any control-like sample
+    is_control = st.isin(_CONTROL_SAMPLE_TYPES)
+    if is_control.any():
+        return is_control
+
+    raise ValueError("No negative control samples found in SampleType column")
+
+
+def _nclod_base(dataset: AffinityDataset) -> pd.Series:
+    """Compute a single (pooled) NCLOD per assay from negative controls.
+
+    Formula (OlinkAnalyze NCLOD, high-count path):
+    ``LOD = median(NC_NPX) + max(0.2, 3 * SD(NC_NPX))``
+
+    Returns a Series indexed by expression column name.
+    """
+    control_mask = _find_negative_controls(dataset)
     if control_mask.sum() < _MIN_CONTROLS_FOR_LOD:
         raise ValueError(
-            f"Need at least {_MIN_CONTROLS_FOR_LOD} control samples for LOD calculation, found {control_mask.sum()}"
+            f"Need at least {_MIN_CONTROLS_FOR_LOD} negative control samples "
+            f"for LOD calculation, found {control_mask.sum()}"
         )
 
-    control_expr = dataset.expression[control_mask]
-    numeric_expr = control_expr.apply(pd.to_numeric, errors="coerce")
+    numeric_expr = dataset.expression[control_mask].apply(pd.to_numeric, errors="coerce")
 
     medians = numeric_expr.median()
     stds = numeric_expr.std()
-    # Olink formula: median + max(0.2, 3*std) — floor of 0.2 NPX
-    lod = medians + np.maximum(_MIN_STD_FLOOR, 3 * stds)
-
-    return pd.Series(lod)
+    return medians + np.maximum(_MIN_STD_FLOOR, 3 * stds)
 
 
-def get_lod_values(dataset: AffinityDataset) -> pd.Series | None:
-    """Extract LOD values from the dataset's features table.
+def _intensity_adjustment(
+    dataset: AffinityDataset,
+) -> pd.Series | None:
+    """Per-plate intensity-normalisation adjustment factors.
 
-    Returns a Series indexed by expression column name, or None if LOD
-    is not available. Looks for a 'LOD' column in features and maps it
-    to the expression columns via OlinkID.
+    For intensity-normalised Olink data the LOD must be adjusted per
+    plate.  The adjustment factor for each plate is the median NPX of
+    all *non-control* samples on that plate (OlinkAnalyze convention).
+
+    Returns a Series indexed like ``dataset.samples`` with one
+    adjustment value per sample, or *None* when PlateID is unavailable.
     """
+    if "PlateID" not in dataset.samples.columns:
+        return None
+
+    st = dataset.samples.get("SampleType")
+    if st is not None:
+        is_ext_ctrl = st.astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+    else:
+        is_ext_ctrl = pd.Series(False, index=dataset.samples.index)
+
+    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    plates = dataset.samples["PlateID"]
+
+    # Global median across all non-control samples (reference)
+    global_median = numeric[~is_ext_ctrl].median(axis=1).median()
+
+    # Per-plate median of non-control sample medians
+    adjustments = pd.Series(0.0, index=dataset.samples.index, dtype=float)
+    for plate_id, grp_idx in plates.groupby(plates).groups.items():
+        plate_mask = dataset.samples.index.isin(grp_idx) & ~is_ext_ctrl
+        if plate_mask.sum() == 0:
+            continue
+        plate_median = numeric[plate_mask].median(axis=1).median()
+        # Adjustment = plate_median - global_median
+        adjustments.loc[grp_idx] = plate_median - global_median
+
+    return adjustments
+
+
+def compute_nclod(
+    dataset: AffinityDataset,
+    *,
+    plate_adjusted: bool = True,
+) -> pd.DataFrame | pd.Series:
+    """Compute NCLOD from negative controls (OlinkAnalyze method).
+
+    When *plate_adjusted* is True and PlateID is available, the base
+    NCLOD is adjusted per plate using the intensity-normalisation
+    factor, returning a sample × assay DataFrame.  Otherwise a single
+    Series (one LOD per assay) is returned.
+
+    Formula:
+        base_LOD  = median(NC_NPX) + max(0.2, 3 * SD(NC_NPX))
+        plate_LOD = base_LOD − plate_adjustment
+    """
+    base = _nclod_base(dataset)
+
+    if not plate_adjusted:
+        return base
+
+    adj = _intensity_adjustment(dataset)
+    if adj is None:
+        return base
+
+    # Broadcast: for each sample row, LOD = base - adjustment[row]
+    lod_matrix = pd.DataFrame(
+        np.tile(base.values, (len(dataset.samples), 1)),
+        columns=base.index,
+        index=dataset.expression.index,
+    )
+    lod_matrix = lod_matrix.subtract(adj.values, axis=0)
+    return lod_matrix
+
+
+# Keep the old name as an alias for backwards compatibility
+def compute_lod_from_controls(dataset: AffinityDataset) -> pd.DataFrame | pd.Series:
+    """Calculate LOD per assay from negative control samples.
+
+    This is an alias for :func:`compute_nclod` with plate adjustment
+    enabled.  See that function for full documentation.
+    """
+    return compute_nclod(dataset, plate_adjusted=True)
+
+
+def get_reported_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:
+    """Extract the LOD values reported in the NPX data file.
+
+    These are the LOD values present in the ``LOD`` column of the
+    original NPX CSV/XLSX file.  They are **not** the same as
+    OlinkAnalyze FixedLOD (which comes from an external reference CSV).
+
+    Returns a DataFrame (sample × assay) when plate-specific LOD is
+    available in ``metadata["lod_matrix"]``, a Series indexed by
+    expression column when only a single LOD per assay is stored in the
+    features table, or None if no LOD is available.
+    """
+    if "lod_matrix" in dataset.metadata:
+        lod_df = dataset.metadata["lod_matrix"]
+        if isinstance(lod_df, pd.DataFrame) and not lod_df.empty:
+            return lod_df
+
+    # Legacy fallback: single LOD per assay from features table
     if "LOD" not in dataset.features.columns:
         return None
 
@@ -93,25 +237,196 @@ def get_lod_values(dataset: AffinityDataset) -> pd.Series | None:
     if lod_series.isna().all():
         return None
 
-    # Map LOD to expression columns via OlinkID
     if "OlinkID" in dataset.features.columns:
         lod_map = dict(zip(dataset.features["OlinkID"], lod_series))
         return pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns})
 
-    # Fallback: assume features align with expression columns
     return pd.Series(lod_series.values, index=dataset.expression.columns[: len(lod_series)])
+
+
+_CONFIGS_DIR = Path(__file__).resolve().parent.parent.parent / "configs"
+
+# Mapping from Platform to bundled FixedLOD CSV filename.
+_BUNDLED_FIXED_LOD: dict[str, str] = {
+    "olink_explore": "Explore-3072-Fixed-LOD-2024-12-19.csv",
+    "olink_explore_ht": "Explore-HT-Fixed-LOD.csv",
+    "olink_reveal": "Reveal-Fixed-LOD.csv",
+}
+
+
+def get_bundled_fixed_lod_path(platform: Platform | str) -> Path | None:
+    """Return the path to the bundled FixedLOD CSV for a given platform.
+
+    Returns None if no bundled file exists for the platform.
+    """
+    key = platform.value if isinstance(platform, Platform) else str(platform).lower()
+    filename = _BUNDLED_FIXED_LOD.get(key)
+    if filename is None:
+        return None
+    path = _CONFIGS_DIR / filename
+    return path if path.exists() else None
+
+
+def load_fixed_lod(
+    dataset: AffinityDataset,
+    lod_file_path: str | Path | None = None,
+) -> pd.Series:
+    """Load FixedLOD from an external Olink reference CSV.
+
+    The CSV is downloaded from the Olink Document Download Center and
+    contains reagent-lot-specific LOD values.  Expected columns
+    (semicolon-delimited): ``OlinkID``, ``DataAnalysisRefID``,
+    ``LODNPX``, ``LODCount``, ``LODMethod``.
+
+    The function joins the CSV to the dataset on ``OlinkID`` (and
+    ``DataAnalysisRefID`` when available in the dataset features).
+
+    When *lod_file_path* is None, the function looks for a bundled
+    FixedLOD CSV matching the dataset platform under ``configs/``.
+
+    Args:
+        dataset: The AffinityDataset to apply LOD to.
+        lod_file_path: Path to the Olink FixedLOD CSV file.  If None,
+            uses the bundled file for the dataset's platform.
+
+    Returns:
+        A Series indexed by expression column name with one LOD per assay.
+
+    Raises:
+        FileNotFoundError: If the CSV file does not exist.
+        ValueError: If required columns are missing or no bundled file
+            is available for the platform.
+    """
+    if lod_file_path is None:
+        bundled = get_bundled_fixed_lod_path(dataset.platform)
+        if bundled is None:
+            raise ValueError(
+                f"No bundled FixedLOD file for platform {dataset.platform.value}. "
+                f"Provide lod_file_path explicitly."
+            )
+        path = bundled
+    else:
+        path = Path(lod_file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"FixedLOD file not found: {path}")
+
+    # Olink FixedLOD CSVs use semicolons as delimiter
+    lod_df = pd.read_csv(path, sep=";")
+
+    # Fallback: if semicolons produced a single column, try comma
+    if len(lod_df.columns) == 1:
+        lod_df = pd.read_csv(path, sep=",")
+
+    required = {"OlinkID", "LODNPX"}
+    missing = required - set(lod_df.columns)
+    if missing:
+        raise ValueError(f"FixedLOD CSV missing required columns: {sorted(missing)}")
+
+    # Join on OlinkID + DataAnalysisRefID when available
+    join_cols = ["OlinkID"]
+    if (
+        "DataAnalysisRefID" in lod_df.columns
+        and "DataAnalysisRefID" in dataset.features.columns
+    ):
+        join_cols.append("DataAnalysisRefID")
+
+    if len(join_cols) > 1:
+        feat_keys = dataset.features[join_cols].copy()
+        merged = feat_keys.merge(
+            lod_df[join_cols + ["LODNPX"]], on=join_cols, how="left",
+        )
+        lod_map = dict(zip(dataset.features["OlinkID"], merged["LODNPX"]))
+    else:
+        # Without DataAnalysisRefID, use OlinkID only (first match wins)
+        lod_dedup = lod_df.drop_duplicates(subset=["OlinkID"], keep="first")
+        lod_map = dict(zip(lod_dedup["OlinkID"], lod_dedup["LODNPX"]))
+
+    lod_series = pd.Series(
+        {col: lod_map.get(col, np.nan) for col in dataset.expression.columns}
+    )
+    return lod_series
+
+
+# Backwards-compat alias
+get_fixed_lod = get_reported_lod
+
+
+def get_lod_values(
+    dataset: AffinityDataset,
+    method: LodMethod | str = LodMethod.REPORTED,
+    *,
+    lod_file_path: str | Path | None = None,
+) -> pd.DataFrame | pd.Series | None:
+    """Return LOD values for *dataset* using the specified method.
+
+    Args:
+        dataset: The AffinityDataset to query.
+        method: Which LOD source to use:
+            - ``LodMethod.REPORTED`` (default) — LOD from the NPX data file.
+            - ``LodMethod.FIXED`` — FixedLOD from an external Olink CSV
+              (requires *lod_file_path*).
+            - ``LodMethod.NCLOD`` — computed from negative controls.
+            A string ``"REPORTED"`` / ``"FIXED"`` / ``"NCLOD"`` is also
+            accepted.
+        lod_file_path: Path to the Olink FixedLOD CSV file.  Required
+            when *method* is ``FIXED``.
+
+    Returns:
+        A DataFrame (sample × assay) or Series (one per assay), or None
+        if the requested method cannot produce LOD values.
+    """
+    if isinstance(method, str):
+        method = LodMethod(method.upper())
+
+    if method is LodMethod.NCLOD:
+        try:
+            return compute_nclod(dataset, plate_adjusted=True)
+        except ValueError:
+            return None
+
+    if method is LodMethod.FIXED:
+        return load_fixed_lod(dataset, lod_file_path)
+
+    # LodMethod.REPORTED
+    return get_reported_lod(dataset)
+
+
+def _above_lod_matrix(
+    expr_numeric: pd.DataFrame,
+    lod: pd.DataFrame | pd.Series,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (above_lod_bool, has_lod_bool) aligned to *expr_numeric*.
+
+    *lod* may be a DataFrame (sample × assay, plate-specific) or a
+    Series (one value per assay).
+    """
+    if isinstance(lod, pd.DataFrame):
+        lod_aligned = lod.reindex(columns=expr_numeric.columns)
+        above = expr_numeric.gt(lod_aligned)
+        has_lod = lod_aligned.notna()
+    else:
+        lod_aligned = lod.reindex(expr_numeric.columns)
+        above = expr_numeric.gt(lod_aligned, axis=1)
+        has_lod = pd.DataFrame(
+            np.tile(lod_aligned.notna().values, (len(expr_numeric), 1)),
+            columns=expr_numeric.columns,
+            index=expr_numeric.index,
+        )
+    return above, has_lod
 
 
 def compute_lod_stats(
     dataset: AffinityDataset,
-    lod: pd.Series | None = None,
+    lod: pd.DataFrame | pd.Series | None = None,
 ) -> LodStats:
     """Compute LOD-related statistics for the dataset.
 
     Args:
         dataset: The AffinityDataset to analyze.
-        lod: Pre-computed LOD values per assay. If None, attempts to
-             extract from the features table, then falls back to
+        lod: Pre-computed LOD values — a DataFrame (sample × assay) for
+             plate-specific LOD, or a Series (one per assay). If None,
+             attempts to extract from the dataset, then falls back to
              computing from controls.
 
     Returns:
@@ -120,14 +435,14 @@ def compute_lod_stats(
     source = "provided"
 
     if lod is None:
-        lod = get_lod_values(dataset)
+        lod = get_reported_lod(dataset)
         if lod is not None:
-            source = "features_table"
+            source = "reported"
 
     if lod is None:
         try:
-            lod = compute_lod_from_controls(dataset)
-            source = "computed_from_controls"
+            lod = compute_nclod(dataset, plate_adjusted=True)
+            source = "nclod"
         except ValueError:
             return LodStats(
                 lod_source="not_available",
@@ -138,19 +453,17 @@ def compute_lod_stats(
                 above_lod_per_panel={},
             )
 
-    # Align LOD with expression columns
-    lod_aligned = lod.reindex(dataset.expression.columns)
-    n_assays_with_lod = int(lod_aligned.notna().sum())
     n_assays_total = len(dataset.expression.columns)
 
     # Compute above-LOD matrix
     expr_numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
-    above_lod = expr_numeric.gt(lod_aligned, axis=1)
+    above_lod, has_lod = _above_lod_matrix(expr_numeric, lod)
 
-    # Only consider assays that have LOD values
-    has_lod = lod_aligned.notna()
-    above_lod_masked = above_lod.loc[:, has_lod]
-    expr_valid = expr_numeric.loc[:, has_lod].notna()
+    # Count assays that have any LOD value
+    n_assays_with_lod = int(has_lod.any(axis=0).sum())
+
+    above_lod_masked = above_lod & has_lod
+    expr_valid = expr_numeric.notna() & has_lod
 
     total_valid = int(expr_valid.sum().sum())
     total_above = int(above_lod_masked.sum().sum())
@@ -168,9 +481,10 @@ def compute_lod_stats(
     above_lod_per_panel: dict[str, float] = {}
     if "Panel" in dataset.features.columns and "OlinkID" in dataset.features.columns:
         panel_map = dict(zip(dataset.features["OlinkID"], dataset.features["Panel"]))
+        has_lod_per_col = has_lod.any(axis=0)
         for panel_name in dataset.features["Panel"].dropna().unique():
             panel_cols = [
-                c for c in dataset.expression.columns if panel_map.get(c) == panel_name and has_lod.get(c, False)
+                c for c in dataset.expression.columns if panel_map.get(c) == panel_name and has_lod_per_col.get(c, False)
             ]
             if panel_cols:
                 panel_above = int(above_lod_masked[panel_cols].sum().sum())
@@ -189,13 +503,13 @@ def compute_lod_stats(
 
 def get_valid_proteins(
     dataset: AffinityDataset,
-    lod: pd.Series | None = None,
+    lod: pd.DataFrame | pd.Series | None = None,
 ) -> list[str]:
     """Return protein/assay IDs that pass QC and are above LOD.
 
     A protein is valid if at least one non-control sample has:
     - SampleQC in (PASS, WARN) — or no QC column present
-    - NPX > LOD for that assay
+    - NPX > LOD for that assay (using plate-specific LOD when available)
 
     Args:
         dataset: The AffinityDataset to analyze.
@@ -220,15 +534,11 @@ def get_valid_proteins(
         try:
             lod = compute_lod_from_controls(dataset)
         except ValueError:
-            # No LOD available — return all proteins that have any non-NaN values
             expr_numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
             return sorted(expr_numeric.columns[expr_numeric.notna().any()].tolist())
 
-    lod_aligned = lod.reindex(ds.expression.columns)
     expr_numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
-
-    # For each assay, check if any sample has NPX > LOD
-    above_lod = expr_numeric.gt(lod_aligned, axis=1)
+    above_lod, _ = _above_lod_matrix(expr_numeric, lod)
     valid_cols = above_lod.any(axis=0)
 
     return sorted(valid_cols[valid_cols].index.tolist())

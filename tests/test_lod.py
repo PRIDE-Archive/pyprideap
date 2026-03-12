@@ -6,11 +6,14 @@ import pytest
 
 from pyprideap.core import AffinityDataset, Platform
 from pyprideap.lod import (
+    LodMethod,
     _MIN_STD_FLOOR,
     compute_lod_from_controls,
     compute_lod_stats,
     get_lod_values,
+    get_reported_lod,
     get_valid_proteins,
+    load_fixed_lod,
 )
 
 # Number of negative controls that satisfies the minimum (>=10)
@@ -152,7 +155,7 @@ class TestComputeLodStats:
             expression_values=([[5.0, 5.0, 5.0]] * 3 + [[1.0, 5.0, 1.0]] * 2 + [[0.5, 0.3, 0.4]] * _N_CONTROLS),
         )
         stats = compute_lod_stats(ds)
-        assert stats.lod_source == "features_table"
+        assert stats.lod_source == "reported"
         assert stats.n_assays_with_lod == 3
         assert 0.0 < stats.above_lod_rate <= 1.0
         assert len(stats.above_lod_per_sample) == n
@@ -161,7 +164,7 @@ class TestComputeLodStats:
     def test_stats_computed_from_controls(self):
         ds = _make_olink_dataset()
         stats = compute_lod_stats(ds)
-        assert stats.lod_source == "computed_from_controls"
+        assert stats.lod_source == "nclod"
         assert stats.n_assays_with_lod > 0
 
     def test_stats_not_available(self):
@@ -213,3 +216,134 @@ class TestGetValidProteins:
         valid = get_valid_proteins(ds)
         # No LOD available, returns all proteins with non-NaN values
         assert len(valid) == 3
+
+
+class TestGetReportedLod:
+    def test_extracts_from_lod_matrix_metadata(self):
+        ds = _make_olink_dataset()
+        # Simulate lod_matrix in metadata (sample × assay DataFrame)
+        lod_matrix = pd.DataFrame(
+            [[1.0, 2.0, 3.0]] * len(ds.samples),
+            columns=ds.expression.columns,
+        )
+        ds.metadata["lod_matrix"] = lod_matrix
+        result = get_reported_lod(ds)
+        assert isinstance(result, pd.DataFrame)
+        assert result.shape == ds.expression.shape
+
+    def test_falls_back_to_features_lod(self):
+        ds = _make_olink_dataset(lod_values=[1.5, 2.5, 3.5])
+        result = get_reported_lod(ds)
+        assert isinstance(result, pd.Series)
+        assert result["OID1"] == 2.5
+
+    def test_returns_none_without_lod(self):
+        ds = _make_olink_dataset()
+        result = get_reported_lod(ds)
+        assert result is None
+
+
+class TestLoadFixedLod:
+    def test_loads_from_semicolon_csv(self, tmp_path):
+        csv_path = tmp_path / "fixedLOD.csv"
+        csv_path.write_text(
+            "OlinkID;DataAnalysisRefID;LODNPX;LODCount;LODMethod\n"
+            "OID0;REF001;1.1;100;lod_npx\n"
+            "OID1;REF001;2.2;200;lod_npx\n"
+            "OID2;REF001;3.3;300;lod_npx\n"
+        )
+        ds = _make_olink_dataset()
+        lod = load_fixed_lod(ds, csv_path)
+        assert isinstance(lod, pd.Series)
+        assert abs(lod["OID0"] - 1.1) < 1e-10
+        assert abs(lod["OID1"] - 2.2) < 1e-10
+        assert abs(lod["OID2"] - 3.3) < 1e-10
+
+    def test_loads_from_comma_csv(self, tmp_path):
+        csv_path = tmp_path / "fixedLOD.csv"
+        csv_path.write_text(
+            "OlinkID,DataAnalysisRefID,LODNPX,LODCount,LODMethod\n"
+            "OID0,REF001,1.1,100,lod_npx\n"
+            "OID1,REF001,2.2,200,lod_npx\n"
+            "OID2,REF001,3.3,300,lod_npx\n"
+        )
+        ds = _make_olink_dataset()
+        lod = load_fixed_lod(ds, csv_path)
+        assert isinstance(lod, pd.Series)
+        assert abs(lod["OID0"] - 1.1) < 1e-10
+
+    def test_joins_on_data_analysis_ref_id(self, tmp_path):
+        csv_path = tmp_path / "fixedLOD.csv"
+        csv_path.write_text(
+            "OlinkID;DataAnalysisRefID;LODNPX;LODCount;LODMethod\n"
+            "OID0;REF001;1.0;100;lod_npx\n"
+            "OID0;REF002;9.9;100;lod_npx\n"
+            "OID1;REF001;2.0;200;lod_npx\n"
+            "OID2;REF001;3.0;300;lod_npx\n"
+        )
+        ds = _make_olink_dataset()
+        ds.features["DataAnalysisRefID"] = "REF001"
+        lod = load_fixed_lod(ds, csv_path)
+        # Should pick REF001 (1.0), not REF002 (9.9)
+        assert abs(lod["OID0"] - 1.0) < 1e-10
+
+    def test_raises_on_missing_file(self):
+        ds = _make_olink_dataset()
+        with pytest.raises(FileNotFoundError):
+            load_fixed_lod(ds, "/nonexistent/file.csv")
+
+    def test_raises_on_missing_columns(self, tmp_path):
+        csv_path = tmp_path / "bad.csv"
+        csv_path.write_text("OlinkID;SomeOtherCol\nOID0;1.0\n")
+        ds = _make_olink_dataset()
+        with pytest.raises(ValueError, match="LODNPX"):
+            load_fixed_lod(ds, csv_path)
+
+    def test_raises_without_bundled_or_path(self):
+        ds = _make_olink_dataset()
+        # olink_target has no bundled file
+        ds.platform = Platform.OLINK_TARGET
+        with pytest.raises(ValueError, match="No bundled"):
+            load_fixed_lod(ds)
+
+
+class TestLodMethodDispatch:
+    def test_reported_method(self):
+        ds = _make_olink_dataset(lod_values=[1.0, 2.0, 3.0])
+        lod = get_lod_values(ds, method=LodMethod.REPORTED)
+        assert lod is not None
+        assert lod["OID0"] == 1.0
+
+    def test_reported_is_default(self):
+        ds = _make_olink_dataset(lod_values=[1.0, 2.0, 3.0])
+        lod = get_lod_values(ds)
+        assert lod is not None
+        assert lod["OID0"] == 1.0
+
+    def test_nclod_method(self):
+        ds = _make_olink_dataset()
+        lod = get_lod_values(ds, method="NCLOD")
+        assert lod is not None
+
+    def test_fixed_without_bundled_raises(self):
+        ds = _make_olink_dataset()
+        ds.platform = Platform.OLINK_TARGET
+        with pytest.raises(ValueError, match="No bundled"):
+            get_lod_values(ds, method=LodMethod.FIXED)
+
+    def test_fixed_with_file(self, tmp_path):
+        csv_path = tmp_path / "fixedLOD.csv"
+        csv_path.write_text(
+            "OlinkID;DataAnalysisRefID;LODNPX;LODCount;LODMethod\n"
+            "OID0;REF001;1.1;100;lod_npx\n"
+            "OID1;REF001;2.2;200;lod_npx\n"
+            "OID2;REF001;3.3;300;lod_npx\n"
+        )
+        ds = _make_olink_dataset()
+        lod = get_lod_values(ds, method="FIXED", lod_file_path=csv_path)
+        assert abs(lod["OID0"] - 1.1) < 1e-10
+
+    def test_string_method_names(self):
+        ds = _make_olink_dataset(lod_values=[1.0, 2.0, 3.0])
+        assert get_lod_values(ds, method="REPORTED") is not None
+        assert get_lod_values(ds, method="NCLOD") is not None
