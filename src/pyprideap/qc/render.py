@@ -260,8 +260,9 @@ def render_detection_rate(data: DetectionRateData) -> Figure:
     go, _ = _import_plotly()
     import numpy as np
 
-    median_rate = float(np.median(data.rates))
     fig = go.Figure(data=[go.Bar(x=data.sample_ids, y=data.rates)])
-    fig.add_hline(y=median_rate, line_dash="dash", line_color="red", annotation_text=f"Median: {median_rate:.2f}")
+    if len(data.rates) > 0:
+        median_rate = float(np.median(data.rates))
+        fig.add_hline(y=median_rate, line_dash="dash", line_color="red", annotation_text=f"Median: {median_rate:.2f}")
     fig.update_layout(title=data.title, xaxis_title="Sample", yaxis_title="Detection Rate")
     return fig

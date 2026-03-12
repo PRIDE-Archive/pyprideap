@@ -212,10 +212,12 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
     above_lod_pct = []
     panels = []
 
-    panel_col = dataset.features.get("Panel")
     id_col = "OlinkID" if "OlinkID" in dataset.features.columns else dataset.features.columns[0]
+    id_to_panel: dict[str, str] = {}
+    if "Panel" in dataset.features.columns:
+        id_to_panel = dict(zip(dataset.features[id_col].astype(str), dataset.features["Panel"].astype(str)))
 
-    for i, col in enumerate(numeric.columns):
+    for col in numeric.columns:
         # Skip assays with no LOD for any sample
         if not has_lod[col].any():
             continue
@@ -226,9 +228,9 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
         else:
             pct = float(above_lod.loc[vals_valid, col].sum() / n_valid * 100)
 
-        assay_ids.append(str(dataset.features[id_col].iloc[i]) if i < len(dataset.features) else col)
+        assay_ids.append(str(col))
         above_lod_pct.append(pct)
-        panels.append(str(panel_col.iloc[i]) if panel_col is not None and i < len(panel_col) else "")
+        panels.append(id_to_panel.get(str(col), ""))
 
     if not assay_ids:
         return None
@@ -282,7 +284,7 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
     if numeric.shape[0] > max_samples:
         numeric = numeric.sample(n=max_samples, random_state=42)
 
-    corr = numeric.T.corr().fillna(0)
+    corr = numeric.T.corr()
 
     id_col = _sample_id_col(dataset)
     if id_col in dataset.samples.columns:
@@ -291,7 +293,7 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
         labels = [f"S{i}" for i in range(len(numeric))]
 
     return CorrelationData(
-        matrix=[row.tolist() for row in corr.values],
+        matrix=[[None if np.isnan(v) else v for v in row] for row in corr.values],
         labels=labels,
     )
 
@@ -321,12 +323,13 @@ def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | No
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     means = numeric.mean()
     stds = numeric.std()
-    cv = (stds / means).fillna(0)
+    cv = stds / means
+    cv = cv.replace([np.inf, -np.inf], np.nan).dropna()
 
-    feature_ids = numeric.columns.tolist()
+    feature_ids = cv.index.tolist()
     dilution = (
         dataset.features["Dilution"].astype(str).tolist()
-        if "Dilution" in dataset.features.columns and len(dataset.features) == len(feature_ids)
+        if "Dilution" in dataset.features.columns and len(dataset.features) == len(numeric.columns)
         else []
     )
 

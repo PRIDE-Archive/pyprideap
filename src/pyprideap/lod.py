@@ -181,7 +181,9 @@ def compute_nclod(
 
     Formula:
         base_LOD  = median(NC_NPX) + max(0.2, 3 * SD(NC_NPX))
-        plate_LOD = base_LOD − plate_adjustment
+        plate_LOD = base_LOD + plate_adjustment
+    where plate_adjustment = plate_median - global_median.
+    A plate with higher signal has a higher noise floor, so the LOD increases.
     """
     base = _nclod_base(dataset)
 
@@ -192,13 +194,13 @@ def compute_nclod(
     if adj is None:
         return base
 
-    # Broadcast: for each sample row, LOD = base - adjustment[row]
+    # Broadcast: for each sample row, LOD = base + adjustment[row]
     lod_matrix = pd.DataFrame(
         np.tile(base.values, (len(dataset.samples), 1)),
         columns=base.index,
         index=dataset.expression.index,
     )
-    lod_matrix = lod_matrix.subtract(adj.values, axis=0)
+    lod_matrix = lod_matrix.add(adj.values, axis=0)
     return lod_matrix
 
 
@@ -349,7 +351,7 @@ def load_fixed_lod(
 
 
 # Backwards-compat alias
-get_fixed_lod = get_reported_lod
+get_fixed_lod = load_fixed_lod
 
 
 def get_lod_values(

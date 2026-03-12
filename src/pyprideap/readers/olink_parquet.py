@@ -35,6 +35,9 @@ def read_olink_parquet(path: str | Path) -> AffinityDataset:
     )
     expression = expression.reindex(samples["SampleID"].values).reset_index(drop=True)
 
+    # Align features to match expression column order (pivot_table sorts columns)
+    features = features.set_index("OlinkID").reindex(expression.columns).reset_index()
+
     return AffinityDataset(
         platform=Platform.OLINK_EXPLORE_HT,
         samples=samples,

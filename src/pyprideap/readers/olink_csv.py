@@ -39,6 +39,9 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     )
     expression = expression.reindex(sample_order).reset_index(drop=True)
 
+    # Align features to match expression column order (pivot_table sorts columns)
+    features = features.set_index("OlinkID").reindex(expression.columns).reset_index()
+
     metadata: dict[str, object] = {"source_file": str(path)}
 
     # Build per-sample × per-assay LOD matrix if LOD column exists

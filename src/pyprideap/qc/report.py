@@ -168,6 +168,117 @@ document.addEventListener('DOMContentLoaded', function() {
 """
 
 
+def _lod_source_info(dataset: AffinityDataset) -> dict[str, object]:
+    """Detect which LOD sources are available and which one is active."""
+    from pyprideap.lod import (
+        _MIN_CONTROLS_FOR_LOD,
+        _find_negative_controls,
+        get_bundled_fixed_lod_path,
+        get_reported_lod,
+    )
+
+    info: dict[str, object] = {"active": None, "sources": []}
+    sources: list[dict[str, str]] = []
+
+    # 1. Reported LOD
+    reported = get_reported_lod(dataset)
+    if reported is not None:
+        n_assays = int(reported.notna().any(axis=0).sum()) if hasattr(reported, "shape") and reported.ndim == 2 else int(reported.notna().sum())
+        sources.append({
+            "name": "Reported LOD",
+            "status": "available",
+            "detail": f"LOD column in NPX file ({n_assays} assays)",
+        })
+        if info["active"] is None:
+            info["active"] = "Reported LOD"
+    else:
+        sources.append({"name": "Reported LOD", "status": "unavailable", "detail": "No LOD column in data file"})
+
+    # 2. NCLOD from negative controls
+    try:
+        nc_mask = _find_negative_controls(dataset)
+        n_controls = int(nc_mask.sum())
+        if n_controls >= _MIN_CONTROLS_FOR_LOD:
+            sources.append({
+                "name": "NCLOD",
+                "status": "available",
+                "detail": f"Computed from {n_controls} negative control samples",
+            })
+            if info["active"] is None:
+                info["active"] = "NCLOD"
+        else:
+            sources.append({
+                "name": "NCLOD",
+                "status": "insufficient",
+                "detail": f"Only {n_controls} negative controls (need \u2265{_MIN_CONTROLS_FOR_LOD})",
+            })
+    except (ValueError, KeyError):
+        has_st = "SampleType" in dataset.samples.columns
+        sources.append({
+            "name": "NCLOD",
+            "status": "unavailable",
+            "detail": "No SampleType column" if not has_st else "No negative control samples found",
+        })
+
+    # 3. FixedLOD from bundled configs
+    fixed_path = get_bundled_fixed_lod_path(dataset.platform)
+    if fixed_path is not None:
+        sources.append({
+            "name": "FixedLOD",
+            "status": "available",
+            "detail": f"Bundled reference file ({fixed_path.name})",
+        })
+    else:
+        sources.append({
+            "name": "FixedLOD",
+            "status": "unavailable",
+            "detail": f"No bundled file for {dataset.platform.value}",
+        })
+
+    info["sources"] = sources
+    return info
+
+
+def _render_lod_card(lod_info: dict[str, object]) -> str:
+    """Render the LOD source summary as an HTML card."""
+    status_icons = {"available": "\u2705", "unavailable": "\u274c", "insufficient": "\u26a0\ufe0f"}
+    rows = []
+    for src in lod_info["sources"]:
+        icon = status_icons.get(src["status"], "")
+        active = " (active)" if src["name"] == lod_info["active"] else ""
+        name_style = "font-weight:600;" if active else ""
+        rows.append(
+            f"<tr>"
+            f'<td style="padding:4px 10px;">{icon}</td>'
+            f'<td style="padding:4px 10px;{name_style}">{src["name"]}{active}</td>'
+            f'<td style="padding:4px 10px;color:#555;">{src["detail"]}</td>'
+            f"</tr>"
+        )
+
+    return (
+        '<div class="plot-card" id="lod-sources" style="margin-bottom:24px;">'
+        '<div class="plot-header">'
+        "<h3>LOD Sources</h3>"
+        '<button class="help-toggle" title="About LOD sources" aria-label="Help">?</button>'
+        "</div>"
+        '<div class="help-text">'
+        "The Limit of Detection (LOD) determines whether a measured protein signal is above background noise. "
+        "Three LOD sources are supported: "
+        "<strong>Reported LOD</strong> comes from the LOD column in the original NPX file (per sample and assay). "
+        "<strong>NCLOD</strong> is computed from negative control samples in the dataset using the formula "
+        "LOD = median(NC) + max(0.2, 3&times;SD(NC)), following the OlinkAnalyze R package. "
+        "Requires &ge;10 negative controls. "
+        "<strong>FixedLOD</strong> is a pre-computed reference from Olink, specific to the reagent lot and "
+        "Data Analysis Reference ID. "
+        "The report uses the first available source (Reported &gt; NCLOD &gt; FixedLOD)."
+        "</div>"
+        '<table style="width:100%;border-collapse:collapse;margin-top:8px;">'
+        f'{"".join(rows)}'
+        "</table>"
+        "</div>"
+    )
+
+
 def _count_proteins_above_lod(dataset: AffinityDataset) -> int | None:
     """Count unique proteins where >50% of samples are above LOD."""
     import pandas as pd
@@ -300,6 +411,10 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
     # Proteins above LOD (>50% of samples)
     n_proteins_above_lod = _count_proteins_above_lod(dataset)
 
+    # LOD source summary card
+    lod_info = _lod_source_info(dataset)
+    lod_card_html = _render_lod_card(lod_info)
+
     stat_items = [
         f'<span class="stat-item"><strong>Platform</strong> {platform_label}</span>',
         f'<span class="stat-item"><strong>Samples</strong> {n_samples}</span>',
@@ -326,6 +441,7 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
         f"        </div>\n"
         "    </header>\n"
         f'    <nav class="toc"><h2>Contents</h2><ul>{"".join(toc_items)}</ul></nav>\n'
+        f"    {lod_card_html}\n"
         f"    {''.join(group_sections)}\n"
         f'    <footer>Generated by <strong>pyprideap</strong></footer>\n'
         f"    <script>\n{_JS}    </script>\n"

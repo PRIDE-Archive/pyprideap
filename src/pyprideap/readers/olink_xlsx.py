@@ -33,6 +33,9 @@ def read_olink_xlsx(path: str | Path) -> AffinityDataset:
     expression = df.pivot_table(index="SampleID", columns="OlinkID", values="NPX", aggfunc="first")
     expression = expression.reindex(sample_order).reset_index(drop=True)
 
+    # Align features to match expression column order (pivot_table sorts columns)
+    features = features.set_index("OlinkID").reindex(expression.columns).reset_index()
+
     metadata: dict[str, object] = {"source_file": str(path)}
 
     if "LOD" in df.columns:
