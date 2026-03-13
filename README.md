@@ -1,6 +1,6 @@
 # pyprideap
 
-Python library for reading, validating, and analyzing affinity proteomics datasets from the [PRIDE Affinity Archive (PAD)](https://www.ebi.ac.uk/pride/).
+Python PRIDE Affinity Proteomics (pyprideap), a library for reading, validating, and analyzing affinity proteomics datasets from the [PRIDE Affinity Archive (PAD)](https://www.ebi.ac.uk/pride/).
 
 Supports **Olink** (Explore, Explore HT, Target, Reveal) and **SomaScan** platforms.
 
