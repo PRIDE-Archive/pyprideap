@@ -1,3 +1,5 @@
+"""Functional tests for PRIDE Archive API client."""
+
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -222,7 +222,7 @@ def select_bridge_samples(
         if not pass_ids.empty:
             score = score.loc[pass_ids]
 
-    return score.sort_values(ascending=False).head(n).index.tolist()
+    return list(score.sort_values(ascending=False).head(n).index)
 
 
 def assess_bridgeability(

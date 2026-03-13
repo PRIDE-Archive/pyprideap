@@ -119,7 +119,7 @@ def randomize_plates(
 
     result["PlateNumber"] = result["PlateNumber"].astype(int)
 
-    return result
+    return result  # type: ignore[no-any-return]
 
 
 # ======================================================================
@@ -137,7 +137,7 @@ def _resolve_sample_id_column(df: pd.DataFrame) -> str:
 
 def _shuffle_unpaired(samples: pd.DataFrame, rng: np.random.Generator) -> np.ndarray:
     """Return a shuffled array of row indices."""
-    indices = samples.index.to_numpy().copy()
+    indices: np.ndarray = np.asarray(samples.index).copy()
     rng.shuffle(indices)
     return indices
 
@@ -160,7 +160,7 @@ def _shuffle_paired(
 
     ordered: list[np.ndarray] = []
     for key in group_keys:
-        member_indices = groups[key].copy()
+        member_indices = np.asarray(groups[key]).copy()
         if len(member_indices) > plate_size:
             raise ValueError(
                 f"Paired group '{key}' has {len(member_indices)} samples, "

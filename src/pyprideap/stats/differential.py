@@ -226,7 +226,7 @@ def ttest(
     if result.empty:
         return _empty_ttest_frame()
 
-    result["adj_p_value"] = _bh_adjust(result["p_value"].values)
+    result["adj_p_value"] = _bh_adjust(np.asarray(result["p_value"]))
     result["significant"] = result["adj_p_value"] < 0.05
     return result
 
@@ -348,7 +348,7 @@ def wilcoxon(
     if result.empty:
         return _empty_ttest_frame()
 
-    result["adj_p_value"] = _bh_adjust(result["p_value"].values)
+    result["adj_p_value"] = _bh_adjust(np.asarray(result["p_value"]))
     result["significant"] = result["adj_p_value"] < 0.05
     return result
 
@@ -393,6 +393,7 @@ def anova(
     use_ols = covariates is not None and len(covariates) > 0
 
     if use_ols:
+        assert covariates is not None  # narrowing for mypy
         # Validate covariates exist
         for cov in covariates:
             if cov not in dataset.samples.columns:
@@ -404,6 +405,7 @@ def anova(
         vals = dataset.expression[protein_id]
 
         if use_ols:
+            assert covariates is not None  # narrowing for mypy
             stat, pval, df_b, df_w = _anova_ols(vals, groups, dataset.samples, group_var, covariates)
         else:
             # Simple one-way ANOVA via scipy
@@ -446,7 +448,7 @@ def anova(
     if result.empty:
         return _empty_anova_frame()
 
-    result["adj_p_value"] = _bh_adjust(result["p_value"].values)
+    result["adj_p_value"] = _bh_adjust(np.asarray(result["p_value"]))
     result["significant"] = result["adj_p_value"] < 0.05
     return result
 
@@ -630,7 +632,7 @@ def anova_posthoc(
             ]
         )
 
-    result_df["adj_p_value"] = _bh_adjust(result_df["p_value"].values)
+    result_df["adj_p_value"] = _bh_adjust(np.asarray(result_df["p_value"]))
     return result_df
 
 

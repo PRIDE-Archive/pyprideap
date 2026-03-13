@@ -92,7 +92,7 @@ def _detect_olink_platform(olink_ids: pd.Series) -> Platform:
     counts = prefixes.map(_OLINK_ID_PREFIX_MAP).value_counts()
     if counts.empty:
         return Platform.OLINK_EXPLORE
-    return counts.index[0]
+    return Platform(counts.index[0])
 
 
 def read_olink_csv(path: str | Path) -> AffinityDataset:

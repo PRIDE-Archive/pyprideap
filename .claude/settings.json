@@ -77,7 +77,8 @@
       "Bash(/Users/yperez/work/pyap/.venv/bin/ruff check:*)",
       "Bash(/Users/yperez/work/pyap/.venv/bin/ruff format:*)",
       "Bash(python -m pytest tests/test_qc_render.py tests/test_qc_compute.py -x -q)",
-      "Bash(pip3 show:*)"
+      "Bash(pip3 show:*)",
+      "Bash(/Users/yperez/work/pyap/.venv/bin/python -m mypy src/pyprideap/ --ignore-missing-imports)"
     ],
     "additionalDirectories": [
       "/Users/yperez/work/pyap/configs",

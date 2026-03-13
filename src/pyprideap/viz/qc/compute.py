@@ -70,7 +70,7 @@ class HeatmapData:
 
 @dataclass
 class CorrelationData:
-    matrix: list[list[float]]
+    matrix: list[list[float | None]]
     labels: list[str]
     title: str = "Sample Correlation"
 
@@ -546,6 +546,7 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
     missing_freq_values: list[float] = []
 
     if has_lod_data:
+        assert lod is not None  # narrowing for mypy
         above_lod, has_lod = _above_lod_matrix(numeric, lod)
 
         for idx in range(len(numeric)):
@@ -773,8 +774,8 @@ def compute_lod_comparison(dataset: AffinityDataset) -> LodComparisonData | None
                     "name_x": names[i],
                     "name_y": names[j],
                     "assay_ids": [str(c) for c in common],
-                    "values_x": np.round(sx.reindex(common).values, 4).tolist(),
-                    "values_y": np.round(sy.reindex(common).values, 4).tolist(),
+                    "values_x": np.round(np.asarray(sx.reindex(common)), 4).tolist(),
+                    "values_y": np.round(np.asarray(sy.reindex(common)), 4).tolist(),
                     "panels": [panel_map.get(str(c), "") for c in common],
                 }
             )

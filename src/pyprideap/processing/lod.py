@@ -144,7 +144,8 @@ def _nclod_base(dataset: AffinityDataset) -> pd.Series:
 
     medians = numeric_expr.median()
     stds = numeric_expr.std()
-    return medians + np.maximum(_MIN_STD_FLOOR, 3 * stds)
+    result: pd.Series = medians + np.maximum(_MIN_STD_FLOOR, 3 * stds)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +204,8 @@ def compute_soma_elod(dataset: AffinityDataset) -> pd.Series:
     # but we compute manually to avoid the scipy dependency.
     mads = (numeric_expr.subtract(medians, axis=1)).abs().median()
 
-    return medians + _SOMA_ELOD_K * _MAD_TO_SD * mads
+    result: pd.Series = medians + _SOMA_ELOD_K * _MAD_TO_SD * mads
+    return result
 
 
 def _intensity_adjustment(
@@ -275,12 +277,12 @@ def compute_nclod(
 
     # Broadcast: for each sample row, LOD = base + adjustment[row]
     lod_matrix = pd.DataFrame(
-        np.tile(base.values, (len(dataset.samples), 1)),
+        np.tile(np.asarray(base), (len(dataset.samples), 1)),
         columns=base.index,
         index=dataset.expression.index,
     )
-    lod_matrix = lod_matrix.add(adj.values, axis=0)
-    return lod_matrix
+    adjusted: pd.DataFrame = lod_matrix.add(np.asarray(adj), axis=0)
+    return adjusted
 
 
 # Keep the old name as an alias for backwards compatibility
@@ -488,7 +490,7 @@ def _above_lod_matrix(
         lod_aligned = lod.reindex(expr_numeric.columns)
         above = expr_numeric.gt(lod_aligned, axis=1)
         has_lod = pd.DataFrame(
-            np.tile(lod_aligned.notna().values, (len(expr_numeric), 1)),
+            np.tile(np.asarray(lod_aligned.notna()), (len(expr_numeric), 1)),
             columns=expr_numeric.columns,
             index=expr_numeric.index,
         )

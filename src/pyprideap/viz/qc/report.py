@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pyprideap.core import AffinityDataset
 from pyprideap.viz.qc.compute import (
@@ -12,8 +13,10 @@ from pyprideap.viz.qc.compute import (
     LodAnalysisData,
     LodComparisonData,
     NormScaleData,
+    PcaData,
     PlateCvData,
     QcLodSummaryData,
+    UmapData,
     compute_all,
 )
 
@@ -371,7 +374,7 @@ document.addEventListener('DOMContentLoaded', function() {
 """
 
 
-def _lod_source_info(dataset: AffinityDataset) -> dict[str, object]:
+def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
     """Detect which LOD sources are available and which one is active."""
     from pyprideap.processing.lod import (
         _MIN_CONTROLS_FOR_LOD,
@@ -380,7 +383,7 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, object]:
         get_reported_lod,
     )
 
-    info: dict[str, object] = {"active": None, "sources": []}
+    info: dict[str, Any] = {"active": None, "sources": []}
     sources: list[dict[str, str]] = []
 
     # 1. Reported LOD
@@ -485,7 +488,7 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, object]:
     return info
 
 
-def _render_lod_card(lod_info: dict[str, object]) -> str:
+def _render_lod_card(lod_info: dict[str, Any]) -> str:
     """Render the LOD source summary as an HTML card."""
     status_icons = {"available": "\u2705", "unavailable": "\u274c", "insufficient": "\u26a0\ufe0f"}
     rows = []
@@ -635,12 +638,14 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
             display_order.append(key)
 
     # Build rendered sections keyed by plot id
-    rendered: dict[str, tuple[str, str]] = {}  # key -> (title, html)
+    rendered: dict[str, tuple[str, ...]] = {}  # key -> (title, html[, extra_header])
     first_key = None
 
     # Handle combined dimensionality reduction (PCA + t-SNE in one panel with toggle)
-    pca_data = plot_data.get("pca")
-    umap_data = plot_data.get("umap")  # actually t-SNE data
+    _pca_raw = plot_data.get("pca")
+    _umap_raw = plot_data.get("umap")  # actually t-SNE data
+    pca_data: PcaData | None = _pca_raw if isinstance(_pca_raw, PcaData) else None
+    umap_data: UmapData | None = _umap_raw if isinstance(_umap_raw, UmapData) else None
     has_dimred = pca_data is not None or umap_data is not None
     if has_dimred:
         # Check if dimreduction is the first plot in display order
@@ -698,11 +703,11 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
                 first_key = key
                 break
 
-    for key, (_dtype, renderer) in _RENDERERS.items():
+    for key, (dtype, renderer) in _RENDERERS.items():
         data = plot_data.get(key)
-        if data is None:
+        if data is None or not isinstance(data, dtype):
             continue
-        fig = renderer(data)
+        fig = renderer(data)  # type: ignore[operator]
         # Multi-panel renderers set their own height (e.g. 800px); only
         # apply the default for plots that haven't specified one.
         current_height = fig.layout.height
@@ -711,7 +716,7 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
         plot_height = f"{fig.layout.height}px"
         js = "cdn" if key == first_key else False
         plot_html = fig.to_html(full_html=False, include_plotlyjs=js, default_height=plot_height)
-        rendered[key] = (data.title, plot_html)
+        rendered[key] = (data.title, plot_html)  # type: ignore[attr-defined]
 
     # Build grouped sections and TOC with section labels
     toc_html_parts: list[str] = []
