@@ -12,10 +12,8 @@ from pyprideap.viz.qc.compute import (
     LodAnalysisData,
     LodComparisonData,
     NormScaleData,
-    PcaData,
     PlateCvData,
     QcLodSummaryData,
-    UmapData,
     compute_all,
 )
 
@@ -62,14 +60,14 @@ _HELP_TEXT: dict[str, str] = {
     ),
     "dimreduction": (
         "Dimensionality reduction projects the high-dimensional protein expression data onto two axes. "
-        "Use the dropdown to switch between PCA and UMAP. "
+        "Use the dropdown to switch between PCA and t-SNE. "
         "<strong>PCA</strong> (Principal Component Analysis) captures the directions of maximum variance — "
         "the percentage on each axis shows how much total variance that component explains. "
-        "<strong>UMAP</strong> (Uniform Manifold Approximation and Projection) is a non-linear technique "
-        "that better preserves local neighbourhood structure, useful for identifying clusters. "
+        "<strong>t-SNE</strong> (t-distributed Stochastic Neighbor Embedding) is a non-linear technique "
+        "that preserves local neighbourhood structure, useful for identifying clusters. "
         "In both views, each point is a sample; samples that cluster together have similar protein "
         "profiles. Outliers far from the main cluster may have quality issues. "
-        "Note: UMAP is stochastic and distances between distant clusters should not be over-interpreted."
+        "Note: t-SNE is stochastic and distances between distant clusters should not be over-interpreted."
     ),
     "heatmap": (
         "Clustered expression heatmap showing Z-scored protein values across samples. "
@@ -335,7 +333,10 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, object]:
     # 1. Reported LOD
     reported = get_reported_lod(dataset)
     if reported is not None:
-        n_assays = int(reported.notna().any(axis=0).sum()) if hasattr(reported, "shape") and reported.ndim == 2 else int(reported.notna().sum())
+        if hasattr(reported, "shape") and reported.ndim == 2:
+            n_assays = int(reported.notna().any(axis=0).sum())
+        else:
+            n_assays = int(reported.notna().sum())
         sources.append({
             "name": "Reported LOD",
             "status": "available",

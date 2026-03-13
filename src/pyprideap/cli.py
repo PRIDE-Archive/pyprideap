@@ -76,7 +76,7 @@ def _generate_report(
             stem = Path(stem).stem
         output_path = Path(f"{stem}_qc_report.html")
 
-    print(f"Generating report...")
+    print("Generating report...")
     result = pp.qc_report(ds, output_path)
     print(f"  Report saved to {result}")
     return result

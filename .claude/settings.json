@@ -66,10 +66,19 @@
       "Bash(gh search:*)",
       "Bash(open /Users/yperez/work/pyap/reports/raw_data_qc_report.html)",
       "Bash(python -m pytest tests/test_qc_report.py -v)",
-      "Bash(python3 -c \":*)"
+      "Bash(python3 -c \":*)",
+      "Bash(for acc:*)",
+      "Bash(do echo:*)",
+      "Bash(python -c \":*)",
+      "Bash(/Users/yperez/work/pyap/.venv/bin/python -c \"import umap; print\\(umap.__version__\\)\")",
+      "Bash(/Users/yperez/work/pyap/.venv/bin/pip uninstall:*)",
+      "Bash(/Users/yperez/work/pyap/.venv/bin/python -m pytest tests/ -x -q)",
+      "Bash(/Users/yperez/work/pyap/.venv/bin/python -c \":*)",
+      "Bash(/Users/yperez/work/pyap/.venv/bin/ruff check:*)"
     ],
     "additionalDirectories": [
-      "/Users/yperez/work/pyap/configs"
+      "/Users/yperez/work/pyap/configs",
+      "/Users/yperez/work/pyap"
     ]
   }
 }

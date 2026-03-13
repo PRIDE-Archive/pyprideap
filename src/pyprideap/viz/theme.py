@@ -7,7 +7,7 @@ standalone plots share the same visual identity.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from plotly.graph_objects import Figure
@@ -82,7 +82,7 @@ def _cycle(palette: list[str], n: int | None) -> list[str]:
     return palette * full + palette[:remainder]
 
 
-def pride_color_discrete(n: int | None = None) -> List[str]:
+def pride_color_discrete(n: int | None = None) -> list[str]:
     """Return a list of visually distinct hex colours.
 
     Parameters
@@ -95,7 +95,7 @@ def pride_color_discrete(n: int | None = None) -> List[str]:
     return _cycle(_DISCRETE_PALETTE, n)
 
 
-def pride_fill_discrete(n: int | None = None) -> List[str]:
+def pride_fill_discrete(n: int | None = None) -> list[str]:
     """Return a list of slightly muted hex colours suitable for fills.
 
     Follows the same interface as :func:`pride_color_discrete`.
@@ -107,7 +107,7 @@ def pride_fill_discrete(n: int | None = None) -> List[str]:
 # Continuous / gradient palette
 # ---------------------------------------------------------------------------
 
-def pride_color_gradient(n: int = 10) -> List[str]:
+def pride_color_gradient(n: int = 10) -> list[str]:
     """Return *n* hex colours interpolated along a blue-to-red gradient.
 
     The gradient passes through the intermediate stops:
@@ -155,7 +155,7 @@ def pride_color_gradient(n: int = 10) -> List[str]:
 # Plot theme
 # ---------------------------------------------------------------------------
 
-def set_plot_theme(fig: "Figure") -> "Figure":
+def set_plot_theme(fig: Figure) -> Figure:
     """Apply the pyprideap house style to a Plotly figure *in place*.
 
     Adjusts fonts, background colour, grid style, and margins to match

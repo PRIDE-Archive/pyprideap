@@ -183,26 +183,38 @@ def render_pca(data: PcaData) -> Figure:
     return fig
 
 
-def render_umap(data: UmapData) -> Figure:
+def render_tsne(data: UmapData) -> Figure:
+    """Standalone t-SNE scatter plot."""
     _, px = _import_plotly()
     import pandas as pd
 
-    df = pd.DataFrame({"UMAP1": data.x, "UMAP2": data.y, "Label": data.labels, "Group": data.groups})
+    method = data.title  # "t-SNE" or legacy "UMAP"
+    x_label = f"{method} 1"
+    y_label = f"{method} 2"
+    df = pd.DataFrame({x_label: data.x, y_label: data.y, "Label": data.labels, "Group": data.groups})
     fig = px.scatter(
         df,
-        x="UMAP1",
-        y="UMAP2",
+        x=x_label,
+        y=y_label,
         color="Group",
         text="Label",
         hover_data=["Label"],
-        title="UMAP Projection",
+        title=f"{method} Projection",
     )
     fig.update_traces(textposition="top center", marker=dict(size=10))
     return fig
 
 
+# Keep old name for backwards compatibility
+render_umap = render_tsne
+
+
 def render_dimreduction(pca_data: PcaData | None, umap_data: UmapData | None) -> Figure | None:
-    """Combined PCA/UMAP plot with dropdown toggle between the two methods.
+    """Combined PCA + non-linear projection with dropdown toggle.
+
+    The non-linear method is UMAP when ``umap-learn`` is installed, otherwise
+    t-SNE (from scikit-learn).  The actual method name is read from
+    ``umap_data.title`` (``"UMAP"`` or ``"t-SNE"``).
 
     If only one method produced data, renders that alone without a dropdown.
     Returns None if neither is available.
@@ -212,13 +224,17 @@ def render_dimreduction(pca_data: PcaData | None, umap_data: UmapData | None) ->
 
     go, _ = _import_plotly()
 
+    # Determine the non-linear method label
+    nl_method = umap_data.title if umap_data is not None else "UMAP"
+    nl_x_label = f"{nl_method}1" if nl_method == "UMAP" else f"{nl_method} 1"
+    nl_y_label = f"{nl_method}2" if nl_method == "UMAP" else f"{nl_method} 2"
+
     fig = go.Figure()
     pca_trace_range: tuple[int, int] = (0, 0)
     umap_trace_range: tuple[int, int] = (0, 0)
 
     # --- PCA traces ---
     if pca_data is not None:
-        ve = pca_data.variance_explained
         pca_start = len(fig.data)
         groups = sorted(set(pca_data.groups))
         from pyprideap.viz.theme import pride_color_discrete
@@ -240,14 +256,14 @@ def render_dimreduction(pca_data: PcaData | None, umap_data: UmapData | None) ->
             ))
         pca_trace_range = (pca_start, len(fig.data))
 
-    # --- UMAP traces ---
+    # --- Non-linear (UMAP / t-SNE) traces ---
     if umap_data is not None:
         umap_start = len(fig.data)
         groups = sorted(set(umap_data.groups))
         from pyprideap.viz.theme import pride_color_discrete
         colors = pride_color_discrete(len(groups))
         color_map = {g: colors[i] for i, g in enumerate(groups)}
-        show_umap = pca_data is None  # visible by default only if no PCA
+        show_nl = pca_data is None  # visible by default only if no PCA
 
         for group in groups:
             mask = [i for i, g in enumerate(umap_data.groups) if g == group]
@@ -260,8 +276,8 @@ def render_dimreduction(pca_data: PcaData | None, umap_data: UmapData | None) ->
                 textposition="top center",
                 name=group,
                 hovertemplate="%{text}<extra></extra>",
-                visible=show_umap,
-                showlegend=show_umap,
+                visible=show_nl,
+                showlegend=show_nl,
             ))
         umap_trace_range = (umap_start, len(fig.data))
 
@@ -299,14 +315,14 @@ def render_dimreduction(pca_data: PcaData | None, umap_data: UmapData | None) ->
                         ],
                     ),
                     dict(
-                        label="UMAP",
+                        label=nl_method,
                         method="update",
                         args=[
                             {"visible": umap_vis},
                             {
-                                "xaxis.title.text": "UMAP1",
-                                "yaxis.title.text": "UMAP2",
-                                "title.text": "Dimensionality Reduction — UMAP",
+                                "xaxis.title.text": nl_x_label,
+                                "yaxis.title.text": nl_y_label,
+                                "title.text": f"Dimensionality Reduction — {nl_method}",
                             },
                         ],
                     ),
@@ -324,9 +340,9 @@ def render_dimreduction(pca_data: PcaData | None, umap_data: UmapData | None) ->
         )
     else:
         fig.update_layout(
-            title="Dimensionality Reduction — UMAP",
-            xaxis_title="UMAP1",
-            yaxis_title="UMAP2",
+            title=f"Dimensionality Reduction — {nl_method}",
+            xaxis_title=nl_x_label,
+            yaxis_title=nl_y_label,
         )
 
     return fig
@@ -450,8 +466,8 @@ def render_cv_distribution(data: CvDistributionData) -> Figure:
 def render_plate_cv(data: PlateCvData) -> Figure:
     """Two-panel plot: intra-plate CV per plate (top) and inter-plate CV (bottom)."""
     go, _ = _import_plotly()
-    from plotly.subplots import make_subplots
     import numpy as np
+    from plotly.subplots import make_subplots
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -656,10 +672,13 @@ def render_lod_comparison(data: LodComparisonData) -> Figure:
                 label=label,
                 method="update",
                 args=[
-                    {"visible": visibility,
-                     "x": [None] * start + [None] * (end - start) + [None] * (len(fig.data) - end - 1) + [[vmin - margin, vmax + margin]],
-                     "y": [None] * start + [None] * (end - start) + [None] * (len(fig.data) - end - 1) + [[vmin - margin, vmax + margin]],
-                     },
+                    {
+                        "visible": visibility,
+                        "x": ([None] * (len(fig.data) - 1)
+                              + [[vmin - margin, vmax + margin]]),
+                        "y": ([None] * (len(fig.data) - 1)
+                              + [[vmin - margin, vmax + margin]]),
+                    },
                     {"xaxis.title.text": f"{pair['name_x']} (NPX)",
                      "yaxis.title.text": f"{pair['name_y']} (NPX)",
                      "annotations": [dict(

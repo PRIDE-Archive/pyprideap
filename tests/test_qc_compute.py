@@ -1,7 +1,6 @@
 import json
 from dataclasses import asdict
 
-import numpy as np
 import pandas as pd
 import pytest
 

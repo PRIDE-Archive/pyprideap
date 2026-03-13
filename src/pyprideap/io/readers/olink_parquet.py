@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pyprideap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset
 from pyprideap.io.readers.olink_csv import _detect_olink_platform, _detect_sample_key, _warn_data_quality
 
 _SAMPLE_COLS = {"SampleID", "SampleName", "SampleType", "WellID", "PlateID", "SampleQC", "DataAnalysisRefID"}

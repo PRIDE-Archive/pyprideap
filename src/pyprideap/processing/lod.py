@@ -565,7 +565,8 @@ def compute_lod_stats(
         has_lod_per_col = has_lod.any(axis=0)
         for panel_name in dataset.features["Panel"].dropna().unique():
             panel_cols = [
-                c for c in dataset.expression.columns if panel_map.get(c) == panel_name and has_lod_per_col.get(c, False)
+                c for c in dataset.expression.columns
+                if panel_map.get(c) == panel_name and has_lod_per_col.get(c, False)
             ]
             if panel_cols:
                 panel_above = int(above_lod_masked[panel_cols].sum().sum())

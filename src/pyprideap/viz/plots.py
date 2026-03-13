@@ -32,7 +32,7 @@ def boxplot(
     proteins: list[str] | None = None,
     group_by: str | None = None,
     max_proteins: int = 20,
-) -> "Figure":
+) -> Figure:
     """Per-protein boxplot of expression values.
 
     Parameters

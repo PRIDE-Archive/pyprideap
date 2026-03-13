@@ -332,22 +332,28 @@ def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | No
     )
 
 
-def compute_umap(dataset: AffinityDataset, n_neighbors: int = 15, min_dist: float = 0.1) -> UmapData | None:
+def compute_tsne(dataset: AffinityDataset) -> UmapData | None:
+    """Non-linear dimensionality reduction via t-SNE (scikit-learn).
+
+    Returns *None* when scikit-learn is not available or the dataset is too
+    small (fewer than 4 samples).
+    """
     try:
-        import umap
         from sklearn.impute import SimpleImputer
+        from sklearn.manifold import TSNE
     except ImportError:
         return None
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
-    if numeric.shape[0] < 2 or numeric.shape[1] < 2:
+    if numeric.shape[0] < 4 or numeric.shape[1] < 2:
         return None
 
     imputer = SimpleImputer(strategy="median")
     imputed = imputer.fit_transform(numeric)
 
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_components=2, random_state=42)
-    transformed = reducer.fit_transform(imputed)
+    perplexity = min(30.0, max(2.0, (imputed.shape[0] - 1) / 3.0))
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
+    transformed = tsne.fit_transform(imputed)
 
     labels = _sample_ids(dataset)
 
@@ -367,7 +373,12 @@ def compute_umap(dataset: AffinityDataset, n_neighbors: int = 15, min_dist: floa
         y=np.round(transformed[:, 1], 4).tolist(),
         labels=labels,
         groups=groups,
+        title="t-SNE",
     )
+
+
+# Keep old name for backwards compatibility
+compute_umap = compute_tsne
 
 
 def compute_heatmap(
@@ -837,7 +848,7 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     results["qc_summary"] = compute_qc_summary(dataset)
     results["lod_analysis"] = compute_lod_analysis(dataset)
     results["pca"] = compute_pca(dataset)
-    results["umap"] = compute_umap(dataset)
+    results["umap"] = compute_tsne(dataset)
     results["heatmap"] = compute_heatmap(dataset)
     results["correlation"] = compute_correlation(dataset)
     results["data_completeness"] = compute_data_completeness(dataset)

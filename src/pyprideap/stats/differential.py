@@ -454,7 +454,6 @@ def _anova_ols(
 ) -> tuple[float, float, int, int]:
     """Run OLS-based Type-II ANOVA for a single protein (ANCOVA)."""
     try:
-        import statsmodels.api as sm
         from statsmodels.formula.api import ols
         from statsmodels.stats.anova import anova_lm
     except ImportError:

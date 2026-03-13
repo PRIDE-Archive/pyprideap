@@ -7,8 +7,6 @@ while optionally keeping paired/longitudinal samples together.
 
 from __future__ import annotations
 
-from typing import List, Tuple
-
 import numpy as np
 import pandas as pd
 
@@ -21,13 +19,13 @@ _TOTAL_WELLS = len(_ROWS) * len(_COLS)  # 96
 _DEFAULT_PLATE_SIZE = 88
 
 
-def _generate_well_positions(n: int) -> List[str]:
+def _generate_well_positions(n: int) -> list[str]:
     """Return the first *n* well positions in column-major order.
 
     Positions follow the standard naming convention A1, B1, ... H1, A2, ...
     which mirrors the physical pipetting order on a 96-well plate.
     """
-    wells: List[str] = []
+    wells: list[str] = []
     for col in _COLS:
         for row in _ROWS:
             wells.append(f"{row}{col}")
@@ -77,7 +75,7 @@ def randomize_plates(
     # ------------------------------------------------------------------
     # Input validation
     # ------------------------------------------------------------------
-    sample_id_col = _resolve_sample_id_column(samples)
+    _resolve_sample_id_column(samples)  # validates that a sample ID column exists
 
     total_capacity = n_plates * plate_size
     if len(samples) > total_capacity:
@@ -162,7 +160,7 @@ def _shuffle_paired(
     group_keys = list(groups.keys())
     rng.shuffle(group_keys)
 
-    ordered: List[np.ndarray] = []
+    ordered: list[np.ndarray] = []
     for key in group_keys:
         member_indices = groups[key].copy()
         if len(member_indices) > plate_size:
@@ -185,7 +183,7 @@ def _assign_plates_and_wells(
     samples: pd.DataFrame | None,
     paired_col: str | None,
     rng: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Assign plate numbers and well positions to the ordered indices.
 
     When ``is_paired`` is True, groups (consecutive runs sharing the same
@@ -243,7 +241,7 @@ def _assign_plates_and_wells(
 
 
 def _pick_plate(
-    plate_counts: List[int], group_size: int, plate_size: int
+    plate_counts: list[int], group_size: int, plate_size: int
 ) -> int:
     """Return the index of the plate best suited for a group of *group_size*.
 

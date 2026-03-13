@@ -6,10 +6,10 @@ import pytest
 
 from pyprideap.core import AffinityDataset, Platform
 from pyprideap.processing.lod import (
-    LodMethod,
     _MAD_TO_SD,
     _MIN_STD_FLOOR,
     _SOMA_ELOD_K,
+    LodMethod,
     compute_lod_from_controls,
     compute_lod_stats,
     compute_soma_elod,
