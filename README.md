@@ -6,6 +6,14 @@ Supports **Olink** (Explore, Explore HT, Target, Reveal) and **SomaScan** platfo
 
 ## Installation
 
+> **Note:** pyprideap is not yet published on PyPI. Install directly from source:
+>
+> ```bash
+> pip install git+https://github.com/PRIDE-Archive/pyprideap.git
+> ```
+
+Once available on PyPI:
+
 ```bash
 pip install pyprideap
 ```

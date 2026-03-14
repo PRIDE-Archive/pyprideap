@@ -45,10 +45,9 @@ _HELP_TEXT: dict[str, str] = {
         "indicates good data quality. Large WARN or FAIL fractions suggest systematic issues."
     ),
     "lod_analysis": (
-        "Two-panel view. Left: proteins ranked by %% of samples above the Limit of Detection, "
-        "coloured by panel — a steep drop-off reveals how many proteins have weak signal. Right: "
-        "histogram of the same percentages showing the overall distribution. Proteins with low "
-        "%% above LOD are unreliable and may need filtering."
+        "Proteins ranked by the percentage of samples with signal above the Limit of Detection, "
+        "coloured by panel. A steep drop-off reveals how many proteins have weak signal. "
+        "Proteins with low %% above LOD are unreliable and may need filtering."
     ),
     "pca": (
         "Principal Component Analysis projects the high-dimensional protein expression data onto "
@@ -59,16 +58,23 @@ _HELP_TEXT: dict[str, str] = {
     ),  # kept for standalone use; report uses 'dimreduction' instead
     "correlation": (
         "Heatmap of pairwise Pearson correlations between samples based on their protein expression "
-        "profiles. Values range from −1 (inverse) to +1 (perfect correlation). In a well-behaved "
-        "experiment most sample pairs should show high positive correlation (warm colours). A sample "
-        "with consistently low correlation against all others is a potential outlier."
+        "profiles. Samples are grouped by sample type so that controls, biological samples, etc. cluster "
+        "together. Values range from \u22121 (inverse) to +1 (perfect correlation). In a well-behaved "
+        "experiment most biological sample pairs should show high positive correlation (warm colours). "
+        "Control samples (e.g. plate controls, negative controls) are expected to have low correlation "
+        "with biological samples. A biological sample with consistently low correlation against all others "
+        "is a potential outlier."
     ),
     "data_completeness": (
-        "Two side-by-side panels showing data completeness based on the Limit of Detection. "
-        "Left: per-sample stacked bar showing Above LOD (green, reliable signal) vs Below LOD "
+        "Two stacked panels showing data completeness based on the Limit of Detection. "
+        "Note: control samples (negative controls, plate controls, etc.) are excluded — only biological "
+        "samples are shown. "
+        "<strong>Top:</strong> per-sample stacked bar showing Above LOD (green, reliable signal) vs Below LOD "
         "(orange, measured but below detection limit). A sample with a large orange fraction may "
-        "indicate low protein input or technical issues. Right: Missing Frequency distribution — "
-        "a histogram of per-protein missing rate (%% of samples where NPX is below LOD). "
+        "indicate low protein input or technical issues. "
+        "<strong>Bottom:</strong> Missing Frequency distribution — a histogram of per-protein missing rate "
+        "(%% of samples where signal is below LOD). Olink recommends a missing frequency threshold "
+        "of 30%%: proteins above this threshold may be unreliable and should be considered for filtering. "
         "Proteins clustered near 0%% are reliably detected; those near 100%% may need filtering."
     ),
     "dimreduction": (
@@ -90,9 +96,9 @@ _HELP_TEXT: dict[str, str] = {
         "Blocks of correlated colour reveal co-regulated protein groups or sample batches."
     ),
     "cv_distribution": (
-        "Histogram of the coefficient of variation (CV = std / mean) across all proteins. CV measures "
-        "relative variability: values below 0.2 indicate tight reproducibility, while a long right tail "
-        "suggests some proteins have high technical or biological variability."
+        "Histogram of the coefficient of variation (CV = standard deviation / mean) across all proteins. "
+        "CV measures relative variability: values below 0.2 (dashed line) indicate tight reproducibility, "
+        "while a long right tail suggests some proteins have high technical or biological variability."
     ),
     "norm_scale": (
         "Shows the hybridization control normalization scale factor (HybControlNormScale) per sample, "
@@ -113,12 +119,16 @@ _HELP_TEXT: dict[str, str] = {
     ),
     "lod_comparison": (
         "Scatter plot comparing LOD values from different sources for each protein. "
-        "Up to three LOD sources are available: Reported LOD (from the NPX data file), "
-        "NCLOD (computed from negative controls), and FixedLOD (from Olink reference files). "
+        "Available sources: <strong>Reported LOD</strong> (from the data file), "
+        "<strong>NCLOD</strong> (computed from negative controls), and "
+        "<strong>FixedLOD</strong> (from Olink reference files) or <strong>eLOD</strong> (SomaScan buffer-based). "
         "Each point represents one protein — points on the diagonal indicate agreement between "
-        "the two sources. Use the dropdown to switch between available LOD source pairs. "
-        "The Pearson correlation (r) and number of proteins (n) are shown. "
-        "Large deviations from the diagonal may indicate batch effects or sample quality issues."
+        "the two sources. Use the dropdown to switch between source pairs. "
+        "The Pearson correlation (r) and number of assays (n) are shown; n may be lower than total assays "
+        "because only assays with valid LOD from both sources are included. "
+        "When sources disagree significantly, NCLOD (experiment-specific) is generally preferred for "
+        "filtering, as it reflects the actual noise level in your experiment. "
+        "The LOD source used for all other analyses in this report is shown in the LOD Sources card above."
     ),
     "outlier_map": (
         "Heatmap showing MAD-based statistical outliers across all samples and analytes. "
@@ -136,10 +146,11 @@ _HELP_TEXT: dict[str, str] = {
         "unusually high/low overall signal and should be considered for exclusion."
     ),
     "col_check": (
-        "Summary of feature-level QC (ColCheck). Each analyte's calibrator QC ratio is checked against "
-        "the acceptance range [0.8, 1.2]. Analytes outside this range are flagged as FLAG and may have "
-        "poor calibration reproducibility. A high number of flagged analytes may indicate plate-level "
-        "issues. These analytes should be interpreted with caution."
+        "Calibrator QC ratio for each analyte. The ratio measures how well each analyte's calibration "
+        "matches the reference (ideal = 1.0). Analytes within the acceptance range [0.8, 1.2] (orange "
+        "dashed lines) pass QC; those outside are flagged (red points). Flagged analytes may have poor "
+        "calibration reproducibility and should be interpreted with caution. A high number of flagged "
+        "analytes may indicate plate-level calibration issues."
     ),
     "control_analytes": (
         "Breakdown of control analyte types detected in the SomaScan data. "
@@ -159,19 +170,24 @@ _HELP_TEXT: dict[str, str] = {
         "Look for systematic differences between groups that might indicate batch effects."
     ),
     "iqr_median_qc": (
-        "Per-panel scatter plot of IQR vs Median NPX per sample, mirroring OlinkAnalyze's "
-        "<code>olink_qc_plot()</code>. For each panel, IQR and median of NPX values are computed "
-        "per sample. Outlier thresholds (dashed lines) are set at mean &plusmn; 3 &times; SD on both "
-        "axes. Samples outside these bounds on either axis are flagged as outliers (red points). "
+        "Per-panel scatter plot of IQR (Interquartile Range) vs Median NPX per sample, mirroring "
+        "OlinkAnalyze's <code>olink_qc_plot()</code>. The IQR (Q3 &minus; Q1) measures the spread of "
+        "the middle 50%% of a sample's protein measurements — a large IQR indicates high variability. "
+        "For each panel, IQR and median are computed per sample. "
+        "Outlier thresholds (dashed lines) are set at mean &plusmn; 3 &times; SD on both axes. "
+        "Samples outside these bounds on either axis are flagged as outliers (red points). "
         "Points are coloured by QC status (green = Pass, orange = Warning). Outlier samples may "
         "indicate technical issues such as failed wells, low protein input, or plate effects."
     ),
     "uniprot_duplicates": (
-        "Bar chart showing OlinkIDs that map to multiple UniProt accessions. Such duplicates can "
-        "cause inflated counts in downstream pathway or gene-set enrichment analyses. If no "
-        "duplicates are found, a green bar indicates all assays have unique UniProt mappings. "
-        "When duplicates are present, consider consolidating or removing affected assays before "
-        "pathway analysis."
+        "Bar chart showing proteins targeted by multiple assays (e.g. multiple OlinkIDs or aptamers "
+        "mapping to the same UniProt accession). In some platforms this is <strong>by design</strong> — "
+        "e.g. SomaScan includes replicate aptamers for redundancy, and Olink panels may overlap. "
+        "Multiple assays per protein can be used to assess measurement concordance: "
+        "high agreement between replicate assays confirms reliability, while poor concordance "
+        "may indicate assay-specific issues. "
+        "For downstream pathway or gene-set enrichment analyses, be aware that duplicated proteins "
+        "may inflate counts unless handled (e.g. by averaging or selecting the best-performing assay)."
     ),
 }
 
@@ -180,10 +196,10 @@ _SECTION_ORDER = [
     ("Signal & Distribution", ["distribution", "lod_analysis"]),
     ("Data Completeness", ["data_completeness"]),
     ("Sample Relationships", ["dimreduction", "correlation", "heatmap"]),
-    ("Normalization QC", ["norm_scale", "norm_scale_boxplot"]),
+    ("Normalization QC", ["norm_scale"]),
     ("Variability", ["cv_distribution", "plate_cv"]),
     ("Olink QC", ["iqr_median_qc", "uniprot_duplicates"]),
-    ("SomaScan QC", ["row_check", "col_check", "outlier_map", "control_analytes"]),
+    ("SomaScan QC", ["col_check"]),
 ]
 
 _CSS = """\
@@ -782,6 +798,22 @@ def _render_summary_table(
 
     rows.append(_summary_row("", "Features (assays)", str(n_features)))
 
+    # QC columns available in the dataset
+    _known_qc_cols = [
+        "SampleQC",
+        "QC_Warning",
+        "AssayQC",
+        "SampleType",
+        "RowCheck",
+        "ColCheck",
+        "HybControlNormScale",
+    ]
+    qc_cols_found = [c for c in _known_qc_cols if c in samples.columns or c in features.columns]
+    if qc_cols_found:
+        rows.append(_summary_row("", "QC columns", ", ".join(qc_cols_found)))
+    else:
+        rows.append(_summary_row(_status_dot("amber"), "QC columns", "None detected — QC metrics may be limited"))
+
     # --- Proteins ---
     rows.append(_summary_group("Proteins"))
     if "UniProt" in features.columns:
@@ -847,7 +879,8 @@ def _render_summary_table(
 
         if isinstance(lod_analysis, LodAnalysisData) and len(lod_analysis.above_lod_pct) > 0:
             n_above = sum(1 for p in lod_analysis.above_lod_pct if p > 50)
-            frac_above = n_above / len(lod_analysis.above_lod_pct)
+            n_total = len(lod_analysis.above_lod_pct)
+            frac_above = n_above / n_total
             if frac_above > 0.80:
                 lod_dot = _status_dot("green")
             elif frac_above >= 0.50:
@@ -857,8 +890,8 @@ def _render_summary_table(
             rows.append(
                 _summary_row(
                     lod_dot,
-                    "Proteins above LOD (&gt;50% samples)",
-                    f"{n_above} / {len(lod_analysis.above_lod_pct)} ({frac_above:.1%})",
+                    "Assays above LOD in &gt;50% of samples",
+                    f"{n_above} / {n_total} ({frac_above:.1%})",
                 )
             )
 
@@ -1007,78 +1040,25 @@ def _render_summary_table(
 
     # --- SomaScan QC Flags ---
     if dataset.platform == _Platform.SOMASCAN:
-        row_check_data = plot_data.get("row_check")
         col_check_data = plot_data.get("col_check")
-        outlier_map_data = plot_data.get("outlier_map")
-        control_data = plot_data.get("control_analytes")
 
-        has_soma_qc = any(x is not None for x in [row_check_data, col_check_data, outlier_map_data, control_data])
-        if has_soma_qc:
+        if isinstance(col_check_data, ColCheckData):
             rows.append(_summary_group("SomaScan QC"))
-
-            # RowCheck summary
-            if isinstance(row_check_data, RowCheckData):
-                total = row_check_data.n_pass + row_check_data.n_flag
-                flag_rate = row_check_data.n_flag / total if total > 0 else 0.0
-                if row_check_data.n_flag == 0:
-                    rc_dot = _status_dot("green")
-                elif flag_rate < 0.05:
-                    rc_dot = _status_dot("amber")
-                else:
-                    rc_dot = _status_dot("red")
-                rows.append(
-                    _summary_row(
-                        rc_dot,
-                        "RowCheck (PASS / FLAG)",
-                        f"{row_check_data.n_pass} / {row_check_data.n_flag}",
-                    )
+            total = col_check_data.n_pass + col_check_data.n_flag
+            flag_rate = col_check_data.n_flag / total if total > 0 else 0.0
+            if col_check_data.n_flag == 0:
+                cc_dot = _status_dot("green")
+            elif flag_rate < 0.05:
+                cc_dot = _status_dot("amber")
+            else:
+                cc_dot = _status_dot("red")
+            rows.append(
+                _summary_row(
+                    cc_dot,
+                    "ColCheck (PASS / FLAG)",
+                    f"{col_check_data.n_pass} / {col_check_data.n_flag}",
                 )
-
-            # ColCheck summary
-            if isinstance(col_check_data, ColCheckData):
-                total = col_check_data.n_pass + col_check_data.n_flag
-                flag_rate = col_check_data.n_flag / total if total > 0 else 0.0
-                if col_check_data.n_flag == 0:
-                    cc_dot = _status_dot("green")
-                elif flag_rate < 0.05:
-                    cc_dot = _status_dot("amber")
-                else:
-                    cc_dot = _status_dot("red")
-                rows.append(
-                    _summary_row(
-                        cc_dot,
-                        "ColCheck (PASS / FLAG)",
-                        f"{col_check_data.n_pass} / {col_check_data.n_flag}",
-                    )
-                )
-
-            # Outlier summary
-            if isinstance(outlier_map_data, OutlierMapData):
-                n_flagged = sum(1 for frac in outlier_map_data.outlier_fraction_per_sample if frac >= 0.05)
-                flag_rate = n_flagged / len(outlier_map_data.sample_ids) if outlier_map_data.sample_ids else 0.0
-                if n_flagged == 0:
-                    ol_dot = _status_dot("green")
-                elif flag_rate < 0.05:
-                    ol_dot = _status_dot("amber")
-                else:
-                    ol_dot = _status_dot("red")
-                rows.append(
-                    _summary_row(
-                        ol_dot,
-                        "Outlier samples (&ge;5% analytes)",
-                        f"{n_flagged} / {len(outlier_map_data.sample_ids)}",
-                    )
-                )
-
-            # Control analytes
-            if isinstance(control_data, ControlAnalyteData) and control_data.total_controls > 0:
-                rows.append(
-                    _summary_row(
-                        "",
-                        "Control analytes detected",
-                        f"{control_data.total_controls} / {control_data.total_analytes}",
-                    )
-                )
+            )
 
     table_html = f'<table class="summary-table">{"".join(rows)}</table>'
 
@@ -1125,11 +1105,7 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
         "iqr_median_qc": (IqrMedianQcData, R.render_iqr_median_qc),
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
         # SomaScan-specific renderers
-        "outlier_map": (OutlierMapData, R.render_outlier_map),
-        "row_check": (RowCheckData, R.render_row_check),
         "col_check": (ColCheckData, R.render_col_check),
-        "control_analytes": (ControlAnalyteData, R.render_control_analytes),
-        "norm_scale_boxplot": (NormScaleBoxplotData, R.render_norm_scale_boxplot),
     }
 
     # Determine display order from _SECTION_ORDER so first-displayed plot gets plotly.js
@@ -1285,12 +1261,15 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
     stat_items = [
         f'<span class="stat-item"><strong>Platform</strong> {platform_label}</span>',
         f'<span class="stat-item"><strong>Samples</strong> {n_samples}</span>',
-        f'<span class="stat-item"><strong>Proteins (Assays)</strong> {n_features}</span>',
+        f'<span class="stat-item"><strong>Assays</strong> {n_features}</span>',
     ]
-    if n_proteins > 0:
-        stat_items.append(f'<span class="stat-item"><strong>Proteins</strong> {n_proteins}</span>')
-    if n_proteins_above_lod is not None:
-        stat_items.append(f'<span class="stat-item"><strong>Proteins &gt; LOD</strong> {n_proteins_above_lod}</span>')
+    if n_proteins > 0 and n_proteins != n_features:
+        stat_items.append(f'<span class="stat-item"><strong>Unique Proteins</strong> {n_proteins}</span>')
+    if n_proteins_above_lod is not None and n_proteins_above_lod > 0:
+        stat_items.append(
+            f'<span class="stat-item" title="Unique proteins where &gt;50%% of samples have signal above LOD">'
+            f"<strong>Proteins &gt; LOD</strong> {n_proteins_above_lod}</span>"
+        )
 
     html = (
         '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
@@ -1390,11 +1369,7 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
         "iqr_median_qc": (IqrMedianQcData, R.render_iqr_median_qc),
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
         # SomaScan-specific renderers
-        "outlier_map": (OutlierMapData, R.render_outlier_map),
-        "row_check": (RowCheckData, R.render_row_check),
         "col_check": (ColCheckData, R.render_col_check),
-        "control_analytes": (ControlAnalyteData, R.render_control_analytes),
-        "norm_scale_boxplot": (NormScaleBoxplotData, R.render_norm_scale_boxplot),
     }
 
     written: list[str] = []

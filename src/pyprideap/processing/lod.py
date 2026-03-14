@@ -827,9 +827,16 @@ def get_proteins_above_lod(
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     above_lod, has_lod = _above_lod_matrix(numeric, lod)
 
-    # Map expression columns to UniProt
-    id_col = "OlinkID" if "OlinkID" in dataset.features.columns else "SeqId"
-    if id_col not in dataset.features.columns:
+    # Map expression columns to UniProt.
+    # Use "Name" for SomaScan (matches expression column names like "seq.10000.28")
+    # and "OlinkID" for Olink platforms.
+    if "OlinkID" in dataset.features.columns:
+        id_col = "OlinkID"
+    elif "Name" in dataset.features.columns:
+        id_col = "Name"
+    elif "SeqId" in dataset.features.columns:
+        id_col = "SeqId"
+    else:
         id_col = dataset.features.columns[0]
     id_to_uniprot = dict(zip(dataset.features[id_col], dataset.features["UniProt"]))
 

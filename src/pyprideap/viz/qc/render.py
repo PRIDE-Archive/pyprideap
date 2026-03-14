@@ -254,23 +254,16 @@ def render_qc_summary(data: QcLodSummaryData) -> Figure:
 def render_lod_analysis(data: LodAnalysisData) -> Figure:
     go, px = _import_plotly()
     import pandas as pd
-    from plotly.subplots import make_subplots
 
     df = pd.DataFrame({"Assay": data.assay_ids, "% Above LOD": data.above_lod_pct, "Panel": data.panel})
     df = df.sort_values("% Above LOD", ascending=False).reset_index(drop=True)
     df["Rank"] = range(1, len(df) + 1)
 
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        subplot_titles=["Proteins Ranked by Detectability", "Detectability Distribution"],
-        vertical_spacing=0.22,
-    )
-
     panels = sorted(df["Panel"].unique())
     colors = px.colors.qualitative.Set2
     panel_colors = {p: colors[i % len(colors)] for i, p in enumerate(panels)}
 
+    fig = go.Figure()
     for panel in panels:
         sub = df[df["Panel"] == panel]
         fig.add_trace(
@@ -283,27 +276,12 @@ def render_lod_analysis(data: LodAnalysisData) -> Figure:
                 text=sub["Assay"],
                 hovertemplate="%{text}<br>%{y:.1f}% above LOD<extra></extra>",
             ),
-            row=1,
-            col=1,
         )
 
-    fig.add_trace(
-        go.Histogram(
-            x=df["% Above LOD"],
-            nbinsx=20,
-            marker_color="#3498db",
-            showlegend=False,
-        ),
-        row=2,
-        col=1,
-    )
-
     unit = getattr(data, "unit", "NPX")
-    fig.update_xaxes(title_text="Protein Rank (by detectability)", row=1, col=1)
-    fig.update_yaxes(title_text=f"% Samples with {unit} > LOD", row=1, col=1)
-    fig.update_xaxes(title_text=f"% Samples with {unit} > LOD", row=2, col=1)
-    fig.update_yaxes(title_text="Number of Proteins", row=2, col=1)
-    fig.update_layout(title=data.title, height=800, legend=dict(orientation="h", yanchor="bottom", y=-0.15))
+    fig.update_xaxes(title_text="Protein Rank (by detectability)")
+    fig.update_yaxes(title_text=f"% Samples with {unit} > LOD")
+    fig.update_layout(title=data.title, height=500, legend=dict(orientation="h", yanchor="bottom", y=-0.15))
     return fig
 
 
@@ -551,20 +529,33 @@ def render_heatmap(data: HeatmapData) -> Figure:
 
 def render_correlation(data: CorrelationData) -> Figure:
     go, _ = _import_plotly()
+
+    # Truncate long labels for display; full ID on hover
+    _MAX_LABEL = 20
+    short_labels = [s if len(s) <= _MAX_LABEL else s[:_MAX_LABEL] + "\u2026" for s in data.labels]
+
+    # Build customdata so hover shows full labels for both axes
+    full_labels = data.labels
+    n = len(full_labels)
+    customdata = [[full_labels[j] for j in range(n)] for _ in range(n)]
+
     fig = go.Figure(
         data=go.Heatmap(
             z=data.matrix,
-            x=data.labels,
-            y=data.labels,
+            x=short_labels,
+            y=short_labels,
+            customdata=customdata,
             colorscale="RdBu_r",
             zmin=-1,
             zmax=1,
+            hovertemplate="%{customdata} vs %{y}<br>r = %{z:.3f}<extra></extra>",
         )
     )
     fig.update_layout(
         title=data.title,
         xaxis_title="Sample",
         yaxis_title="Sample",
+        xaxis=dict(tickangle=-45),
     )
     return fig
 
@@ -578,32 +569,40 @@ def render_data_completeness(data: DataCompletenessData) -> Figure:
         rows=2,
         cols=1,
         subplot_titles=["Per-Sample Data Completeness", "Missing Frequency Distribution"],
-        vertical_spacing=0.22,
+        vertical_spacing=0.35,
     )
+
+    # Truncate long sample IDs for display; full ID shown on hover
+    _MAX_LABEL = 20
+    short_ids = [s if len(s) <= _MAX_LABEL else s[:_MAX_LABEL] + "\u2026" for s in data.sample_ids]
 
     # Top panel: stacked bar per sample
     fig.add_trace(
         go.Bar(
-            x=data.sample_ids,
+            x=short_ids,
             y=[r * 100 for r in data.above_lod_rate],
             name="Above LOD",
             marker_color="#2ecc71",
+            customdata=data.sample_ids,
+            hovertemplate="%{customdata}<br>Above LOD: %{y:.1f}%<extra></extra>",
         ),
         row=1,
         col=1,
     )
     fig.add_trace(
         go.Bar(
-            x=data.sample_ids,
+            x=short_ids,
             y=[r * 100 for r in data.below_lod_rate],
             name="Below LOD",
             marker_color="#f39c12",
+            customdata=data.sample_ids,
+            hovertemplate="%{customdata}<br>Below LOD: %{y:.1f}%<extra></extra>",
         ),
         row=1,
         col=1,
     )
 
-    fig.update_xaxes(title_text="Sample", row=1, col=1)
+    fig.update_xaxes(title_text="", tickangle=-45, row=1, col=1)
     fig.update_yaxes(title_text="% of Proteins", range=[0, 100], ticksuffix="%", row=1, col=1)
     fig.update_layout(barmode="stack")
 
@@ -620,7 +619,19 @@ def render_data_completeness(data: DataCompletenessData) -> Figure:
             row=2,
             col=1,
         )
-    fig.update_xaxes(title_text="% Samples Below LOD", range=[0, 100], row=2, col=1)
+        # Olink recommended 30% missing frequency threshold
+        fig.add_vline(
+            x=30,
+            line_dash="dash",
+            line_color="#e67e22",
+            line_width=2,
+            row=2,
+            col=1,
+            annotation_text="30% threshold",
+            annotation_position="top right",
+            annotation_font_color="#e67e22",
+        )
+    fig.update_xaxes(title_text="Missing Frequency (% Samples Below LOD)", range=[0, 100], row=2, col=1)
     fig.update_yaxes(title_text="Number of Proteins", row=2, col=1)
 
     fig.update_layout(
@@ -634,7 +645,16 @@ def render_data_completeness(data: DataCompletenessData) -> Figure:
 def render_cv_distribution(data: CvDistributionData) -> Figure:
     go, _ = _import_plotly()
     fig = go.Figure(data=[go.Histogram(x=data.cv_values, nbinsx=50)])
-    fig.update_layout(title=data.title, xaxis_title="Coefficient of Variation (%)", yaxis_title="Number of Proteins")
+    fig.add_vline(
+        x=0.2,
+        line_dash="dash",
+        line_color="#27ae60",
+        line_width=2,
+        annotation_text="CV = 0.2",
+        annotation_position="top right",
+        annotation_font_color="#27ae60",
+    )
+    fig.update_layout(title=data.title, xaxis_title="Coefficient of Variation", yaxis_title="Number of Proteins")
     return fig
 
 
@@ -786,7 +806,11 @@ def render_norm_scale(data: NormScaleData) -> Figure:
     if n_legend_items > 15:
         # Too many plates for horizontal legend — use scrollable vertical legend on the right
         legend_cfg = dict(
-            orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.02,
             font=dict(size=9),
         )
         margin_cfg = dict(r=140)
@@ -1041,41 +1065,86 @@ def render_row_check(data: RowCheckData) -> Figure:
 
 
 def render_col_check(data: ColCheckData) -> Figure:
-    """ColCheck QC summary as a donut chart with PASS/FLAG counts."""
+    """ColCheck as a strip plot of calibrator QC ratios with acceptance thresholds."""
     go, _ = _import_plotly()
 
-    labels = ["PASS", "FLAG"]
-    values = [data.n_pass, data.n_flag]
-    colors = ["#2ecc71", "#f39c12"]
-
-    filtered = [(lb, v, c) for lb, v, c in zip(labels, values, colors) if v > 0]
-    if not filtered:
-        filtered = [("PASS", 0, "#2ecc71")]
-
-    fig = go.Figure(
-        data=go.Pie(
-            labels=[f[0] for f in filtered],
-            values=[f[1] for f in filtered],
-            marker=dict(colors=[f[2] for f in filtered]),
-            hole=0.4,
-            textinfo="label+value+percent",
-            hovertemplate="%{label}: %{value} analytes (%{percent})<extra></extra>",
-        )
-    )
-
-    total = data.n_pass + data.n_flag
-    fig.update_layout(
-        title=data.title,
-        annotations=[
-            dict(
-                text=f"{total}<br>analytes",
-                x=0.5,
-                y=0.5,
-                font_size=16,
-                showarrow=False,
+    if data.qc_ratios:
+        # Strip plot of QC ratios, coloured by PASS/FLAG
+        colors = ["#2ecc71" if f == "PASS" else "#e74c3c" for f in data.col_check_flags]
+        fig = go.Figure()
+        # PASS points
+        pass_idx = [i for i, f in enumerate(data.col_check_flags) if f == "PASS"]
+        if pass_idx:
+            fig.add_trace(
+                go.Scatter(
+                    x=[data.analyte_ids[i] for i in pass_idx],
+                    y=[data.qc_ratios[i] for i in pass_idx],
+                    mode="markers",
+                    marker=dict(size=3, color="#2ecc71", opacity=0.5),
+                    name=f"PASS ({data.n_pass})",
+                    hovertemplate="%{x}<br>QC Ratio: %{y:.3f}<extra></extra>",
+                )
             )
-        ],
-    )
+        # FLAG points
+        flag_idx = [i for i, f in enumerate(data.col_check_flags) if f != "PASS"]
+        if flag_idx:
+            fig.add_trace(
+                go.Scatter(
+                    x=[data.analyte_ids[i] for i in flag_idx],
+                    y=[data.qc_ratios[i] for i in flag_idx],
+                    mode="markers",
+                    marker=dict(size=4, color="#e74c3c", opacity=0.7),
+                    name=f"FLAG ({data.n_flag})",
+                    hovertemplate="%{x}<br>QC Ratio: %{y:.3f}<extra></extra>",
+                )
+            )
+        # Acceptance thresholds
+        fig.add_hline(
+            y=0.8,
+            line_dash="dash",
+            line_color="#e67e22",
+            line_width=2,
+            annotation_text="0.8",
+            annotation_position="bottom left",
+        )
+        fig.add_hline(
+            y=1.2,
+            line_dash="dash",
+            line_color="#e67e22",
+            line_width=2,
+            annotation_text="1.2",
+            annotation_position="top left",
+        )
+        fig.add_hline(
+            y=1.0,
+            line_dash="dot",
+            line_color="#27ae60",
+            line_width=1,
+            annotation_text="ideal (1.0)",
+            annotation_position="bottom right",
+        )
+
+        fig.update_layout(
+            title=data.title,
+            xaxis_title="Analyte",
+            yaxis_title="Calibrator QC Ratio",
+            xaxis=dict(showticklabels=False),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.15),
+            height=450,
+        )
+    else:
+        # Fallback: simple text summary if no ratio data
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"PASS: {data.n_pass} | FLAG: {data.n_flag}",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=20),
+        )
+        fig.update_layout(title=data.title)
     return fig
 
 

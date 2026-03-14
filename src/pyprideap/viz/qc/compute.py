@@ -167,12 +167,15 @@ class RowCheckData:
 
 @dataclass
 class ColCheckData:
-    """SomaScan ColCheck QC summary."""
+    """SomaScan ColCheck QC summary with calibrator QC ratio values."""
 
     n_pass: int
     n_flag: int
     flagged_analyte_ids: list[str] = field(default_factory=list)
-    title: str = "ColCheck QC Summary"
+    qc_ratios: list[float] = field(default_factory=list)
+    analyte_ids: list[str] = field(default_factory=list)
+    col_check_flags: list[str] = field(default_factory=list)
+    title: str = "Calibrator QC Ratio"
 
 
 @dataclass
@@ -571,6 +574,15 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
     if numeric.shape[0] > max_samples:
         numeric = numeric.sample(n=max_samples, random_state=42)
 
+    # Sort samples by SampleType then PlateID so controls cluster together
+    sort_cols = []
+    for col in ("SampleType", "PlateID", "PlateId"):
+        if col in dataset.samples.columns:
+            sort_cols.append(col)
+    if sort_cols:
+        ordered_idx = dataset.samples.loc[numeric.index].sort_values(sort_cols).index
+        numeric = numeric.loc[ordered_idx]
+
     corr = numeric.T.corr()
 
     id_col = _sample_id_col(dataset)
@@ -634,22 +646,42 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
     available (fraction of samples with NPX below LOD), otherwise
     computed from the LOD matrix.
 
+    Control samples (negative controls, plate controls, buffer, calibrator, QC)
+    are excluded so the plot only shows biological samples.
+
     Returns None when no LOD source is available.
     """
+    from pyprideap.processing.filtering import filter_controls
     from pyprideap.processing.lod import _above_lod_matrix
 
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
-    sample_ids = _sample_ids(dataset)
+    # Filter out control samples — only show biological samples
+    ds = filter_controls(dataset)
+    # For SomaScan, also exclude Buffer/Calibrator/QC (not in _CONTROL_SAMPLE_TYPES)
+    if "SampleType" in ds.samples.columns:
+        st = ds.samples["SampleType"].astype(str).str.strip()
+        non_bio = st.str.lower().isin({"buffer", "calibrator", "qc"})
+        if non_bio.any():
+            keep = ~non_bio
+            ds = AffinityDataset(
+                platform=ds.platform,
+                samples=ds.samples.loc[keep].reset_index(drop=True),
+                features=ds.features,
+                expression=ds.expression.loc[keep].reset_index(drop=True),
+                metadata=ds.metadata,
+            )
+
+    numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+    sample_ids = _sample_ids(ds)
 
     # Try to get per-protein missing frequency from Olink's MissingFreq column
     # MissingFreq = fraction of samples with NPX below LOD
     olink_missing_freq = None
-    if "MissingFreq" in dataset.features.columns:
-        mf = pd.to_numeric(dataset.features["MissingFreq"], errors="coerce")
+    if "MissingFreq" in ds.features.columns:
+        mf = pd.to_numeric(ds.features["MissingFreq"], errors="coerce")
         if mf.notna().any():
             olink_missing_freq = mf
 
-    # Resolve LOD from all available sources
+    # Resolve LOD from all available sources (use original dataset for negative controls)
     lod = _resolve_lod(dataset)
     has_lod_data = lod is not None and (isinstance(lod, pd.DataFrame) or len(lod) > 0)
 
@@ -1030,7 +1062,7 @@ def compute_row_check(dataset: AffinityDataset) -> RowCheckData | None:
 
 
 def compute_col_check(dataset: AffinityDataset) -> ColCheckData | None:
-    """Compute ColCheck QC summary for SomaScan data."""
+    """Compute ColCheck QC summary with calibrator QC ratio values for SomaScan data."""
     if dataset.platform != Platform.SOMASCAN:
         return None
     if "ColCheck" not in dataset.features.columns:
@@ -1040,16 +1072,38 @@ def compute_col_check(dataset: AffinityDataset) -> ColCheckData | None:
 
     summary = get_col_check_summary(dataset)
 
+    id_col = "SeqId" if "SeqId" in dataset.features.columns else dataset.features.columns[0]
     flagged_ids: list[str] = []
     if summary["FLAG"] > 0:
         flag_mask = dataset.features["ColCheck"] == "FLAG"
-        id_col = "SeqId" if "SeqId" in dataset.features.columns else dataset.features.columns[0]
         flagged_ids = dataset.features.loc[flag_mask, id_col].astype(str).tolist()
+
+    # Extract CalQcRatio values for the scatter/strip plot
+    qc_ratios: list[float] = []
+    analyte_ids: list[str] = []
+    col_check_flags: list[str] = []
+    ratio_col = None
+    for c in dataset.features.columns:
+        if c.startswith("CalQcRatio"):
+            ratio_col = c
+            break
+
+    if ratio_col is not None:
+        ratios = pd.to_numeric(dataset.features[ratio_col], errors="coerce")
+        ids = dataset.features[id_col].astype(str)
+        flags = dataset.features["ColCheck"].astype(str)
+        valid = ratios.notna()
+        qc_ratios = ratios[valid].round(4).tolist()
+        analyte_ids = ids[valid].tolist()
+        col_check_flags = flags[valid].tolist()
 
     return ColCheckData(
         n_pass=summary["PASS"],
         n_flag=summary["FLAG"],
         flagged_analyte_ids=flagged_ids,
+        qc_ratios=qc_ratios,
+        analyte_ids=analyte_ids,
+        col_check_flags=col_check_flags,
     )
 
 
