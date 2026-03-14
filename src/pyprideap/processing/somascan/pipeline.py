@@ -200,7 +200,7 @@ def preprocess_somascan(
         flagged_ids = get_outlier_ids(outlier_map, flags=outlier_flags)
 
         if flagged_ids:
-            keep_mask = ~ds.samples.index.isin(flagged_ids)
+            keep_mask = pd.Series(~ds.samples.index.isin(flagged_ids), index=ds.samples.index)
             ds = AffinityDataset(
                 platform=ds.platform,
                 samples=ds.samples[keep_mask].reset_index(drop=True),
