@@ -408,10 +408,12 @@ def assess_bridgeability(
 
         # Correlation requires matched samples
         if len(common_samples) >= 3:
-            paired = pd.DataFrame({
-                "a": aligned1[protein].reindex(common_samples),
-                "b": aligned2[protein].reindex(common_samples),
-            }).dropna()
+            paired = pd.DataFrame(
+                {
+                    "a": aligned1[protein].reindex(common_samples),
+                    "b": aligned2[protein].reindex(common_samples),
+                }
+            ).dropna()
             correlation = float(paired["a"].corr(paired["b"])) if len(paired) >= 3 else np.nan
         else:
             correlation = np.nan
