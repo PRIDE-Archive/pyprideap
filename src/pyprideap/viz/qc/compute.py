@@ -271,10 +271,10 @@ def _sample_id_col(dataset: AffinityDataset) -> str:
         if col in dataset.samples.columns:
             if dataset.samples[col].nunique() == len(dataset.samples):
                 return col
-    # SampleID exists but is not unique — try SampleName if it has content
+    # SampleID exists but is not unique — try SampleName if fully populated
     if "SampleName" in dataset.samples.columns:
         non_empty = dataset.samples["SampleName"].astype(str).str.strip().replace("", pd.NA).dropna()
-        if len(non_empty) > 0:
+        if len(non_empty) == len(dataset.samples):
             return "SampleName"
     # Fall back to whichever ID column exists (even if not fully unique)
     for col in ("SampleID", "SampleId"):

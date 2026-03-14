@@ -712,7 +712,7 @@ def _count_proteins_above_lod(dataset: AffinityDataset) -> int | None:
         return None
 
     proteins = get_proteins_above_lod(dataset)
-    return len(proteins) if proteins else None
+    return len(proteins) if proteins is not None else None
 
 
 def _status_dot(level: str) -> str:

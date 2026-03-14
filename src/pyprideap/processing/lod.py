@@ -785,7 +785,7 @@ def get_proteins_above_lod(
 ) -> list[str]:
     """Return UniProt accessions for proteins above LOD in sufficient samples.
 
-    A protein passes if more than *threshold* % of valid (non-NaN) samples
+    A protein passes if at least *threshold* % of valid (non-NaN) samples
     have expression above the LOD for that assay.
 
     Args:
@@ -840,7 +840,7 @@ def get_proteins_above_lod(
         if n == 0:
             continue
         pct = float(above_lod.loc[valid, col].sum() / n * 100)
-        if pct > threshold:
+        if pct >= threshold:
             up = id_to_uniprot.get(col)
             if up and pd.notna(up):
                 proteins.add(str(up))

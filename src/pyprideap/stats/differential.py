@@ -65,7 +65,7 @@ def _resolve_assay_map(dataset: AffinityDataset) -> dict[str, str]:
         return {}
     id_col = "OlinkID" if "OlinkID" in dataset.features.columns else "SeqId"
     if id_col not in dataset.features.columns:
-        id_col = dataset.features.columns[0]
+        return {}
     return dict(zip(dataset.features[id_col], dataset.features["Assay"]))
 
 

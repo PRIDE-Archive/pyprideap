@@ -65,11 +65,24 @@ def bridge_normalize(
         If no bridge samples are found in both datasets or there are no
         overlapping proteins.
     """
-    # Validate bridge samples exist in both datasets
-    ds1_samples = set(dataset1.expression.index)
-    ds2_samples = set(dataset2.expression.index)
-    valid_bridge = [s for s in bridge_samples if s in ds1_samples and s in ds2_samples]
-    if not valid_bridge:
+    # Resolve bridge samples by sample ID column (not DataFrame index),
+    # since select_bridge_samples returns SampleID/SampleName strings.
+    def _resolve_bridge_mask(ds: AffinityDataset, bridge: list[str]) -> pd.Index:
+        for col in ("SampleID", "SampleId", "SampleName"):
+            if col in ds.samples.columns:
+                ids = ds.samples[col].astype(str)
+                mask = ids.isin(bridge)
+                if mask.any():
+                    return ds.samples.index[mask]
+        # Fallback: try matching against the expression index directly
+        idx_match = ds.expression.index.isin(bridge)
+        if idx_match.any():
+            return ds.expression.index[idx_match]
+        return pd.Index([])
+
+    ds1_bridge_idx = _resolve_bridge_mask(dataset1, bridge_samples)
+    ds2_bridge_idx = _resolve_bridge_mask(dataset2, bridge_samples)
+    if ds1_bridge_idx.empty or ds2_bridge_idx.empty:
         raise ValueError(f"No bridge samples found in both datasets. Requested: {bridge_samples}")
 
     # Validate overlapping proteins
@@ -78,8 +91,8 @@ def bridge_normalize(
         raise ValueError("No overlapping proteins between the two datasets.")
 
     # Compute per-protein adjustment on overlapping proteins
-    bridge_ds1 = dataset1.expression.loc[valid_bridge, overlapping_proteins]
-    bridge_ds2 = dataset2.expression.loc[valid_bridge, overlapping_proteins]
+    bridge_ds1 = dataset1.expression.loc[ds1_bridge_idx, overlapping_proteins]
+    bridge_ds2 = dataset2.expression.loc[ds2_bridge_idx, overlapping_proteins]
     adjustment = bridge_ds1.median(axis=0) - bridge_ds2.median(axis=0)
 
     # Apply adjustment to dataset2 (only overlapping columns are shifted;
