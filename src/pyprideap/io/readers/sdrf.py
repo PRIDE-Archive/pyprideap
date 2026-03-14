@@ -73,8 +73,7 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
         else:
             rename[col] = f"{base} {count}"
 
-    df: pd.DataFrame = df.rename(columns=rename)
-    return df
+    return pd.DataFrame(df.rename(columns=rename))
 
 
 def get_grouping_columns(sdrf: pd.DataFrame) -> list[str]:
