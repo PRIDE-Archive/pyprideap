@@ -41,6 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -223,10 +224,7 @@ def compute_nc_lod_detailed(
         control_mask = control_mask & qc_pass
 
     if control_mask.sum() < _MIN_CONTROLS_FOR_LOD:
-        raise ValueError(
-            f"Need at least {_MIN_CONTROLS_FOR_LOD} PASS negative controls, "
-            f"found {control_mask.sum()}"
-        )
+        raise ValueError(f"Need at least {_MIN_CONTROLS_FOR_LOD} PASS negative controls, found {control_mask.sum()}")
 
     numeric_expr = dataset.expression[control_mask].apply(pd.to_numeric, errors="coerce")
 
@@ -302,8 +300,9 @@ def compute_pc_normalized_lod(
     count_assays = lod_detail.lod_method == "lod_count"
     if count_assays.any():
         count_matrix = dataset.metadata.get("count_matrix")
-        ext_count = dataset.metadata.get("ext_count")
-        if count_matrix is not None and ext_count is not None:
+        ext_count_raw = dataset.metadata.get("ext_count")
+        if count_matrix is not None and ext_count_raw is not None:
+            ext_count = cast(pd.DataFrame, ext_count_raw)
             # PCMedian: per plate, median of plate control ExtNPX
             pc_median = dataset.metadata.get("pc_median")
             if pc_median is not None:

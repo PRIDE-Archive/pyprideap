@@ -31,44 +31,94 @@ class ControlAnalyteType(Enum):
 # Canonical SeqId lists from SomaDataIO R package (getAnalytes.R)
 _SEQ_HYB_CONTROL_ELUTION = frozenset(
     {
-        "2171-12", "2178-55", "2194-91",
-        "2229-54", "2249-25", "2273-34",
-        "2288-7", "2305-52", "2312-13",
-        "2359-65", "2430-52", "2513-7",
+        "2171-12",
+        "2178-55",
+        "2194-91",
+        "2229-54",
+        "2249-25",
+        "2273-34",
+        "2288-7",
+        "2305-52",
+        "2312-13",
+        "2359-65",
+        "2430-52",
+        "2513-7",
     }
 )
 
 _SEQ_SPURIOMER = frozenset(
     {
-        "2052-1", "2053-2", "2054-3", "2055-4",
-        "2056-5", "2057-6", "2058-7", "2060-9",
-        "2061-10", "4666-193", "4666-194", "4666-195",
-        "4666-199", "4666-200", "4666-202", "4666-205",
-        "4666-206", "4666-212", "4666-213", "4666-214",
+        "2052-1",
+        "2053-2",
+        "2054-3",
+        "2055-4",
+        "2056-5",
+        "2057-6",
+        "2058-7",
+        "2060-9",
+        "2061-10",
+        "4666-193",
+        "4666-194",
+        "4666-195",
+        "4666-199",
+        "4666-200",
+        "4666-202",
+        "4666-205",
+        "4666-206",
+        "4666-212",
+        "4666-213",
+        "4666-214",
     }
 )
 
 _SEQ_NON_BIOTIN = frozenset(
     {
-        "3525-1", "3525-2", "3525-3",
-        "3525-4", "4666-218", "4666-219",
-        "4666-220", "4666-222", "4666-223", "4666-224",
+        "3525-1",
+        "3525-2",
+        "3525-3",
+        "3525-4",
+        "4666-218",
+        "4666-219",
+        "4666-220",
+        "4666-222",
+        "4666-223",
+        "4666-224",
     }
 )
 
 _SEQ_NON_HUMAN = frozenset(
     {
-        "16535-61", "3507-1", "3512-72", "3650-8", "3717-23",
-        "3721-5", "3724-64", "3742-78", "3849-56", "4584-5",
-        "8443-9", "8444-3", "8444-46", "8445-184", "8445-54",
-        "8449-103", "8449-124", "8471-53", "8481-26", "8481-44",
-        "8482-39", "8483-5",
+        "16535-61",
+        "3507-1",
+        "3512-72",
+        "3650-8",
+        "3717-23",
+        "3721-5",
+        "3724-64",
+        "3742-78",
+        "3849-56",
+        "4584-5",
+        "8443-9",
+        "8444-3",
+        "8444-46",
+        "8445-184",
+        "8445-54",
+        "8449-103",
+        "8449-124",
+        "8471-53",
+        "8481-26",
+        "8481-44",
+        "8482-39",
+        "8483-5",
     }
 )
 
 _SEQ_NON_CLEAVABLE = frozenset(
     {
-        "4666-225", "4666-230", "4666-232", "4666-236",
+        "4666-225",
+        "4666-230",
+        "4666-232",
+        "4666-236",
     }
 )
 
@@ -166,11 +216,7 @@ def remove_control_analytes(
     control_seqids = get_control_seqids(*(categories or ()))
 
     # Identify columns to drop
-    drop_cols = [
-        col
-        for col in dataset.expression.columns
-        if _extract_seqid(str(col)) in control_seqids
-    ]
+    drop_cols = [col for col in dataset.expression.columns if _extract_seqid(str(col)) in control_seqids]
 
     if not drop_cols:
         return dataset
@@ -181,14 +227,10 @@ def remove_control_analytes(
     # Filter features table to match
     features = dataset.features
     if "SeqId" in features.columns:
-        keep_mask = ~features["SeqId"].apply(
-            lambda s: _extract_seqid(str(s)) in control_seqids
-        )
+        keep_mask = ~features["SeqId"].apply(lambda s: _extract_seqid(str(s)) in control_seqids)
         features = features[keep_mask].reset_index(drop=True)
     elif "Name" in features.columns:
-        keep_mask = ~features["Name"].apply(
-            lambda s: _extract_seqid(str(s)) in control_seqids
-        )
+        keep_mask = ~features["Name"].apply(lambda s: _extract_seqid(str(s)) in control_seqids)
         features = features[keep_mask].reset_index(drop=True)
     else:
         # Best-effort: trim to match expression columns

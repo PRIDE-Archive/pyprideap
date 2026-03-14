@@ -121,23 +121,16 @@ def preprocess_somascan(
 
         # Also filter by Type/Organism if available
         if "Type" in ds.features.columns and "Organism" in ds.features.columns:
-            keep_mask = (
-                (ds.features["Type"].str.strip() == "Protein")
-                & (ds.features["Organism"].str.strip() == "Human")
+            keep_mask = (ds.features["Type"].str.strip() == "Protein") & (
+                ds.features["Organism"].str.strip() == "Human"
             )
             # Also exclude "Internal Use Only" targets
             if "TargetFullName" in ds.features.columns:
-                keep_mask = keep_mask & ~ds.features["TargetFullName"].str.startswith(
-                    "Internal Use Only", na=False
-                )
+                keep_mask = keep_mask & ~ds.features["TargetFullName"].str.startswith("Internal Use Only", na=False)
 
             if not keep_mask.all():
                 keep_indices = keep_mask[keep_mask].index.tolist()
-                keep_cols = [
-                    ds.expression.columns[i]
-                    for i in keep_indices
-                    if i < len(ds.expression.columns)
-                ]
+                keep_cols = [ds.expression.columns[i] for i in keep_indices if i < len(ds.expression.columns)]
                 ds = AffinityDataset(
                     platform=ds.platform,
                     samples=ds.samples,
@@ -154,10 +147,7 @@ def preprocess_somascan(
             n_flagged = int((ds.features["ColCheck"] == "FLAG").sum())
             report.n_colcheck_flagged = n_flagged
             if n_flagged > 0:
-                report.steps.append(
-                    f"{n_flagged} human proteins flagged in ColCheck "
-                    f"(did not pass QC ratio 0.8–1.2)"
-                )
+                report.steps.append(f"{n_flagged} human proteins flagged in ColCheck (did not pass QC ratio 0.8–1.2)")
 
         if n_removed > 0:
             report.steps.append(f"{n_removed} non-human/control features removed")
@@ -201,10 +191,7 @@ def preprocess_somascan(
         n_removed = n_before - len(ds.samples)
         report.n_rowcheck_removed = n_removed
         if n_removed > 0:
-            report.steps.append(
-                f"{n_removed} samples removed (RowCheck FLAG: "
-                f"norm scale outside [0.4, 2.5])"
-            )
+            report.steps.append(f"{n_removed} samples removed (RowCheck FLAG: norm scale outside [0.4, 2.5])")
 
     # 4. Filter outliers
     if filter_outliers:
@@ -226,8 +213,7 @@ def preprocess_somascan(
         report.n_outliers_removed = n_removed
         if n_removed > 0:
             report.steps.append(
-                f"{n_removed} outlier samples removed "
-                f"(≥{outlier_flags:.0%} analytes exceeded 6×MAD & {fc_crit}× FC)"
+                f"{n_removed} outlier samples removed (≥{outlier_flags:.0%} analytes exceeded 6×MAD & {fc_crit}× FC)"
             )
 
     # 5. Log10 transform

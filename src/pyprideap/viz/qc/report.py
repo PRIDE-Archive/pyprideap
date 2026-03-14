@@ -980,11 +980,13 @@ def _render_summary_table(
                 iqr_dot = _status_dot("amber")
             else:
                 iqr_dot = _status_dot("red")
-            rows.append(_summary_row(
-                iqr_dot,
-                "IQR/Median outlier samples",
-                f"{n_outlier} / {n_total}",
-            ))
+            rows.append(
+                _summary_row(
+                    iqr_dot,
+                    "IQR/Median outlier samples",
+                    f"{n_outlier} / {n_total}",
+                )
+            )
 
         if isinstance(uniprot_dup_data, UniProtDuplicateData):
             n_affected = uniprot_dup_data.n_affected_assays
@@ -995,11 +997,13 @@ def _render_summary_table(
                 dup_dot = _status_dot("amber")
             else:
                 dup_dot = _status_dot("red")
-            rows.append(_summary_row(
-                dup_dot,
-                "UniProt duplicate assays",
-                f"{n_affected} / {n_total_assays}",
-            ))
+            rows.append(
+                _summary_row(
+                    dup_dot,
+                    "UniProt duplicate assays",
+                    f"{n_affected} / {n_total_assays}",
+                )
+            )
 
     # --- SomaScan QC Flags ---
     if dataset.platform == _Platform.SOMASCAN:
@@ -1022,11 +1026,13 @@ def _render_summary_table(
                     rc_dot = _status_dot("amber")
                 else:
                     rc_dot = _status_dot("red")
-                rows.append(_summary_row(
-                    rc_dot,
-                    "RowCheck (PASS / FLAG)",
-                    f"{row_check_data.n_pass} / {row_check_data.n_flag}",
-                ))
+                rows.append(
+                    _summary_row(
+                        rc_dot,
+                        "RowCheck (PASS / FLAG)",
+                        f"{row_check_data.n_pass} / {row_check_data.n_flag}",
+                    )
+                )
 
             # ColCheck summary
             if isinstance(col_check_data, ColCheckData):
@@ -1038,18 +1044,17 @@ def _render_summary_table(
                     cc_dot = _status_dot("amber")
                 else:
                     cc_dot = _status_dot("red")
-                rows.append(_summary_row(
-                    cc_dot,
-                    "ColCheck (PASS / FLAG)",
-                    f"{col_check_data.n_pass} / {col_check_data.n_flag}",
-                ))
+                rows.append(
+                    _summary_row(
+                        cc_dot,
+                        "ColCheck (PASS / FLAG)",
+                        f"{col_check_data.n_pass} / {col_check_data.n_flag}",
+                    )
+                )
 
             # Outlier summary
             if isinstance(outlier_map_data, OutlierMapData):
-                n_flagged = sum(
-                    1 for frac in outlier_map_data.outlier_fraction_per_sample
-                    if frac >= 0.05
-                )
+                n_flagged = sum(1 for frac in outlier_map_data.outlier_fraction_per_sample if frac >= 0.05)
                 flag_rate = n_flagged / len(outlier_map_data.sample_ids) if outlier_map_data.sample_ids else 0.0
                 if n_flagged == 0:
                     ol_dot = _status_dot("green")
@@ -1057,19 +1062,23 @@ def _render_summary_table(
                     ol_dot = _status_dot("amber")
                 else:
                     ol_dot = _status_dot("red")
-                rows.append(_summary_row(
-                    ol_dot,
-                    "Outlier samples (&ge;5% analytes)",
-                    f"{n_flagged} / {len(outlier_map_data.sample_ids)}",
-                ))
+                rows.append(
+                    _summary_row(
+                        ol_dot,
+                        "Outlier samples (&ge;5% analytes)",
+                        f"{n_flagged} / {len(outlier_map_data.sample_ids)}",
+                    )
+                )
 
             # Control analytes
             if isinstance(control_data, ControlAnalyteData) and control_data.total_controls > 0:
-                rows.append(_summary_row(
-                    "",
-                    "Control analytes detected",
-                    f"{control_data.total_controls} / {control_data.total_analytes}",
-                ))
+                rows.append(
+                    _summary_row(
+                        "",
+                        "Control analytes detected",
+                        f"{control_data.total_controls} / {control_data.total_analytes}",
+                    )
+                )
 
     table_html = f'<table class="summary-table">{"".join(rows)}</table>'
 
@@ -1189,10 +1198,7 @@ def qc_report(dataset: AffinityDataset, output: str | Path) -> Path:
             toggle_html = ""
 
         # Add label toggle button (labels are hidden by default for all datasets)
-        toggle_html += (
-            '<button class="label-toggle-btn" onclick="toggleDimRedLabels(this)">'
-            "Show Labels</button>"
-        )
+        toggle_html += '<button class="label-toggle-btn" onclick="toggleDimRedLabels(this)">Show Labels</button>'
 
         rendered["dimreduction"] = ("Dimensionality Reduction", combined_html, toggle_html)
 
@@ -1321,7 +1327,7 @@ def _wrap_standalone_html(title: str, body: str, include_plotlyjs: bool = True) 
     """Wrap plot HTML in a standalone page with PRIDE styling."""
     plotly_cdn = '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>\n' if include_plotlyjs else ""
     return (
-        f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+        f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         f'    <meta charset="utf-8">\n'
         f'    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"    <title>{title}</title>\n"
@@ -1407,13 +1413,7 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
         title = getattr(data, "title", key.replace("_", " ").title())
         help_html = _HELP_TEXT.get(key, "")
         help_block = f'<div class="help-text open">{help_html}</div>' if help_html else ""
-        body = (
-            f'<div class="plot-card">'
-            f'<div class="plot-header"><h3>{title}</h3></div>'
-            f"{help_block}"
-            f"{plot_html}"
-            f"</div>"
-        )
+        body = f'<div class="plot-card"><div class="plot-header"><h3>{title}</h3></div>{help_block}{plot_html}</div>'
         page = _wrap_standalone_html(f"{title} — {platform_label}", body)
         (output_dir / f"{key}.html").write_text(page)
         written.append(key)

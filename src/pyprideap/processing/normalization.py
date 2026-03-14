@@ -20,6 +20,7 @@ objects are never mutated.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -274,7 +275,7 @@ def select_bridge_samples(
 
         above_lod, has_lod = _above_lod_matrix(expr, lod)
         n_valid = (expr.notna() & has_lod).sum(axis=1)
-        n_below = (n_valid - (above_lod & has_lod).sum(axis=1))
+        n_below = n_valid - (above_lod & has_lod).sum(axis=1)
         pct_below = n_below / n_valid.clip(lower=1)
         keep &= pct_below < sample_missing_freq
 
@@ -308,7 +309,8 @@ def select_bridge_samples(
         positions = np.linspace(0, total - 1, n + 2, dtype=int)[1:-1]
         selected_idx = sorted_idx[positions]
 
-    return sample_ids.loc[selected_idx].tolist()
+    selected: list[str] = sample_ids.loc[selected_idx].tolist()
+    return selected
 
 
 def assess_bridgeability(
@@ -481,13 +483,15 @@ def assess_cross_product_bridgeability(
         range_diff = abs(range1 - range2)
 
         # Low count check
-        count_matrix1 = dataset1.metadata.get("count_matrix")
-        count_matrix2 = dataset2.metadata.get("count_matrix")
+        count_matrix1_raw = dataset1.metadata.get("count_matrix")
+        count_matrix2_raw = dataset2.metadata.get("count_matrix")
         low_cnt = True  # default if no count data
-        if count_matrix1 is not None and count_matrix2 is not None:
-            if protein in count_matrix1.columns and protein in count_matrix2.columns:
-                med_cnt1 = float(pd.to_numeric(count_matrix1[protein], errors="coerce").median())
-                med_cnt2 = float(pd.to_numeric(count_matrix2[protein], errors="coerce").median())
+        if count_matrix1_raw is not None and count_matrix2_raw is not None:
+            cm1 = cast(pd.DataFrame, count_matrix1_raw)
+            cm2 = cast(pd.DataFrame, count_matrix2_raw)
+            if protein in cm1.columns and protein in cm2.columns:
+                med_cnt1 = float(pd.to_numeric(cm1[protein], errors="coerce").median())
+                med_cnt2 = float(pd.to_numeric(cm2[protein], errors="coerce").median())
                 low_cnt = med_cnt1 < median_count_threshold or med_cnt2 < median_count_threshold
 
         # Correlation (r²) on matched samples
@@ -740,24 +744,40 @@ def scale_analytes(
 
 # Map commercial assay version names to internal size labels
 _VER_TO_SIZE: dict[str, str] = {
-    "V3": "1.1k", "v3": "1.1k", "v3.0": "1.1k",
-    "V3.2": "1.3k", "v3.2": "1.3k",
-    "V4": "5k", "v4": "5k", "v4.0": "5k",
-    "V4.1": "7k", "v4.1": "7k",
-    "V5": "11k", "v5": "11k", "v5.0": "11k",
+    "V3": "1.1k",
+    "v3": "1.1k",
+    "v3.0": "1.1k",
+    "V3.2": "1.3k",
+    "v3.2": "1.3k",
+    "V4": "5k",
+    "v4": "5k",
+    "v4.0": "5k",
+    "V4.1": "7k",
+    "v4.1": "7k",
+    "V5": "11k",
+    "v5": "11k",
+    "v5.0": "11k",
 }
 
 _SIZE_TO_VER: dict[str, str] = {
-    "1.1k": "v3.0", "1.3k": "v3.2",
-    "5k": "v4.0", "7k": "v4.1", "11k": "v5.0",
+    "1.1k": "v3.0",
+    "1.3k": "v3.2",
+    "5k": "v4.0",
+    "7k": "v4.1",
+    "11k": "v5.0",
 }
 
 # Valid lifting bridges
-_VALID_BRIDGES = frozenset({
-    "11k_to_7k", "11k_to_5k",
-    "7k_to_11k", "7k_to_5k",
-    "5k_to_11k", "5k_to_7k",
-})
+_VALID_BRIDGES = frozenset(
+    {
+        "11k_to_7k",
+        "11k_to_5k",
+        "7k_to_11k",
+        "7k_to_5k",
+        "5k_to_11k",
+        "5k_to_7k",
+    }
+)
 
 
 def _resolve_somascan_version(dataset: AffinityDataset) -> str | None:
@@ -808,10 +828,7 @@ def validate_lift_requirements(
 
     # 1. Valid bridge
     if bridge not in _VALID_BRIDGES:
-        errors.append(
-            f"Invalid bridge '{bridge}'. "
-            f"Valid options: {sorted(_VALID_BRIDGES)}"
-        )
+        errors.append(f"Invalid bridge '{bridge}'. Valid options: {sorted(_VALID_BRIDGES)}")
         return errors
 
     from_space = bridge.split("_to_")[0]
@@ -820,22 +837,16 @@ def validate_lift_requirements(
     # 2. ANML normalization check
     process_steps = str(dataset.metadata.get("ProcessSteps", ""))
     if "anml" not in process_steps.lower():
-        errors.append(
-            "ANML normalized SomaScan data is required for lifting. "
-            "ProcessSteps does not contain 'ANML'."
-        )
+        errors.append("ANML normalized SomaScan data is required for lifting. ProcessSteps does not contain 'ANML'.")
 
     # 3. Signal space check
     current_space = _resolve_somascan_version(dataset)
     if current_space is not None and current_space != from_space:
         errors.append(
-            f"Bridge '{bridge}' expects data in {from_space} space, "
-            f"but dataset appears to be in {current_space} space."
+            f"Bridge '{bridge}' expects data in {from_space} space, but dataset appears to be in {current_space} space."
         )
     if current_space == to_space:
-        errors.append(
-            f"Data already appears to be in {to_space} space."
-        )
+        errors.append(f"Data already appears to be in {to_space} space.")
 
     # 4. Matrix check
     matrix = str(dataset.metadata.get("StudyMatrix", "")).lower()
@@ -901,9 +912,7 @@ def lift_somascan(
     if bridge is not None and validate:
         errors = validate_lift_requirements(dataset, bridge)
         if errors:
-            raise ValueError(
-                "Lifting validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
-            )
+            raise ValueError("Lifting validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
         # Infer target_version from bridge
         if target_version is None:
             to_space = bridge.split("_to_")[1]
@@ -928,9 +937,7 @@ def lift_somascan(
         to_space = bridge.split("_to_")[1]
         step = f"Lifting Bridge ({from_space} -> {to_space})"
         existing = str(new_metadata.get("ProcessSteps", ""))
-        new_metadata["ProcessSteps"] = (
-            f"{existing}, {step}" if existing else step
-        )
+        new_metadata["ProcessSteps"] = f"{existing}, {step}" if existing else step
 
     return replace(dataset, expression=scaled_expression, metadata=new_metadata)
 
@@ -984,7 +991,7 @@ def lins_ccc(x: np.ndarray, y: np.ndarray) -> float:
     if denominator == 0:
         return float("nan")
 
-    return numerator / denominator
+    return float(numerator / denominator)
 
 
 def assess_lift_quality(
@@ -1032,14 +1039,16 @@ def assess_lift_quality(
         med_lift = float(np.nanmedian(lift_vals))
         scalar = med_lift / med_orig if med_orig != 0 else float("nan")
 
-        records.append({
-            "analyte": str(col),
-            "ccc": round(ccc, 4),
-            "pearson_r": round(pearson_r, 4),
-            "median_original": round(med_orig, 2),
-            "median_lifted": round(med_lift, 2),
-            "scalar": round(scalar, 4),
-        })
+        records.append(
+            {
+                "analyte": str(col),
+                "ccc": round(ccc, 4),
+                "pearson_r": round(pearson_r, 4),
+                "median_original": round(med_orig, 2),
+                "median_lifted": round(med_lift, 2),
+                "scalar": round(scalar, 4),
+            }
+        )
 
     return pd.DataFrame(records)
 
@@ -1119,27 +1128,23 @@ def normalize_n(
 
     for step in sorted_steps[1:]:
         if step.normalize_to is None or step.normalization_type is None:
-            raise ValueError(
-                f"Step '{step.name}' (order={step.order}) must have "
-                f"normalize_to and normalization_type."
-            )
+            raise ValueError(f"Step '{step.name}' (order={step.order}) must have normalize_to and normalization_type.")
 
         # Build reference dataset by concatenating target projects
-        ref_names = [
-            s.name for s in sorted_steps
-            if s.order in step.normalize_to
-        ]
+        ref_names = [s.name for s in sorted_steps if s.order in step.normalize_to]
         if len(ref_names) == 1:
             ref_ds = results[ref_names[0]]
         else:
             # Concatenate expression from multiple reference projects
             ref_datasets = [results[n] for n in ref_names]
             concat_expr = pd.concat(
-                [d.expression for d in ref_datasets], axis=0,
+                [d.expression for d in ref_datasets],
+                axis=0,
             )
             concat_samples = pd.concat(
                 [d.samples for d in ref_datasets],
-                axis=0, ignore_index=True,
+                axis=0,
+                ignore_index=True,
             )
             ref_ds = replace(
                 ref_datasets[0],
@@ -1151,27 +1156,22 @@ def normalize_n(
         norm_type = step.normalization_type.lower()
         if norm_type == "bridge":
             if step.bridge_samples is None:
-                raise ValueError(
-                    f"Step '{step.name}' uses bridge normalization but "
-                    f"bridge_samples is None."
-                )
+                raise ValueError(f"Step '{step.name}' uses bridge normalization but bridge_samples is None.")
             normalized = bridge_normalize(
-                ref_ds, step.dataset, step.bridge_samples["ref"],
+                ref_ds,
+                step.dataset,
+                step.bridge_samples["ref"],
             )
         elif norm_type == "subset":
             if step.bridge_samples is None:
-                raise ValueError(
-                    f"Step '{step.name}' uses subset normalization but "
-                    f"bridge_samples is None."
-                )
+                raise ValueError(f"Step '{step.name}' uses subset normalization but bridge_samples is None.")
             normalized = subset_normalize(
-                ref_ds, step.dataset, step.bridge_samples["ref"],
+                ref_ds,
+                step.dataset,
+                step.bridge_samples["ref"],
             )
         else:
-            raise ValueError(
-                f"Unknown normalization_type '{step.normalization_type}'. "
-                f"Must be 'bridge' or 'subset'."
-            )
+            raise ValueError(f"Unknown normalization_type '{step.normalization_type}'. Must be 'bridge' or 'subset'.")
 
         results[step.name] = normalized
 
@@ -1193,9 +1193,7 @@ def _validate_norm_schema(steps: list[NormalizationStep]) -> None:
     if 1 not in orders:
         raise ValueError("Schema must include a reference step with order=1.")
     if sorted(orders) != list(range(1, len(orders) + 1)):
-        raise ValueError(
-            "Step orders must be a contiguous sequence starting from 1."
-        )
+        raise ValueError("Step orders must be a contiguous sequence starting from 1.")
 
     # Validate normalize_to references
     order_set = set(orders)
@@ -1203,24 +1201,15 @@ def _validate_norm_schema(steps: list[NormalizationStep]) -> None:
         if step.order == 1:
             continue
         if step.normalize_to is None:
-            raise ValueError(
-                f"Step '{step.name}' (order={step.order}) must specify "
-                f"normalize_to."
-            )
+            raise ValueError(f"Step '{step.name}' (order={step.order}) must specify normalize_to.")
         for ref_order in step.normalize_to:
             if ref_order not in order_set:
-                raise ValueError(
-                    f"Step '{step.name}' references order={ref_order} "
-                    f"which does not exist."
-                )
+                raise ValueError(f"Step '{step.name}' references order={ref_order} which does not exist.")
             if ref_order == step.order:
-                raise ValueError(
-                    f"Step '{step.name}' cannot normalize to itself."
-                )
+                raise ValueError(f"Step '{step.name}' cannot normalize to itself.")
             if ref_order >= step.order:
                 raise ValueError(
-                    f"Step '{step.name}' (order={step.order}) cannot "
-                    f"normalize to a later step (order={ref_order})."
+                    f"Step '{step.name}' (order={step.order}) cannot normalize to a later step (order={ref_order})."
                 )
 
 
@@ -1289,9 +1278,7 @@ def _remove_external_controls(dataset: AffinityDataset) -> AffinityDataset:
 
     if sample_type_col is not None:
         control_types = {"NEGATIVE_CONTROL", "PLATE_CONTROL"}
-        keep_mask = ~dataset.samples[sample_type_col].astype(str).isin(
-            control_types
-        )
+        keep_mask = ~dataset.samples[sample_type_col].astype(str).isin(control_types)
     else:
         # Fall back to regex matching on SampleID
         sid_col = "SampleID"
@@ -1304,11 +1291,17 @@ def _remove_external_controls(dataset: AffinityDataset) -> AffinityDataset:
             return dataset
 
         control_patterns = (
-            "NEGATIVE", "NEG_CTRL", "PLATE_CONTROL", "IPC", "Neg_Ctrl",
+            "NEGATIVE",
+            "NEG_CTRL",
+            "PLATE_CONTROL",
+            "IPC",
+            "Neg_Ctrl",
         )
         sid_str = dataset.samples[sid_col].astype(str)
         keep_mask = ~sid_str.str.contains(
-            "|".join(control_patterns), case=False, na=False,
+            "|".join(control_patterns),
+            case=False,
+            na=False,
         )
 
     n_removed = int((~keep_mask).sum())
@@ -1346,36 +1339,28 @@ def _add_non_overlapping_assays(
     # Add target-only assays (from the original, unnormalized target)
     for col in sorted(tgt_only):
         if col in original_target.expression.columns:
-            result_expr[col] = original_target.expression[col].reindex(
-                result_expr.index
-            )
+            result_expr[col] = original_target.expression[col].reindex(result_expr.index)
 
     # Update features table if available
     new_features = normalized_target.features
     if new_features is not None and not new_features.empty:
-        id_col = (
-            "OlinkID" if "OlinkID" in new_features.columns
-            else new_features.columns[0]
-        )
+        id_col = "OlinkID" if "OlinkID" in new_features.columns else new_features.columns[0]
         existing_ids = set(new_features[id_col])
         new_rows = []
 
         if original_target.features is not None:
             tgt_id_col = (
-                "OlinkID" if "OlinkID" in original_target.features.columns
-                else original_target.features.columns[0]
+                "OlinkID" if "OlinkID" in original_target.features.columns else original_target.features.columns[0]
             )
             for _, row in original_target.features.iterrows():
-                if (
-                    row[tgt_id_col] in tgt_only
-                    and row[tgt_id_col] not in existing_ids
-                ):
+                if row[tgt_id_col] in tgt_only and row[tgt_id_col] not in existing_ids:
                     new_rows.append(row)
                     existing_ids.add(row[tgt_id_col])
 
         if new_rows:
             new_features = pd.concat(
-                [new_features, pd.DataFrame(new_rows)], ignore_index=True,
+                [new_features, pd.DataFrame(new_rows)],
+                ignore_index=True,
             )
 
     return replace(

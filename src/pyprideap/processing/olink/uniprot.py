@@ -81,11 +81,7 @@ def detect_uniprot_duplicates(
     )
 
     # Find duplicates (multiple UniProt per OlinkID)
-    duplicates = {
-        oid: uniprots
-        for oid, uniprots in grouped.items()
-        if len(uniprots) > 1
-    }
+    duplicates = {oid: uniprots for oid, uniprots in grouped.items() if len(uniprots) > 1}
 
     return UniProtDuplicateInfo(
         duplicates=duplicates,

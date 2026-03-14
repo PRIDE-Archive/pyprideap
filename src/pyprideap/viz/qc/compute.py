@@ -286,7 +286,8 @@ def _sample_id_col(dataset: AffinityDataset) -> str:
 def _sample_ids(dataset: AffinityDataset) -> list[str]:
     col = _sample_id_col(dataset)
     if col in dataset.samples.columns:
-        return dataset.samples[col].astype(str).tolist()
+        result: list[str] = dataset.samples[col].astype(str).tolist()
+        return result
     return [f"S{i}" for i in range(len(dataset.samples))]
 
 
@@ -1012,16 +1013,12 @@ def compute_row_check(dataset: AffinityDataset) -> RowCheckData | None:
 
     flagged_mask = ds.samples["RowCheck"] == "FLAG"
     sample_ids = _sample_ids(ds)
-    flagged_ids = [
-        sample_ids[i] for i, flagged in enumerate(flagged_mask) if flagged
-    ]
+    flagged_ids = [sample_ids[i] for i, flagged in enumerate(flagged_mask) if flagged]
 
     # Get norm scale values for flagged samples
     norm_vals: list[float] = []
     if "HybControlNormScale" in ds.samples.columns and flagged_mask.any():
-        vals = pd.to_numeric(
-            ds.samples.loc[flagged_mask, "HybControlNormScale"], errors="coerce"
-        )
+        vals = pd.to_numeric(ds.samples.loc[flagged_mask, "HybControlNormScale"], errors="coerce")
         norm_vals = vals.tolist()
 
     return RowCheckData(
@@ -1099,10 +1096,7 @@ def compute_norm_scale_boxplot(
         return None
 
     # Find normalization scale columns
-    norm_cols = [
-        c for c in dataset.samples.columns
-        if "normscale" in c.lower() or c.startswith("Med.Scale.")
-    ]
+    norm_cols = [c for c in dataset.samples.columns if "normscale" in c.lower() or c.startswith("Med.Scale.")]
     if not norm_cols:
         return None
 
@@ -1207,7 +1201,9 @@ def compute_bridgeability(
 
     try:
         df = assess_cross_product_bridgeability(
-            dataset1, dataset2, iqr_multiplier=iqr_multiplier,
+            dataset1,
+            dataset2,
+            iqr_multiplier=iqr_multiplier,
         )
     except ValueError:
         return None
@@ -1215,8 +1211,8 @@ def compute_bridgeability(
     if df.empty:
         return None
 
-    name1 = product1_name or getattr(dataset1.platform, "value", "Product 1")
-    name2 = product2_name or getattr(dataset2.platform, "value", "Product 2")
+    name1 = product1_name or str(getattr(dataset1.platform, "value", "Product 1"))
+    name2 = product2_name or str(getattr(dataset2.platform, "value", "Product 2"))
 
     recs = df["bridging_recommendation"].value_counts()
 

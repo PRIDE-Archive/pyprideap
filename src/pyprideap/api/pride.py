@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 _BASE_URL = "https://www.ebi.ac.uk/pride/ws/archive/v3"
 

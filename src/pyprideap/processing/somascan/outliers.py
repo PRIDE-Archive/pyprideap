@@ -102,7 +102,8 @@ def _get_outliers_per_analyte(
         fc_down = med / values > fc_crit
     fold_bool = fc_up | fc_down
 
-    return stat_bool & fold_bool
+    result: np.ndarray = stat_bool & fold_bool
+    return result
 
 
 def calc_outlier_map(
@@ -201,5 +202,5 @@ def get_outlier_ids(
 
     threshold = n_analytes * flags
     row_sums = outlier_map.matrix.sum(axis=1)
-    flagged = row_sums[row_sums >= threshold].index.tolist()
+    flagged: list[int] = row_sums[row_sums >= threshold].index.tolist()
     return flagged

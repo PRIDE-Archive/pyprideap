@@ -66,10 +66,7 @@ def add_row_check(
     samples = dataset.samples.copy()
 
     # Find normalization scale columns
-    norm_cols = [
-        c for c in samples.columns
-        if "normscale" in c.lower() or c.startswith("Med.Scale.")
-    ]
+    norm_cols = [c for c in samples.columns if "normscale" in c.lower() or c.startswith("Med.Scale.")]
 
     if not norm_cols:
         samples["RowCheck"] = "PASS"

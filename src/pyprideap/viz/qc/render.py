@@ -150,35 +150,41 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
     fig = go.Figure()
 
     # 5th-95th band (light fill)
-    fig.add_trace(go.Scatter(
-        x=np.concatenate([bin_centers, bin_centers[::-1]]).tolist(),
-        y=np.concatenate([p95, p5[::-1]]).tolist(),
-        fill="toself",
-        fillcolor="rgba(91,192,190,0.15)",
-        line=dict(color="rgba(0,0,0,0)"),
-        name="5th–95th percentile",
-        hoverinfo="skip",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=np.concatenate([bin_centers, bin_centers[::-1]]).tolist(),
+            y=np.concatenate([p95, p5[::-1]]).tolist(),
+            fill="toself",
+            fillcolor="rgba(91,192,190,0.15)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="5th–95th percentile",
+            hoverinfo="skip",
+        )
+    )
 
     # 25th-75th band (IQR)
-    fig.add_trace(go.Scatter(
-        x=np.concatenate([bin_centers, bin_centers[::-1]]).tolist(),
-        y=np.concatenate([p75, p25[::-1]]).tolist(),
-        fill="toself",
-        fillcolor="rgba(91,192,190,0.3)",
-        line=dict(color="rgba(0,0,0,0)"),
-        name="IQR (25th–75th)",
-        hoverinfo="skip",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=np.concatenate([bin_centers, bin_centers[::-1]]).tolist(),
+            y=np.concatenate([p75, p25[::-1]]).tolist(),
+            fill="toself",
+            fillcolor="rgba(91,192,190,0.3)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="IQR (25th–75th)",
+            hoverinfo="skip",
+        )
+    )
 
     # Median line
-    fig.add_trace(go.Scatter(
-        x=bin_centers.tolist(),
-        y=p50.tolist(),
-        mode="lines",
-        line=dict(color="#4a9e9c", width=2.5),
-        name="Median",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=bin_centers.tolist(),
+            y=p50.tolist(),
+            mode="lines",
+            line=dict(color="#4a9e9c", width=2.5),
+            name="Median",
+        )
+    )
 
     # Add a small random subsample of individual traces for context
     rng = np.random.default_rng(42)
@@ -189,15 +195,17 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
         if not vals:
             continue
         counts, _ = np.histogram(vals, bins=bin_edges)
-        fig.add_trace(go.Scatter(
-            x=bin_centers.tolist(),
-            y=counts.tolist(),
-            mode="lines",
-            line=dict(width=0.8),
-            opacity=0.4,
-            name=data.sample_ids[idx],
-            hovertemplate=f"{data.sample_ids[idx]}<br>{data.xlabel}: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=bin_centers.tolist(),
+                y=counts.tolist(),
+                mode="lines",
+                line=dict(width=0.8),
+                opacity=0.4,
+                name=data.sample_ids[idx],
+                hovertemplate=f"{data.sample_ids[idx]}<br>{data.xlabel}: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>",
+            )
+        )
 
     n_samples = len(data.sample_ids)
     fig.update_layout(
@@ -310,6 +318,7 @@ def render_pca(data: PcaData) -> Figure:
         x="PC1",
         y="PC2",
         color="Group",
+        text="Label",
         hover_data=["Label"],
         title=data.title,
         labels={
@@ -317,7 +326,7 @@ def render_pca(data: PcaData) -> Figure:
             "PC2": f"PC2 ({ve[1] * 100:.1f}%)" if len(ve) > 1 else "PC2",
         },
     )
-    fig.update_traces(textposition="top center", marker=dict(size=10))
+    fig.update_traces(mode="markers", textposition="top center", marker=dict(size=10))
     return fig
 
 
@@ -335,10 +344,11 @@ def render_tsne(data: UmapData) -> Figure:
         x=x_label,
         y=y_label,
         color="Group",
+        text="Label",
         hover_data=["Label"],
         title=f"{method} Projection",
     )
-    fig.update_traces(textposition="top center", marker=dict(size=10))
+    fig.update_traces(mode="markers", textposition="top center", marker=dict(size=10))
     return fig
 
 
@@ -963,11 +973,7 @@ def render_outlier_map(data: OutlierMapData) -> Figure:
             zmin=0,
             zmax=1,
             showscale=False,
-            hovertemplate=(
-                "Sample: %{y}<br>"
-                "Analyte: %{x}<br>"
-                "Outlier: %{z:.0f}<extra></extra>"
-            ),
+            hovertemplate=("Sample: %{y}<br>Analyte: %{x}<br>Outlier: %{z:.0f}<extra></extra>"),
         )
     )
 
@@ -1011,7 +1017,9 @@ def render_row_check(data: RowCheckData) -> Figure:
         annotations=[
             dict(
                 text=f"{total}<br>samples",
-                x=0.5, y=0.5, font_size=16,
+                x=0.5,
+                y=0.5,
+                font_size=16,
                 showarrow=False,
             )
         ],
@@ -1048,7 +1056,9 @@ def render_col_check(data: ColCheckData) -> Figure:
         annotations=[
             dict(
                 text=f"{total}<br>analytes",
-                x=0.5, y=0.5, font_size=16,
+                x=0.5,
+                y=0.5,
+                font_size=16,
                 showarrow=False,
             )
         ],
@@ -1090,8 +1100,10 @@ def render_control_analytes(data: ControlAnalyteData) -> Figure:
         annotations=[
             dict(
                 text=f"Total: {data.total_controls} control / {data.total_analytes} total analytes",
-                xref="paper", yref="paper",
-                x=0.98, y=0.98,
+                xref="paper",
+                yref="paper",
+                x=0.98,
+                y=0.98,
                 showarrow=False,
                 font=dict(size=12, color="#555"),
                 bgcolor="rgba(255,255,255,0.8)",
@@ -1118,13 +1130,15 @@ def render_norm_scale_boxplot(data: NormScaleBoxplotData) -> Figure:
         return fig
 
     fig = make_subplots(
-        rows=n_cols, cols=1,
+        rows=n_cols,
+        cols=1,
         subplot_titles=data.norm_scale_columns,
         vertical_spacing=max(0.05, 0.3 / n_cols),
     )
 
     groups = sorted(set(data.groups))
     from pyprideap.viz.theme import pride_color_discrete
+
     colors = pride_color_discrete(len(groups))
     group_colors = {g: colors[i] for i, g in enumerate(groups)}
 
@@ -1132,7 +1146,8 @@ def render_norm_scale_boxplot(data: NormScaleBoxplotData) -> Figure:
         vals = data.values.get(col_name, [])
         for group in groups:
             group_vals = [
-                v for v, g in zip(vals, data.groups)
+                v
+                for v, g in zip(vals, data.groups)
                 if g == group and v is not None and not (isinstance(v, float) and v != v)
             ]
             if not group_vals:
@@ -1145,7 +1160,8 @@ def render_norm_scale_boxplot(data: NormScaleBoxplotData) -> Figure:
                     marker_color=group_colors[group],
                     showlegend=(row_idx == 1),
                 ),
-                row=row_idx, col=1,
+                row=row_idx,
+                col=1,
             )
 
         # Add threshold lines
@@ -1177,7 +1193,8 @@ def render_iqr_median_qc(data: IqrMedianQcData) -> Figure:
     n_rows = (n_panels + n_cols - 1) // n_cols
 
     fig = make_subplots(
-        rows=n_rows, cols=n_cols,
+        rows=n_rows,
+        cols=n_cols,
         subplot_titles=panels,
         horizontal_spacing=0.08,
         vertical_spacing=0.12,
@@ -1212,7 +1229,8 @@ def render_iqr_median_qc(data: IqrMedianQcData) -> Figure:
                     showlegend=(p_idx == 0),
                     legendgroup=qc_label,
                 ),
-                row=row, col=col,
+                row=row,
+                col=col,
             )
 
         # Plot outlier points
@@ -1232,14 +1250,13 @@ def render_iqr_median_qc(data: IqrMedianQcData) -> Figure:
                     showlegend=(p_idx == 0),
                     legendgroup="Outlier",
                 ),
-                row=row, col=col,
+                row=row,
+                col=col,
             )
 
         # Add threshold lines
         if panel in data.median_low:
-            fig.add_vline(
-                x=data.median_low[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col
-            )
+            fig.add_vline(x=data.median_low[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
             fig.add_vline(
                 x=data.median_high[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col
             )
@@ -1350,7 +1367,8 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
     }
 
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=2,
+        cols=2,
         subplot_titles=[
             "Range Difference Distribution",
             "R² vs KS Statistic",
@@ -1366,16 +1384,22 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
     # Panel 1: Range diff histogram by recommendation
     for rec in ["MedianCentering", "QuantileSmoothing", "NotBridgeable"]:
         vals = [
-            rd for rd, r in zip(data.range_diffs, data.recommendations)
+            rd
+            for rd, r in zip(data.range_diffs, data.recommendations)
             if r == rec and not (isinstance(rd, float) and np.isnan(rd))
         ]
         if vals:
             fig.add_trace(
                 go.Histogram(
-                    x=vals, name=rec, marker_color=_REC_COLORS[rec],
-                    opacity=0.7, legendgroup=rec, showlegend=True,
+                    x=vals,
+                    name=rec,
+                    marker_color=_REC_COLORS[rec],
+                    opacity=0.7,
+                    legendgroup=rec,
+                    showlegend=True,
                 ),
-                row=1, col=1,
+                row=1,
+                col=1,
             )
     fig.update_xaxes(title_text="Range Difference", row=1, col=1)
     fig.update_yaxes(title_text="Count", row=1, col=1)
@@ -1390,13 +1414,18 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
         pids = [data.protein_ids[i] for i in mask]
         fig.add_trace(
             go.Scatter(
-                x=ks_vals, y=r2_vals, mode="markers",
+                x=ks_vals,
+                y=r2_vals,
+                mode="markers",
                 marker=dict(size=6, color=_REC_COLORS[rec], opacity=0.7),
-                name=rec, legendgroup=rec, showlegend=False,
+                name=rec,
+                legendgroup=rec,
+                showlegend=False,
                 text=pids,
                 hovertemplate="%{text}<br>KS: %{x:.3f}<br>R²: %{y:.3f}<extra></extra>",
             ),
-            row=1, col=2,
+            row=1,
+            col=2,
         )
     # KS threshold line
     fig.add_vline(x=0.2, line_dash="dash", line_color="gray", row=1, col=2)
@@ -1409,11 +1438,15 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
     colors = [_REC_COLORS[c] for c in categories]
     fig.add_trace(
         go.Bar(
-            x=categories, y=counts, marker_color=colors,
+            x=categories,
+            y=counts,
+            marker_color=colors,
             showlegend=False,
-            text=counts, textposition="auto",
+            text=counts,
+            textposition="auto",
         ),
-        row=2, col=1,
+        row=2,
+        col=1,
     )
     fig.update_xaxes(title_text="Recommendation", row=2, col=1)
     fig.update_yaxes(title_text="Number of Assays", row=2, col=1)
@@ -1431,13 +1464,18 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
         sizes = [max(4, min(14, kv * 30)) if not np.isnan(kv) else 4 for kv in ks_vals]
         fig.add_trace(
             go.Scatter(
-                x=rd_vals, y=r2_vals, mode="markers",
+                x=rd_vals,
+                y=r2_vals,
+                mode="markers",
                 marker=dict(size=sizes, color=_REC_COLORS[rec], opacity=0.7),
-                name=rec, legendgroup=rec, showlegend=False,
+                name=rec,
+                legendgroup=rec,
+                showlegend=False,
                 text=pids,
                 hovertemplate="%{text}<br>Range Diff: %{x:.3f}<br>R²: %{y:.3f}<extra></extra>",
             ),
-            row=2, col=2,
+            row=2,
+            col=2,
         )
     # Threshold lines
     fig.add_vline(x=1.0, line_dash="dash", line_color="gray", row=2, col=2)

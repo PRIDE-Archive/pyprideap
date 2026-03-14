@@ -352,19 +352,25 @@ class TestAuditFixes:
         """filter_by_col_check must map by SeqId, not by positional index."""
         from pyprideap.processing.somascan.qc_flags import filter_by_col_check
 
-        features = pd.DataFrame({
-            "SeqId": ["10000-1", "10001-2", "10002-3"],
-            "ColCheck": ["PASS", "FLAG", "PASS"],
-        })
-        expression = pd.DataFrame({
-            "10000-1": [100.0, 200.0],
-            "10001-2": [300.0, 400.0],
-            "10002-3": [500.0, 600.0],
-        })
+        features = pd.DataFrame(
+            {
+                "SeqId": ["10000-1", "10001-2", "10002-3"],
+                "ColCheck": ["PASS", "FLAG", "PASS"],
+            }
+        )
+        expression = pd.DataFrame(
+            {
+                "10000-1": [100.0, 200.0],
+                "10001-2": [300.0, 400.0],
+                "10002-3": [500.0, 600.0],
+            }
+        )
         samples = pd.DataFrame({"SampleId": ["S1", "S2"], "SampleType": ["Sample", "Sample"]})
         ds = AffinityDataset(
-            platform=Platform.SOMASCAN, samples=samples,
-            features=features, expression=expression,
+            platform=Platform.SOMASCAN,
+            samples=samples,
+            features=features,
+            expression=expression,
         )
         result = filter_by_col_check(ds)
         assert list(result.expression.columns) == ["10000-1", "10002-3"]
@@ -406,22 +412,28 @@ class TestAuditFixes:
         n = 5
         ds = AffinityDataset(
             platform=Platform.OLINK_EXPLORE,
-            samples=pd.DataFrame({
-                "SampleID": [f"S{i}" for i in range(n)],
-                "SampleType": ["Sample"] * n,
-                "SampleQC": ["PASS"] * n,
-            }),
-            features=pd.DataFrame({
-                "OlinkID": ["OID0", "OID1", "OID2"],
-                "UniProt": ["P0", "P1", "P2"],
-                "Panel": ["A"] * 3,
-                "LOD": [2.0, 2.0, 2.0],
-            }),
-            expression=pd.DataFrame({
-                "OID0": [5.0] * n,
-                "OID1": [5.0] * n,
-                "OID2": [0.1] * n,
-            }),
+            samples=pd.DataFrame(
+                {
+                    "SampleID": [f"S{i}" for i in range(n)],
+                    "SampleType": ["Sample"] * n,
+                    "SampleQC": ["PASS"] * n,
+                }
+            ),
+            features=pd.DataFrame(
+                {
+                    "OlinkID": ["OID0", "OID1", "OID2"],
+                    "UniProt": ["P0", "P1", "P2"],
+                    "Panel": ["A"] * 3,
+                    "LOD": [2.0, 2.0, 2.0],
+                }
+            ),
+            expression=pd.DataFrame(
+                {
+                    "OID0": [5.0] * n,
+                    "OID1": [5.0] * n,
+                    "OID2": [0.1] * n,
+                }
+            ),
         )
         result = get_proteins_above_lod(ds, threshold=50.0)
         assert "P0" in result

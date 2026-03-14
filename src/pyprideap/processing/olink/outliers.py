@@ -153,9 +153,9 @@ def compute_iqr_median_outliers(
 
         # Per-sample IQR and median
         sample_iqrs = panel_data.apply(
-            lambda row: float(row.dropna().quantile(0.75) - row.dropna().quantile(0.25))
-            if row.notna().sum() > 1
-            else np.nan,
+            lambda row: (
+                float(row.dropna().quantile(0.75) - row.dropna().quantile(0.25)) if row.notna().sum() > 1 else np.nan
+            ),
             axis=1,
         )
         sample_medians = panel_data.median(axis=1)
@@ -182,9 +182,7 @@ def compute_iqr_median_outliers(
             sid = str(sample_ids_series.iloc[idx])
 
             # Outlier: outside either threshold (matching OlinkAnalyze logic)
-            is_outlier_flag = not (
-                med_lo < med_val < med_hi and iqr_lo < iqr_val < iqr_hi
-            )
+            is_outlier_flag = not (med_lo < med_val < med_hi and iqr_lo < iqr_val < iqr_hi)
 
             # QC status consolidation per sample
             qc_status = "Pass"
