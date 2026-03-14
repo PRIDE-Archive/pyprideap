@@ -154,6 +154,27 @@ The embedded report posts `pride-qc-resize` messages with the document height, a
 - Makes the background transparent
 - Removes card shadows for a seamless look
 
+## SDRF Integration
+
+pyprideap can read [SDRF](https://github.com/bigbio/proteomics-metadata-standard) (Sample and Data Relationship Format) files and merge sample metadata into datasets:
+
+```python
+from pyprideap.io.readers.sdrf import read_sdrf, merge_sdrf, get_grouping_columns
+
+# Read and parse an SDRF file
+sdrf = read_sdrf("samples.sdrf.tsv")
+
+# Merge SDRF metadata into an existing dataset
+dataset = pp.read("olink_npx.csv")
+dataset = merge_sdrf(dataset, sdrf)
+
+# Identify columns suitable for differential expression grouping
+group_cols = get_grouping_columns(sdrf)
+# e.g. ["disease", "sex", "treatment"]
+```
+
+Column names are automatically shortened from the full SDRF syntax (e.g. `characteristics[disease]` becomes `disease`). Duplicate column names are disambiguated with numeric suffixes.
+
 ## Supported File Formats
 
 | Format | Platform | Function |
@@ -163,6 +184,7 @@ The embedded report posts `pride-qc-resize` messages with the document height, a
 | `.xlsx` | Olink | `pp.read()` |
 | `.adat` | SomaScan | `pp.read()` |
 | `.csv` (SomaScan) | SomaScan | `pp.read()` |
+| `.sdrf.tsv` | Any | `read_sdrf()` |
 
 All readers produce an `AffinityDataset` with a unified structure regardless of input format.
 
@@ -224,6 +246,44 @@ bridges = pp.select_bridge_samples(dataset, n=8)
 report = pp.assess_bridgeability(dataset1, dataset2)
 ```
 
+Additional normalization methods are available via direct import:
+
+```python
+from pyprideap.processing.normalization import (
+    lift_somascan,                # Cross-version SomaScan calibration (5k ↔ 7k ↔ 11k)
+    quantile_smooth_normalize,    # Quantile normalization with smoothing
+    scale_analytes,               # Per-analyte multiplicative scaling
+    normalize_n,                  # Multi-step normalization pipeline
+)
+```
+
+## Preprocessing Pipelines
+
+Platform-specific preprocessing pipelines bundle common QC and filtering steps:
+
+```python
+from pyprideap.processing.olink import preprocess_olink
+from pyprideap.processing.somascan import preprocess_somascan
+
+# Olink: filter controls, detect outliers, LOD filtering, UniProt dedup
+dataset, report = preprocess_olink(
+    dataset,
+    filter_controls=True,
+    filter_qc_outliers=True,
+    filter_lod=False,
+)
+
+# SomaScan: filter features/controls, RowCheck QC, outlier detection
+dataset, report = preprocess_somascan(
+    dataset,
+    filter_features=True,
+    filter_controls=True,
+    filter_rowcheck=True,
+)
+
+print(report.summary())
+```
+
 ## Experimental Design
 
 ```python
@@ -242,12 +302,14 @@ plate_assignment = pp.randomize_plates(
 pyprideap/
 ├── api/             # PRIDE Archive REST API client
 ├── io/
-│   ├── readers/     # Format-specific readers (CSV, Parquet, XLSX, ADAT)
+│   ├── readers/     # Format-specific readers (CSV, Parquet, XLSX, ADAT, SDRF)
 │   └── validators/  # Data validation against PRIDE-AP guidelines
 ├── processing/
 │   ├── filtering.py     # Sample filtering (controls, QC)
 │   ├── lod.py           # LOD computation (NCLOD, FixedLOD, eLOD)
-│   └── normalization.py # Bridge, subset, reference normalization
+│   ├── normalization.py # Bridge, subset, reference, quantile, lift normalization
+│   ├── olink/           # Olink preprocessing pipeline
+│   └── somascan/        # SomaScan preprocessing pipeline
 ├── stats/
 │   ├── descriptive.py       # Dataset summary statistics
 │   ├── design.py            # Plate randomization
