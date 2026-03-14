@@ -10,6 +10,7 @@ from pyprideap.core import AffinityDataset, Platform
 
 plotly = pytest.importorskip("plotly")
 
+from pyprideap.processing.lod import get_proteins_above_lod  # noqa: E402
 from pyprideap.viz.qc.compute import (  # noqa: E402
     CorrelationData,
     CvDistributionData,
@@ -42,7 +43,7 @@ from pyprideap.viz.qc.render import (  # noqa: E402
     render_umap,
     render_volcano,
 )
-from pyprideap.viz.qc.report import qc_report  # noqa: E402
+from pyprideap.viz.qc.report import qc_report, qc_report_split  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Dataset builders
@@ -129,6 +130,23 @@ class TestComputeMetrics:
 
     def test_lod_analysis_without_lod(self):
         assert compute_lod_analysis(_make_somascan_dataset()) is None
+
+    def test_proteins_above_lod(self):
+        ds = _make_olink_dataset()
+        ds.features["LOD"] = [1.0, 0.5, 2.0]
+        result = get_proteins_above_lod(ds)
+        assert isinstance(result, list)
+        assert len(result) > 0
+        assert all(isinstance(p, str) for p in result)
+        # All returned accessions should be from the features UniProt column
+        assert all(p in ds.features["UniProt"].values for p in result)
+        # Result should be sorted
+        assert result == sorted(result)
+
+    def test_proteins_above_lod_no_lod(self):
+        ds = _make_somascan_dataset()
+        result = get_proteins_above_lod(ds)
+        assert result == []
 
     def test_pca(self):
         ds = _make_olink_dataset()
@@ -314,6 +332,39 @@ class TestQcReport:
         qc_report(ds, output)
         content = output.read_text()
         assert "pride-embedded-empty" in content
+
+    def test_contains_summary_table(self, tmp_path):
+        ds = _make_olink_dataset()
+        output = tmp_path / "report.html"
+        qc_report(ds, output)
+        content = output.read_text()
+        assert "Dataset Summary" in content
+        assert "Detection rate" in content
+        assert "Median CV" in content
+        # At least one traffic-light status dot should be present
+        assert any(dot in content for dot in ["dot-green", "dot-amber", "dot-red"])
+        # QC Status should appear for Olink
+        assert "PASS / WARN / FAIL" in content
+
+    def test_split_report_creates_individual_files(self, tmp_path):
+        ds = _make_olink_dataset()
+        output_dir = tmp_path / "plots"
+        result = qc_report_split(ds, output_dir)
+        assert result.is_dir()
+        # Core files should always exist
+        assert (output_dir / "summary.html").exists()
+        assert (output_dir / "distribution.html").exists()
+        assert (output_dir / "correlation.html").exists()
+        assert (output_dir / "lod_sources.html").exists()
+        # Each file should be valid standalone HTML
+        for html_file in output_dir.glob("*.html"):
+            content = html_file.read_text()
+            assert "<html" in content
+            assert "</html>" in content
+        # Summary should contain the table
+        summary = (output_dir / "summary.html").read_text()
+        assert "Dataset Summary" in summary
+        assert "Detection rate" in summary
 
     def test_somascan_report(self, tmp_path):
         ds = _make_somascan_dataset()

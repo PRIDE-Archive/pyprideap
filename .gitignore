@@ -209,3 +209,6 @@ docs/
 data/
 reports/
 .DS_Store
+
+
+.claude/

@@ -15,6 +15,7 @@ from pyprideap.processing.lod import (
     compute_nclod,
     get_bundled_fixed_lod_path,
     get_reported_lod,
+    get_proteins_above_lod,
     get_valid_proteins,
     load_fixed_lod,
 )
@@ -30,7 +31,7 @@ from pyprideap.stats.design import randomize_plates
 from pyprideap.viz.plots import boxplot
 from pyprideap.viz.qc.compute import compute_all as compute_qc
 from pyprideap.viz.qc.compute import compute_volcano
-from pyprideap.viz.qc.report import qc_report
+from pyprideap.viz.qc.report import qc_report, qc_report_split
 from pyprideap.viz.theme import (
     PRIDE_COLORS,
     pride_color_discrete,
@@ -90,6 +91,7 @@ __all__ = [
     "compute_lod_stats",
     "get_bundled_fixed_lod_path",
     "get_reported_lod",
+    "get_proteins_above_lod",
     "get_valid_proteins",
     "load_fixed_lod",
     # QC
@@ -97,6 +99,7 @@ __all__ = [
     "compute_stats",
     "compute_volcano",
     "qc_report",
+    "qc_report_split",
     # Filtering
     "filter_controls",
     "filter_qc",

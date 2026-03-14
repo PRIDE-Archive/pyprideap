@@ -3,18 +3,26 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pyprideap.viz.qc.compute import (
+    BridgeabilityData,
+    ColCheckData,
+    ControlAnalyteData,
     CorrelationData,
     CvDistributionData,
     DataCompletenessData,
     DistributionData,
     HeatmapData,
+    IqrMedianQcData,
     LodAnalysisData,
     LodComparisonData,
+    NormScaleBoxplotData,
     NormScaleData,
+    OutlierMapData,
     PcaData,
     PlateCvData,
     QcLodSummaryData,
+    RowCheckData,
     UmapData,
+    UniProtDuplicateData,
     VolcanoData,
 )
 
@@ -39,6 +47,12 @@ _QC_LOD_COLORS = {
     "WARN & NPX ≤ LOD": "#e74c3c",
     "FAIL & NPX > LOD": "#95a5a6",
     "FAIL & NPX ≤ LOD": "#7f8c8d",
+    "PASS & RFU > LOD": "#2ecc71",
+    "PASS & RFU ≤ LOD": "#3498db",
+    "WARN & RFU > LOD": "#f39c12",
+    "WARN & RFU ≤ LOD": "#e74c3c",
+    "FAIL & RFU > LOD": "#95a5a6",
+    "FAIL & RFU ≤ LOD": "#7f8c8d",
     "PASS": "#2ecc71",
     "WARN": "#f39c12",
     "FAIL": "#e74c3c",
@@ -154,9 +168,10 @@ def render_lod_analysis(data: LodAnalysisData) -> Figure:
         col=1,
     )
 
+    unit = getattr(data, "unit", "NPX")
     fig.update_xaxes(title_text="Protein Rank (by detectability)", row=1, col=1)
-    fig.update_yaxes(title_text="% Samples with NPX > LOD", row=1, col=1)
-    fig.update_xaxes(title_text="% Samples with NPX > LOD", row=2, col=1)
+    fig.update_yaxes(title_text=f"% Samples with {unit} > LOD", row=1, col=1)
+    fig.update_xaxes(title_text=f"% Samples with {unit} > LOD", row=2, col=1)
     fig.update_yaxes(title_text="Number of Proteins", row=2, col=1)
     fig.update_layout(title=data.title, height=800, legend=dict(orientation="h", yanchor="bottom", y=-0.15))
     return fig
@@ -733,8 +748,8 @@ def render_lod_comparison(data: LodComparisonData) -> Figure:
                             "y": ([None] * (len(fig.data) - 1) + [[vmin - margin, vmax + margin]]),
                         },
                         {
-                            "xaxis.title.text": f"{pair['name_x']} (NPX)",
-                            "yaxis.title.text": f"{pair['name_y']} (NPX)",
+                            "xaxis.title.text": f"{pair['name_x']} ({data.unit})",
+                            "yaxis.title.text": f"{pair['name_y']} ({data.unit})",
                             "annotations": [
                                 dict(
                                     x=0.02,
@@ -772,8 +787,355 @@ def render_lod_comparison(data: LodComparisonData) -> Figure:
     first = data.pairs[0]
     fig.update_layout(
         title=data.title,
-        xaxis_title=f"{first['name_x']} (NPX)",
-        yaxis_title=f"{first['name_y']} (NPX)",
+        xaxis_title=f"{first['name_x']} ({data.unit})",
+        yaxis_title=f"{first['name_y']} ({data.unit})",
+    )
+    return fig
+
+
+def render_outlier_map(data: OutlierMapData) -> Figure:
+    """Heatmap of MAD-based outlier flags (samples × analytes)."""
+    go, _ = _import_plotly()
+    import numpy as np
+
+    z = np.array(data.matrix, dtype=float)
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=data.analyte_ids,
+            y=data.sample_ids,
+            colorscale=[[0, "#f0f0f0"], [1, "#e74c3c"]],
+            zmin=0,
+            zmax=1,
+            showscale=False,
+            hovertemplate=(
+                "Sample: %{y}<br>"
+                "Analyte: %{x}<br>"
+                "Outlier: %{z:.0f}<extra></extra>"
+            ),
+        )
+    )
+
+    fig.update_layout(
+        title=data.title,
+        xaxis_title="Analytes",
+        yaxis_title="Samples",
+        xaxis=dict(showticklabels=len(data.analyte_ids) <= 50),
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig
+
+
+def render_row_check(data: RowCheckData) -> Figure:
+    """RowCheck QC summary as a donut chart with PASS/FLAG counts."""
+    go, _ = _import_plotly()
+
+    labels = ["PASS", "FLAG"]
+    values = [data.n_pass, data.n_flag]
+    colors = ["#2ecc71", "#e74c3c"]
+
+    # Filter out zero values
+    filtered = [(l, v, c) for l, v, c in zip(labels, values, colors) if v > 0]
+    if not filtered:
+        filtered = [("PASS", 0, "#2ecc71")]
+
+    fig = go.Figure(
+        data=go.Pie(
+            labels=[f[0] for f in filtered],
+            values=[f[1] for f in filtered],
+            marker=dict(colors=[f[2] for f in filtered]),
+            hole=0.4,
+            textinfo="label+value+percent",
+            hovertemplate="%{label}: %{value} samples (%{percent})<extra></extra>",
+        )
+    )
+
+    total = data.n_pass + data.n_flag
+    fig.update_layout(
+        title=data.title,
+        annotations=[
+            dict(
+                text=f"{total}<br>samples",
+                x=0.5, y=0.5, font_size=16,
+                showarrow=False,
+            )
+        ],
+    )
+    return fig
+
+
+def render_col_check(data: ColCheckData) -> Figure:
+    """ColCheck QC summary as a donut chart with PASS/FLAG counts."""
+    go, _ = _import_plotly()
+
+    labels = ["PASS", "FLAG"]
+    values = [data.n_pass, data.n_flag]
+    colors = ["#2ecc71", "#f39c12"]
+
+    filtered = [(l, v, c) for l, v, c in zip(labels, values, colors) if v > 0]
+    if not filtered:
+        filtered = [("PASS", 0, "#2ecc71")]
+
+    fig = go.Figure(
+        data=go.Pie(
+            labels=[f[0] for f in filtered],
+            values=[f[1] for f in filtered],
+            marker=dict(colors=[f[2] for f in filtered]),
+            hole=0.4,
+            textinfo="label+value+percent",
+            hovertemplate="%{label}: %{value} analytes (%{percent})<extra></extra>",
+        )
+    )
+
+    total = data.n_pass + data.n_flag
+    fig.update_layout(
+        title=data.title,
+        annotations=[
+            dict(
+                text=f"{total}<br>analytes",
+                x=0.5, y=0.5, font_size=16,
+                showarrow=False,
+            )
+        ],
+    )
+    return fig
+
+
+def render_control_analytes(data: ControlAnalyteData) -> Figure:
+    """Bar chart of control analyte counts by category."""
+    go, _ = _import_plotly()
+
+    categories = list(data.category_counts.keys())
+    counts = list(data.category_counts.values())
+
+    _CATEGORY_COLORS = {
+        "HybControlElution": "#3498db",
+        "Spuriomer": "#e74c3c",
+        "NonBiotin": "#f39c12",
+        "NonHuman": "#9b59b6",
+        "NonCleavable": "#1abc9c",
+    }
+    colors = [_CATEGORY_COLORS.get(c, "#95a5a6") for c in categories]
+
+    fig = go.Figure(
+        data=go.Bar(
+            x=categories,
+            y=counts,
+            marker_color=colors,
+            text=counts,
+            textposition="outside",
+            hovertemplate="%{x}: %{y} analytes<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        title=data.title,
+        xaxis_title="Control Category",
+        yaxis_title="Number of Analytes",
+        annotations=[
+            dict(
+                text=f"Total: {data.total_controls} control / {data.total_analytes} total analytes",
+                xref="paper", yref="paper",
+                x=0.98, y=0.98,
+                showarrow=False,
+                font=dict(size=12, color="#555"),
+                bgcolor="rgba(255,255,255,0.8)",
+            )
+        ],
+    )
+    return fig
+
+
+def render_norm_scale_boxplot(data: NormScaleBoxplotData) -> Figure:
+    """Boxplots of normalization scale factors grouped by a variable.
+
+    Equivalent to the ``data.qc`` plots in SomaDataIO's ``preProcessAdat()``.
+    Shows one subplot per normalization scale column, with red threshold lines
+    at 0.4 and 2.5.
+    """
+    go, _ = _import_plotly()
+    from plotly.subplots import make_subplots
+
+    n_cols = len(data.norm_scale_columns)
+    if n_cols == 0:
+        fig = go.Figure()
+        fig.update_layout(title=data.title)
+        return fig
+
+    fig = make_subplots(
+        rows=n_cols, cols=1,
+        subplot_titles=data.norm_scale_columns,
+        vertical_spacing=max(0.05, 0.3 / n_cols),
+    )
+
+    groups = sorted(set(data.groups))
+    from pyprideap.viz.theme import pride_color_discrete
+    colors = pride_color_discrete(len(groups))
+    group_colors = {g: colors[i] for i, g in enumerate(groups)}
+
+    for row_idx, col_name in enumerate(data.norm_scale_columns, start=1):
+        vals = data.values.get(col_name, [])
+        for group in groups:
+            group_vals = [
+                v for v, g in zip(vals, data.groups)
+                if g == group and v is not None and not (isinstance(v, float) and v != v)
+            ]
+            if not group_vals:
+                continue
+            fig.add_trace(
+                go.Box(
+                    x=[group] * len(group_vals),
+                    y=group_vals,
+                    name=group,
+                    marker_color=group_colors[group],
+                    showlegend=(row_idx == 1),
+                ),
+                row=row_idx, col=1,
+            )
+
+        # Add threshold lines
+        fig.add_hline(y=0.4, line_dash="dash", line_color="red", line_width=1.5, row=row_idx, col=1)
+        fig.add_hline(y=2.5, line_dash="dash", line_color="red", line_width=1.5, row=row_idx, col=1)
+        fig.update_yaxes(title_text="Scale Factor", range=[0, 2.8], row=row_idx, col=1)
+
+    fig.update_layout(
+        title=data.title,
+        height=max(400, 300 * n_cols),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.15),
+    )
+    return fig
+
+
+def render_iqr_median_qc(data: IqrMedianQcData) -> Figure:
+    """IQR vs Median QC scatter plot, faceted by panel.
+
+    Mirrors ``olink_qc_plot()`` from OlinkAnalyze: each point is a sample,
+    with dashed lines at ±n SD thresholds for both IQR and median.
+    Outlier samples are highlighted in red.
+    """
+    go, _ = _import_plotly()
+    from plotly.subplots import make_subplots
+
+    panels = sorted(set(data.panels))
+    n_panels = max(len(panels), 1)
+    n_cols = min(n_panels, 3)
+    n_rows = (n_panels + n_cols - 1) // n_cols
+
+    fig = make_subplots(
+        rows=n_rows, cols=n_cols,
+        subplot_titles=panels,
+        horizontal_spacing=0.08,
+        vertical_spacing=0.12,
+    )
+
+    for p_idx, panel in enumerate(panels):
+        row = p_idx // n_cols + 1
+        col = p_idx % n_cols + 1
+
+        # Get data for this panel
+        mask = [i for i, p in enumerate(data.panels) if p == panel]
+        med_vals = [data.median_values[i] for i in mask]
+        iqr_vals = [data.iqr_values[i] for i in mask]
+        outlier_flags = [data.is_outlier[i] for i in mask]
+        qc_vals = [data.qc_status[i] for i in mask]
+        sids = [data.sample_ids[i] for i in mask]
+
+        # Plot non-outlier points (colored by QC status)
+        for qc_label, color in [("Pass", "#2ecc71"), ("Warning", "#f39c12")]:
+            idx = [i for i in range(len(mask)) if not outlier_flags[i] and qc_vals[i] == qc_label]
+            if not idx:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=[med_vals[i] for i in idx],
+                    y=[iqr_vals[i] for i in idx],
+                    mode="markers",
+                    marker=dict(size=7, color=color, opacity=0.8),
+                    name=qc_label,
+                    text=[sids[i] for i in idx],
+                    hovertemplate="%{text}<br>Median: %{x:.2f}<br>IQR: %{y:.2f}<extra></extra>",
+                    showlegend=(p_idx == 0),
+                    legendgroup=qc_label,
+                ),
+                row=row, col=col,
+            )
+
+        # Plot outlier points
+        outlier_idx = [i for i in range(len(mask)) if outlier_flags[i]]
+        if outlier_idx:
+            fig.add_trace(
+                go.Scatter(
+                    x=[med_vals[i] for i in outlier_idx],
+                    y=[iqr_vals[i] for i in outlier_idx],
+                    mode="markers+text",
+                    marker=dict(size=9, color="#e74c3c", symbol="x"),
+                    text=[sids[i] for i in outlier_idx],
+                    textposition="top center",
+                    textfont=dict(size=8),
+                    name="Outlier",
+                    hovertemplate="%{text}<br>Median: %{x:.2f}<br>IQR: %{y:.2f}<extra></extra>",
+                    showlegend=(p_idx == 0),
+                    legendgroup="Outlier",
+                ),
+                row=row, col=col,
+            )
+
+        # Add threshold lines
+        if panel in data.median_low:
+            fig.add_vline(x=data.median_low[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
+            fig.add_vline(x=data.median_high[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
+        if panel in data.iqr_low:
+            fig.add_hline(y=data.iqr_low[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
+            fig.add_hline(y=data.iqr_high[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
+
+        fig.update_xaxes(title_text="Sample Median", row=row, col=col)
+        fig.update_yaxes(title_text="IQR", row=row, col=col)
+
+    fig.update_layout(
+        title=f"{data.title} ({data.n_outlier_samples} outlier samples / {data.n_total_samples} total)",
+        height=max(400, 350 * n_rows),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.15),
+    )
+    return fig
+
+
+def render_uniprot_duplicates(data: UniProtDuplicateData) -> Figure:
+    """Bar chart summarizing UniProt duplicate detection results."""
+    go, _ = _import_plotly()
+
+    if not data.duplicates:
+        # No duplicates — show a simple pass indicator
+        fig = go.Figure(
+            data=go.Bar(
+                x=["UniProt Mapping"],
+                y=[data.n_total_assays],
+                marker_color="#2ecc71",
+                text=[f"{data.n_total_assays} assays, no duplicates"],
+                textposition="inside",
+            )
+        )
+        fig.update_layout(title=data.title, yaxis_title="Number of Assays")
+        return fig
+
+    # Show top duplicates
+    oids = list(data.duplicates.keys())[:20]  # top 20
+    n_uniprots = [len(data.duplicates[oid]) for oid in oids]
+
+    fig = go.Figure(
+        data=go.Bar(
+            x=oids,
+            y=n_uniprots,
+            marker_color="#f39c12",
+            text=[", ".join(data.duplicates[oid]) for oid in oids],
+            hovertemplate="%{x}<br>UniProt IDs: %{text}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=f"{data.title} ({data.n_affected_assays} assays with multiple UniProt IDs)",
+        xaxis_title="OlinkID",
+        yaxis_title="Number of UniProt IDs",
+        xaxis_tickangle=-45,
     )
     return fig
 
@@ -807,5 +1169,127 @@ def render_volcano(data: VolcanoData) -> Figure:
         xaxis_title="Fold Change (log2)",
         yaxis_title="-log10(adjusted p-value)",
         legend=dict(orientation="h", yanchor="bottom", y=-0.25),
+    )
+    return fig
+
+
+def render_bridgeability(data: BridgeabilityData) -> "Figure":
+    """Render a 4-panel bridgeability diagnostic plot.
+
+    Panels:
+    1. Range difference distribution (histogram by recommendation)
+    2. R² vs KS statistic scatter (colored by recommendation)
+    3. Bridging recommendation summary (bar chart)
+    4. Range diff vs R² scatter (colored by recommendation, size=KS stat)
+    """
+    go, _px = _import_plotly()
+    from plotly.subplots import make_subplots
+
+    _REC_COLORS = {
+        "MedianCentering": "#2ca02c",
+        "QuantileSmoothing": "#ff7f0e",
+        "NotBridgeable": "#d62728",
+    }
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[
+            "Range Difference Distribution",
+            "R² vs KS Statistic",
+            "Bridging Recommendation Summary",
+            "Range Diff vs R²",
+        ],
+        horizontal_spacing=0.12,
+        vertical_spacing=0.18,
+    )
+
+    import numpy as np
+
+    # Panel 1: Range diff histogram by recommendation
+    for rec in ["MedianCentering", "QuantileSmoothing", "NotBridgeable"]:
+        vals = [
+            rd for rd, r in zip(data.range_diffs, data.recommendations)
+            if r == rec and not (isinstance(rd, float) and np.isnan(rd))
+        ]
+        if vals:
+            fig.add_trace(
+                go.Histogram(
+                    x=vals, name=rec, marker_color=_REC_COLORS[rec],
+                    opacity=0.7, legendgroup=rec, showlegend=True,
+                ),
+                row=1, col=1,
+            )
+    fig.update_xaxes(title_text="Range Difference", row=1, col=1)
+    fig.update_yaxes(title_text="Count", row=1, col=1)
+
+    # Panel 2: R² vs KS scatter
+    for rec in ["MedianCentering", "QuantileSmoothing", "NotBridgeable"]:
+        mask = [i for i, r in enumerate(data.recommendations) if r == rec]
+        if not mask:
+            continue
+        r2_vals = [data.r2_values[i] for i in mask]
+        ks_vals = [data.ks_stats[i] for i in mask]
+        pids = [data.protein_ids[i] for i in mask]
+        fig.add_trace(
+            go.Scatter(
+                x=ks_vals, y=r2_vals, mode="markers",
+                marker=dict(size=6, color=_REC_COLORS[rec], opacity=0.7),
+                name=rec, legendgroup=rec, showlegend=False,
+                text=pids,
+                hovertemplate="%{text}<br>KS: %{x:.3f}<br>R²: %{y:.3f}<extra></extra>",
+            ),
+            row=1, col=2,
+        )
+    # KS threshold line
+    fig.add_vline(x=0.2, line_dash="dash", line_color="gray", row=1, col=2)
+    fig.update_xaxes(title_text="KS Statistic", row=1, col=2)
+    fig.update_yaxes(title_text="R²", row=1, col=2)
+
+    # Panel 3: Summary bar chart
+    categories = ["MedianCentering", "QuantileSmoothing", "NotBridgeable"]
+    counts = [data.n_median_centering, data.n_quantile_smoothing, data.n_not_bridgeable]
+    colors = [_REC_COLORS[c] for c in categories]
+    fig.add_trace(
+        go.Bar(
+            x=categories, y=counts, marker_color=colors,
+            showlegend=False,
+            text=counts, textposition="auto",
+        ),
+        row=2, col=1,
+    )
+    fig.update_xaxes(title_text="Recommendation", row=2, col=1)
+    fig.update_yaxes(title_text="Number of Assays", row=2, col=1)
+
+    # Panel 4: Range diff vs R² scatter
+    for rec in ["MedianCentering", "QuantileSmoothing", "NotBridgeable"]:
+        mask = [i for i, r in enumerate(data.recommendations) if r == rec]
+        if not mask:
+            continue
+        rd_vals = [data.range_diffs[i] for i in mask]
+        r2_vals = [data.r2_values[i] for i in mask]
+        ks_vals = [data.ks_stats[i] for i in mask]
+        pids = [data.protein_ids[i] for i in mask]
+        # Size proportional to KS stat (min 4, max 14)
+        sizes = [max(4, min(14, kv * 30)) if not np.isnan(kv) else 4 for kv in ks_vals]
+        fig.add_trace(
+            go.Scatter(
+                x=rd_vals, y=r2_vals, mode="markers",
+                marker=dict(size=sizes, color=_REC_COLORS[rec], opacity=0.7),
+                name=rec, legendgroup=rec, showlegend=False,
+                text=pids,
+                hovertemplate="%{text}<br>Range Diff: %{x:.3f}<br>R²: %{y:.3f}<extra></extra>",
+            ),
+            row=2, col=2,
+        )
+    # Threshold lines
+    fig.add_vline(x=1.0, line_dash="dash", line_color="gray", row=2, col=2)
+    fig.add_hline(y=0.8, line_dash="dash", line_color="gray", row=2, col=2)
+    fig.update_xaxes(title_text="Range Difference", row=2, col=2)
+    fig.update_yaxes(title_text="R²", row=2, col=2)
+
+    fig.update_layout(
+        title=f"{data.title}: {data.product1_name} vs {data.product2_name}",
+        height=800,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.12),
     )
     return fig

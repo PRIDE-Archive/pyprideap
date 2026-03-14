@@ -106,6 +106,11 @@ class LodStats:
 def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
     """Return a boolean mask over ``dataset.samples`` for negative controls.
 
+    For Olink: matches NEGATIVE_CONTROL types, falls back to generic controls.
+    For SomaScan: matches NEGATIVE_CONTROL types, falls back to Buffer samples
+    only (Calibrator/QC samples contain protein at known concentrations and
+    must NOT be used as negative controls).
+
     Raises ``ValueError`` when no suitable controls are found.
     """
     if "SampleType" not in dataset.samples.columns:
@@ -117,10 +122,17 @@ def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
     if is_negative.any():
         return is_negative
 
-    # Fallback: use any control-like sample
-    is_control = st.isin(_CONTROL_SAMPLE_TYPES)
-    if is_control.any():
-        return is_control
+    # Platform-aware fallback
+    if dataset.platform == Platform.SOMASCAN:
+        # SomaScan: only buffer samples are true blanks
+        is_buffer = st.isin(_BUFFER_SAMPLE_TYPES)
+        if is_buffer.any():
+            return is_buffer
+    else:
+        # Olink: fall back to generic control-like samples
+        is_control = st.isin(_CONTROL_SAMPLE_TYPES)
+        if is_control.any():
+            return is_control
 
     raise ValueError("No negative control samples found in SampleType column")
 
@@ -146,6 +158,187 @@ def _nclod_base(dataset: AffinityDataset) -> pd.Series:
     stds = numeric_expr.std()
     result: pd.Series = medians + np.maximum(_MIN_STD_FLOOR, 3 * stds)
     return result
+
+
+_LOD_COUNT_FLOOR = 150
+_LOD_COUNT_MULTIPLIER = 2
+
+
+@dataclass
+class NcLodDetail:
+    """Detailed NCLOD results per assay, matching OlinkAnalyze's ``olink_nc_lod()``.
+
+    Attributes
+    ----------
+    lod_npx:
+        NCLOD in NPX space: ``median(PCNormalizedNPX) + max(0.2, 3*SD)``.
+    lod_count:
+        Count-based LOD: ``max(150, 2 * max(NC_Count))``.
+    lod_method:
+        ``"lod_npx"`` if MaxCount > 150, else ``"lod_count"``.
+    max_count:
+        Maximum count value observed across negative controls per assay.
+    """
+
+    lod_npx: pd.Series
+    lod_count: pd.Series
+    lod_method: pd.Series
+    max_count: pd.Series
+
+
+def compute_nc_lod_detailed(
+    dataset: AffinityDataset,
+) -> NcLodDetail:
+    """Compute detailed NCLOD with LODCount and LODMethod.
+
+    Mirrors OlinkAnalyze's ``olink_nc_lod()``::
+
+        LODNPX    = median(PCNormalizedNPX) + max(0.2, 3 * SD)
+        LODCount  = max(150, 2 * max(Count))
+        LODMethod = "lod_npx" if MaxCount > 150 else "lod_count"
+
+    Requires ``Count`` column in the expression data or features metadata.
+    Falls back to NPX-only LOD if Count data is unavailable.
+
+    Parameters
+    ----------
+    dataset:
+        Olink AffinityDataset with negative control samples.
+
+    Returns
+    -------
+    NcLodDetail
+        Per-assay LOD values, counts, and method selection.
+    """
+    control_mask = _find_negative_controls(dataset)
+    if control_mask.sum() < _MIN_CONTROLS_FOR_LOD:
+        raise ValueError(
+            f"Need at least {_MIN_CONTROLS_FOR_LOD} negative control samples "
+            f"for LOD calculation, found {control_mask.sum()}"
+        )
+
+    # QC filter: only PASS negative controls (matching OlinkAnalyze)
+    if "SampleQC" in dataset.samples.columns:
+        qc_pass = dataset.samples["SampleQC"].astype(str).str.upper() == "PASS"
+        control_mask = control_mask & qc_pass
+
+    if control_mask.sum() < _MIN_CONTROLS_FOR_LOD:
+        raise ValueError(
+            f"Need at least {_MIN_CONTROLS_FOR_LOD} PASS negative controls, "
+            f"found {control_mask.sum()}"
+        )
+
+    numeric_expr = dataset.expression[control_mask].apply(pd.to_numeric, errors="coerce")
+
+    # LODNPX: median + max(0.2, 3*SD) — uses PCNormalizedNPX if available,
+    # otherwise falls back to NPX
+    medians = numeric_expr.median()
+    stds = numeric_expr.std()
+    lod_npx: pd.Series = medians + np.maximum(_MIN_STD_FLOOR, 3 * stds)
+
+    # Count-based LOD — requires a count matrix in metadata
+    count_matrix = dataset.metadata.get("count_matrix")
+    if count_matrix is not None and isinstance(count_matrix, pd.DataFrame):
+        nc_counts = count_matrix[control_mask].apply(pd.to_numeric, errors="coerce")
+        max_counts = nc_counts.max()
+        lod_count = np.maximum(_LOD_COUNT_FLOOR, _LOD_COUNT_MULTIPLIER * max_counts)
+        lod_method = pd.Series(
+            np.where(max_counts > _LOD_COUNT_FLOOR, "lod_npx", "lod_count"),
+            index=lod_npx.index,
+        )
+    else:
+        # No count data: use NPX-only LOD for all assays
+        max_counts = pd.Series(np.nan, index=lod_npx.index)
+        lod_count = pd.Series(np.nan, index=lod_npx.index)
+        lod_method = pd.Series("lod_npx", index=lod_npx.index)
+
+    return NcLodDetail(
+        lod_npx=lod_npx,
+        lod_count=lod_count,
+        lod_method=lod_method,
+        max_count=max_counts,
+    )
+
+
+def compute_pc_normalized_lod(
+    dataset: AffinityDataset,
+    lod_detail: NcLodDetail | None = None,
+) -> pd.DataFrame:
+    """Compute PC-normalized LOD per sample per assay.
+
+    Mirrors OlinkAnalyze's ``pc_norm_count()`` / ``int_norm_count()``:
+
+    For **lod_npx** assays: ``PCNormalizedLOD = LODNPX``
+    For **lod_count** assays: ``PCNormalizedLOD = log2(LODCount / ExtCount) - PCMedian``
+
+    When the data uses intensity normalization, an additional adjustment
+    subtracts the per-plate median NPX from ``PCNormalizedLOD``.
+
+    Parameters
+    ----------
+    dataset:
+        Olink AffinityDataset.
+    lod_detail:
+        Pre-computed detailed NCLOD. If None, computed automatically.
+
+    Returns
+    -------
+    pd.DataFrame
+        Sample × assay LOD matrix (plate-control normalized).
+    """
+    if lod_detail is None:
+        lod_detail = compute_nc_lod_detailed(dataset)
+
+    n_samples = len(dataset.samples)
+    n_cols = len(dataset.expression.columns)
+
+    # Start with LODNPX broadcast to all samples
+    lod_matrix = pd.DataFrame(
+        np.tile(np.asarray(lod_detail.lod_npx), (n_samples, 1)),
+        columns=dataset.expression.columns,
+        index=dataset.expression.index,
+    )
+
+    # For lod_count assays, compute log2(LODCount / ExtCount) - PCMedian
+    count_assays = lod_detail.lod_method == "lod_count"
+    if count_assays.any():
+        count_matrix = dataset.metadata.get("count_matrix")
+        ext_count = dataset.metadata.get("ext_count")
+        if count_matrix is not None and ext_count is not None:
+            # PCMedian: per plate, median of plate control ExtNPX
+            pc_median = dataset.metadata.get("pc_median")
+            if pc_median is not None:
+                for col in count_assays[count_assays].index:
+                    if col in lod_matrix.columns:
+                        lod_val = lod_detail.lod_count.get(col, np.nan)
+                        if pd.notna(lod_val) and lod_val > 0:
+                            ec = pd.to_numeric(ext_count.get(col, pd.Series(dtype=float)), errors="coerce")
+                            pcm = pc_median.get(col, 0.0) if isinstance(pc_median, dict) else 0.0
+                            lod_matrix[col] = np.log2(lod_val / ec.clip(lower=1)) - pcm
+
+    # Intensity normalization adjustment
+    normalization_col = dataset.metadata.get("normalization_type")
+    if normalization_col == "Intensity" or (
+        "Normalization" in dataset.samples.columns
+        and (dataset.samples["Normalization"].astype(str).str.strip() == "Intensity").any()
+    ):
+        numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+        # Per-plate median NPX of SAMPLE rows
+        if "PlateID" in dataset.samples.columns:
+            st = dataset.samples.get("SampleType")
+            is_sample = (
+                st.astype(str).str.upper() == "SAMPLE" if st is not None else pd.Series(True, index=dataset.samples.index)
+            )
+            plates = dataset.samples["PlateID"]
+            for plate_id in plates.unique():
+                plate_sample_mask = (plates == plate_id) & is_sample
+                if plate_sample_mask.sum() == 0:
+                    continue
+                plate_median = numeric[plate_sample_mask].median()
+                plate_idx = plates[plates == plate_id].index
+                lod_matrix.loc[plate_idx] = lod_matrix.loc[plate_idx].subtract(plate_median, axis=1)
+
+    return lod_matrix
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +775,77 @@ def compute_lod_stats(
         above_lod_per_sample=above_lod_per_sample,
         above_lod_per_panel=above_lod_per_panel,
     )
+
+
+def get_proteins_above_lod(
+    dataset: AffinityDataset,
+    lod: pd.DataFrame | pd.Series | None = None,
+    *,
+    threshold: float = 50.0,
+) -> list[str]:
+    """Return UniProt accessions for proteins above LOD in sufficient samples.
+
+    A protein passes if more than *threshold* % of valid (non-NaN) samples
+    have expression above the LOD for that assay.
+
+    Args:
+        dataset: The AffinityDataset to analyze.
+        lod: Pre-computed LOD values. If None, resolved automatically
+            (Reported > NCLOD > FixedLOD/eLOD).
+        threshold: Minimum percentage of samples that must be above LOD
+            for the protein to be included (default 50%).
+
+    Returns:
+        Sorted list of unique UniProt accession strings.
+    """
+    if "UniProt" not in dataset.features.columns:
+        return []
+
+    # Resolve LOD
+    if lod is None:
+        lod = get_reported_lod(dataset)
+    if lod is None:
+        try:
+            lod = compute_nclod(dataset, plate_adjusted=True)
+        except ValueError:
+            pass
+    if lod is None:
+        # Try FixedLOD
+        try:
+            lod = load_fixed_lod(dataset)
+        except (ValueError, FileNotFoundError):
+            pass
+    if lod is None:
+        # Try SomaScan eLOD
+        try:
+            lod = compute_soma_elod(dataset)
+        except ValueError:
+            pass
+    if lod is None:
+        return []
+
+    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    above_lod, has_lod = _above_lod_matrix(numeric, lod)
+
+    # Map expression columns to UniProt
+    id_col = "OlinkID" if "OlinkID" in dataset.features.columns else "SeqId"
+    if id_col not in dataset.features.columns:
+        id_col = dataset.features.columns[0]
+    id_to_uniprot = dict(zip(dataset.features[id_col], dataset.features["UniProt"]))
+
+    proteins: set[str] = set()
+    for col in numeric.columns:
+        valid = numeric[col].notna() & has_lod[col]
+        n = int(valid.sum())
+        if n == 0:
+            continue
+        pct = float(above_lod.loc[valid, col].sum() / n * 100)
+        if pct > threshold:
+            up = id_to_uniprot.get(col)
+            if up and pd.notna(up):
+                proteins.add(str(up))
+
+    return sorted(proteins)
 
 
 def get_valid_proteins(

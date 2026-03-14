@@ -1,23 +1,36 @@
-"""Processing sub-package — filtering, normalization, and LOD computation."""
+"""Processing sub-package — filtering, normalization, LOD, and platform utilities."""
 
 from pyprideap.processing.filtering import filter_controls, filter_qc
 from pyprideap.processing.lod import (
     LodMethod,
     LodStats,
+    NcLodDetail,
     compute_lod_from_controls,
     compute_lod_stats,
+    compute_nc_lod_detailed,
     compute_nclod,
+    compute_pc_normalized_lod,
     get_bundled_fixed_lod_path,
     get_reported_lod,
     get_valid_proteins,
     load_fixed_lod,
 )
 from pyprideap.processing.normalization import (
+    NormalizationStep,
     assess_bridgeability,
+    assess_cross_product_bridgeability,
+    assess_lift_quality,
     bridge_normalize,
+    format_normalized,
+    lift_somascan,
+    lins_ccc,
+    normalize_n,
+    quantile_smooth_normalize,
     reference_median_normalize,
+    scale_analytes,
     select_bridge_samples,
     subset_normalize,
+    validate_lift_requirements,
 )
 
 __all__ = [
@@ -25,16 +38,29 @@ __all__ = [
     "filter_qc",
     "LodMethod",
     "LodStats",
+    "NcLodDetail",
     "compute_lod_from_controls",
     "compute_lod_stats",
+    "compute_nc_lod_detailed",
     "compute_nclod",
+    "compute_pc_normalized_lod",
     "get_bundled_fixed_lod_path",
     "get_reported_lod",
     "get_valid_proteins",
     "load_fixed_lod",
+    "NormalizationStep",
     "assess_bridgeability",
+    "assess_cross_product_bridgeability",
+    "assess_lift_quality",
     "bridge_normalize",
+    "format_normalized",
+    "lift_somascan",
+    "lins_ccc",
+    "normalize_n",
+    "quantile_smooth_normalize",
     "reference_median_normalize",
+    "scale_analytes",
     "select_bridge_samples",
     "subset_normalize",
+    "validate_lift_requirements",
 ]
