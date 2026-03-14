@@ -70,7 +70,6 @@ def render_distribution(data: DistributionData) -> Figure:
     of individual traces to keep file size manageable.
     """
     go, _ = _import_plotly()
-    import numpy as np
 
     n_samples = len(data.sample_ids)
 
@@ -1002,7 +1001,7 @@ def render_row_check(data: RowCheckData) -> Figure:
     colors = ["#2ecc71", "#e74c3c"]
 
     # Filter out zero values
-    filtered = [(l, v, c) for l, v, c in zip(labels, values, colors) if v > 0]
+    filtered = [(lb, v, c) for lb, v, c in zip(labels, values, colors) if v > 0]
     if not filtered:
         filtered = [("PASS", 0, "#2ecc71")]
 
@@ -1039,7 +1038,7 @@ def render_col_check(data: ColCheckData) -> Figure:
     values = [data.n_pass, data.n_flag]
     colors = ["#2ecc71", "#f39c12"]
 
-    filtered = [(l, v, c) for l, v, c in zip(labels, values, colors) if v > 0]
+    filtered = [(lb, v, c) for lb, v, c in zip(labels, values, colors) if v > 0]
     if not filtered:
         filtered = [("PASS", 0, "#2ecc71")]
 
@@ -1249,8 +1248,12 @@ def render_iqr_median_qc(data: IqrMedianQcData) -> Figure:
 
         # Add threshold lines
         if panel in data.median_low:
-            fig.add_vline(x=data.median_low[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
-            fig.add_vline(x=data.median_high[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
+            fig.add_vline(
+                x=data.median_low[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col
+            )
+            fig.add_vline(
+                x=data.median_high[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col
+            )
         if panel in data.iqr_low:
             fig.add_hline(y=data.iqr_low[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
             fig.add_hline(y=data.iqr_high[panel], line_dash="dash", line_color="grey", line_width=1, row=row, col=col)
@@ -1339,7 +1342,7 @@ def render_volcano(data: VolcanoData) -> Figure:
     return fig
 
 
-def render_bridgeability(data: BridgeabilityData) -> "Figure":
+def render_bridgeability(data: BridgeabilityData) -> Figure:
     """Render a 4-panel bridgeability diagnostic plot.
 
     Panels:

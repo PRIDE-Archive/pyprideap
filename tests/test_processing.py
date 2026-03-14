@@ -12,11 +12,11 @@ from pyprideap.processing.lod import (
     compute_lod_stats,
     compute_soma_elod,
     get_lod_values,
+    get_proteins_above_lod,
     get_reported_lod,
     get_valid_proteins,
     load_fixed_lod,
 )
-from pyprideap.processing.lod import get_proteins_above_lod
 from pyprideap.processing.normalization import (
     assess_bridgeability,
     bridge_normalize,
