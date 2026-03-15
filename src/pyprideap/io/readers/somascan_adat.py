@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
 from pyprideap.io.readers.olink_csv import _warn_data_quality
+
+logger = logging.getLogger(__name__)
 
 
 def read_somascan_adat(path: str | Path) -> AffinityDataset:
@@ -14,6 +17,7 @@ def read_somascan_adat(path: str | Path) -> AffinityDataset:
         raise FileNotFoundError(f"File not found: {path}")
 
     header, col_data, row_data = _parse_adat_sections(path)
+    logger.debug("ADAT parsed: %d header keys", len(header))
 
     features = col_data.reset_index(drop=True)
 
@@ -22,6 +26,7 @@ def read_somascan_adat(path: str | Path) -> AffinityDataset:
 
     samples = row_data[sample_cols].reset_index(drop=True)
     expression = row_data[soma_ids].astype(float).reset_index(drop=True)
+    logger.debug("ADAT shape: %d samples x %d features", len(samples), len(features))
 
     dataset = AffinityDataset(
         platform=Platform.SOMASCAN,
@@ -84,9 +89,11 @@ def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
 
     # TABLE_BEGIN format: combined col metadata + data in one block
     if table_lines:
+        logger.debug("ADAT layout: TABLE_BEGIN format (%d table lines)", len(table_lines))
         return _parse_table_begin(header, col_lines, row_lines, table_lines)
 
     # Legacy format: COL_DATA has feature metadata, ROW_DATA has all data
+    logger.debug("ADAT layout: legacy format (col_lines=%d, row_lines=%d)", len(col_lines), len(row_lines))
     if not col_lines:
         raise ValueError(f"ADAT file has no COL_DATA section content: {path}")
     if not row_lines:
@@ -100,6 +107,7 @@ def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     row_rows = [line.split("\t") for line in row_lines[1:]]
     row_data = pd.DataFrame(row_rows, columns=row_header)
 
+    logger.debug("Legacy sections: %d features, %d data rows", len(col_data), len(row_data))
     return header, col_data, row_data
 
 

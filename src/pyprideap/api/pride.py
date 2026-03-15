@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 import requests  # type: ignore[import-untyped]
+
+logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.ebi.ac.uk/pride/ws/archive/v3"
 
@@ -24,17 +28,20 @@ class PrideClient:
         self._session.close()
 
     def get_project(self, accession: str) -> dict:  # type: ignore[type-arg]
-        resp = self._session.get(f"{self.base_url}/projects/{accession}", timeout=self.timeout)
+        url = f"{self.base_url}/projects/{accession}"
+        logger.debug("GET %s", url)
+        resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
     def list_files(self, accession: str) -> list[dict]:  # type: ignore[type-arg]
-        resp = self._session.get(
-            f"{self.base_url}/projects/{accession}/files",
-            timeout=self.timeout,
-        )
+        url = f"{self.base_url}/projects/{accession}/files"
+        logger.debug("GET %s", url)
+        resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
-        return resp.json()  # type: ignore[no-any-return]
+        files = resp.json()
+        logger.debug("Files found: %d for %s", len(files), accession)
+        return files  # type: ignore[no-any-return]
 
     def get_download_urls(self, accession: str) -> dict[str, str]:
         files = self.list_files(accession)
@@ -46,4 +53,5 @@ class PrideClient:
                 if loc.get("name") == "FTP Protocol":
                     urls[name] = loc["value"]
                     break
+        logger.debug("Download URLs extracted: %d FTP links", len(urls))
         return urls

@@ -7,19 +7,24 @@ Python library for reading, validating, and analyzing affinity proteomics datase
 pyprideap is not yet published on PyPI. Install directly from source:
 
 ```bash
-pip install git+https://github.com/PRIDE-Archive/pyprideap.git
-```
-
-With plotting and QC report support:
-
-```bash
-pip install "pyprideap[plots] @ git+https://github.com/PRIDE-Archive/pyprideap.git"
-```
-
-With statistical testing:
-
-```bash
 pip install "pyprideap[all] @ git+https://github.com/PRIDE-Archive/pyprideap.git"
+```
+
+Or install individual extras:
+
+```bash
+# Plotting and QC reports only
+pip install "pyprideap[plots] @ git+https://github.com/PRIDE-Archive/pyprideap.git"
+
+# Statistical testing only
+pip install "pyprideap[stats] @ git+https://github.com/PRIDE-Archive/pyprideap.git"
+```
+
+With conda (using the provided environment file):
+
+```bash
+conda env create -f environment.yml
+conda activate pyprideap
 ```
 
 For development:
@@ -79,6 +84,28 @@ dataset = pp.read("ambiguous.csv", platform="somascan")
 | `.xlsx` | Olink | Excel NPX file |
 | `.adat` | SomaScan | SomaLogic ADAT format (legacy and TABLE_BEGIN) |
 | `.csv` (SeqId columns) | SomaScan | Wide CSV with `SeqId.*` column names |
+| `.sdrf.tsv` | Any | SDRF sample metadata (see [SDRF Integration](#sdrf-integration)) |
+
+## SDRF Integration
+
+pyprideap can read [SDRF](https://github.com/bigbio/proteomics-metadata-standard) (Sample and Data Relationship Format) files and merge sample metadata into datasets:
+
+```python
+from pyprideap.io.readers.sdrf import read_sdrf, merge_sdrf, get_grouping_columns
+
+# Read and parse an SDRF file
+sdrf = read_sdrf("samples.sdrf.tsv")
+
+# Merge SDRF metadata into an existing dataset
+dataset = pp.read("olink_npx.csv")
+dataset = merge_sdrf(dataset, sdrf)
+
+# Identify columns suitable for differential expression grouping
+group_cols = get_grouping_columns(sdrf)
+# e.g. ["disease", "sex", "treatment"]
+```
+
+Column names are automatically shortened from the full SDRF syntax (e.g. `characteristics[disease]` becomes `disease`). Duplicate column names are disambiguated with numeric suffixes.
 
 ## Validation
 
@@ -301,18 +328,28 @@ pyprideap report data.npx.csv
 pyprideap report data.parquet -o my_report.html
 
 # Force platform type
-pyprideap report ambiguous.csv -p olink
+pyprideap report data.csv -p olink
 
 # Generate individual plot files instead of single report
 pyprideap report data.npx.csv --split -o plots_dir/
 
 # Download from PRIDE and generate report
-pyprideap report PAD000001
+pyprideap report -a PAD000001
+
+# Include SDRF metadata for volcano plots
+pyprideap report data.npx.csv --sdrf samples.sdrf.tsv
+
+# Enable verbose logging for debugging
+pyprideap report data.npx.csv -v
 
 # List proteins above LOD
 pyprideap proteins-above-lod data.npx.csv
 pyprideap proteins-above-lod data.npx.csv -t 80 -o proteins.txt
 ```
+
+### Verbose mode
+
+Use `-v` / `--verbose` to see detailed progress through each processing stage (format detection, LOD computation, PCA variance, plot rendering, etc.).
 
 ## Package Structure
 
@@ -320,14 +357,14 @@ pyprideap proteins-above-lod data.npx.csv -t 80 -o proteins.txt
 pyprideap/
 ├── api/                 # PRIDE Archive REST API client
 ├── io/
-│   ├── readers/         # Format-specific readers (CSV, Parquet, XLSX, ADAT)
+│   ├── readers/         # Format-specific readers (CSV, Parquet, XLSX, ADAT, SDRF)
 │   └── validators/      # Data validation against PRIDE-AP guidelines
 ├── processing/
 │   ├── filtering.py     # Sample filtering (controls, QC)
 │   ├── lod.py           # LOD computation (NCLOD, FixedLOD, eLOD)
-│   ├── normalization.py # Bridge, subset, reference, quantile normalization
-│   ├── olink/           # Olink-specific: outliers, pipeline, UniProt
-│   └── somascan/        # SomaScan-specific: QC flags, controls, outliers, pipeline
+│   ├── normalization.py # Bridge, subset, reference, quantile, lift normalization
+│   ├── olink/           # Olink preprocessing pipeline
+│   └── somascan/        # SomaScan preprocessing pipeline
 ├── stats/
 │   ├── descriptive.py   # Dataset summary statistics
 │   ├── design.py        # Plate randomization

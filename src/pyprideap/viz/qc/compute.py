@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -300,6 +303,7 @@ def compute_distribution(dataset: AffinityDataset) -> DistributionData:
     Values are rounded to 2 decimal places to reduce HTML output size
     without visible loss of quality in the histogram plots.
     """
+    logger.debug("Computing distribution...")
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
 
     is_somascan = dataset.platform == Platform.SOMASCAN
@@ -413,6 +417,7 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
 
 
 def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | None:
+    logger.debug("Computing PCA...")
     try:
         from sklearn.decomposition import PCA
         from sklearn.impute import SimpleImputer
@@ -429,6 +434,11 @@ def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | No
     n_comp = min(n_components, *imputed.shape)
     pca = PCA(n_components=n_comp)
     transformed = pca.fit_transform(imputed)
+    logger.debug(
+        "PCA: expression matrix %s, variance explained=%s",
+        numeric.shape,
+        [round(float(v), 4) for v in pca.explained_variance_ratio_],
+    )
 
     labels = _sample_ids(dataset)
 
@@ -458,6 +468,7 @@ def compute_tsne(dataset: AffinityDataset) -> UmapData | None:
     Returns *None* when scikit-learn is not available or the dataset is too
     small (fewer than 4 samples).
     """
+    logger.debug("Computing t-SNE...")
     try:
         from sklearn.impute import SimpleImputer
         from sklearn.manifold import TSNE
@@ -512,6 +523,7 @@ def compute_heatmap(
     subsamples rows if needed.  Hierarchical clustering is applied to both
     axes when scipy is available; otherwise the original order is kept.
     """
+    logger.debug("Computing heatmap...")
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     if numeric.shape[0] < 2 or numeric.shape[1] < 2:
         return None
@@ -527,6 +539,7 @@ def compute_heatmap(
         return None
     top = stds.nlargest(min(max_proteins, len(stds))).index
     numeric = numeric[top]
+    logger.debug("Heatmap: selected %d most variable proteins from %d total", len(top), len(stds))
 
     # Fill NaN with column median for clustering
     filled = numeric.fillna(numeric.median())
@@ -569,6 +582,7 @@ def compute_heatmap(
 
 
 def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> CorrelationData:
+    logger.debug("Computing correlation matrix...")
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
 
     if numeric.shape[0] > max_samples:
@@ -1288,6 +1302,9 @@ def compute_bridgeability(
 
 def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     """Compute all applicable QC plot data for the dataset."""
+    logger.debug(
+        "compute_all: expression matrix shape=%s, platform=%s", dataset.expression.shape, dataset.platform.value
+    )
     results: dict[str, object] = {}
     results["distribution"] = compute_distribution(dataset)
     results["qc_summary"] = compute_qc_summary(dataset)
@@ -1315,4 +1332,6 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
         results["iqr_median_qc"] = compute_iqr_median_qc(dataset)
         results["uniprot_duplicates"] = compute_uniprot_duplicates(dataset)
 
-    return {k: v for k, v in results.items() if v is not None}
+    available = {k: v for k, v in results.items() if v is not None}
+    logger.debug("compute_all: %d/%d plots computed successfully", len(available), len(results))
+    return available

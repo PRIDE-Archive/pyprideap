@@ -6,12 +6,15 @@ and factor values) that can be merged into an :class:`AffinityDataset`.
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 import pandas as pd
 
 from pyprideap.core import AffinityDataset
+
+logger = logging.getLogger(__name__)
 
 # Columns that are not useful for grouping / differential expression
 _SKIP_PATTERNS = {
@@ -51,6 +54,7 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f"SDRF file not found: {path}")
 
     df = pd.read_csv(path, sep="\t")
+    logger.debug("SDRF loaded: %d rows x %d cols from %s", len(df), len(df.columns), path.name)
 
     # Build clean column names, disambiguating repeated base names
     rename: dict[str, str] = {}
@@ -73,7 +77,9 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
         else:
             rename[col] = f"{base} {count}"
 
-    return pd.DataFrame(df.rename(columns=rename))
+    renamed_df = pd.DataFrame(df.rename(columns=rename))
+    logger.debug("SDRF columns renamed: %d mappings applied", len(rename))
+    return renamed_df
 
 
 def get_grouping_columns(sdrf: pd.DataFrame) -> list[str]:
@@ -107,6 +113,7 @@ def get_grouping_columns(sdrf: pd.DataFrame) -> list[str]:
 
         candidates.append(col)
 
+    logger.debug("Grouping columns found: %s", candidates)
     return candidates
 
 
@@ -147,6 +154,7 @@ def merge_sdrf(
             if candidate in dataset.samples.columns:
                 sample_col = candidate
                 break
+        logger.debug("Auto-detected sample column: %s", sample_col)
     if sample_col is None:
         raise ValueError("Cannot detect sample ID column in dataset.samples. Specify sample_col explicitly.")
 
@@ -166,5 +174,9 @@ def merge_sdrf(
     # Drop the join key from SDRF side if it differs from sample_col
     if sdrf_col != sample_col and sdrf_col in merged.columns:
         merged = merged.drop(columns=[sdrf_col])
+
+    matched = merged[sample_col].isin(sdrf_subset[sdrf_col]).sum()
+    unmatched = len(merged) - matched
+    logger.debug("SDRF merge: %d matched, %d unmatched rows (join: %s -> %s)", matched, unmatched, sample_col, sdrf_col)
 
     return replace(dataset, samples=merged)

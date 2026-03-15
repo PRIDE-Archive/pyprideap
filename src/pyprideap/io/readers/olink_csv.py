@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from pathlib import Path
 
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
+
+logger = logging.getLogger(__name__)
 
 _SAMPLE_COLS = {"SampleID", "SampleName", "PlateID", "WellID", "SampleType", "SampleQC", "PlateQC"}
 _FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "LOD", "MissingFreq"}
@@ -33,6 +36,7 @@ def _detect_sample_key(df: pd.DataFrame, *, source: str = "") -> str:
         n_sid = df["SampleID"].nunique()
         n_olink = df["OlinkID"].nunique()
         n_sname = df["SampleName"].nunique()
+        logger.debug("Sample key check: SampleID=%d, OlinkID=%d, SampleName=%d unique", n_sid, n_olink, n_sname)
         if n_sid == n_olink and n_sname != n_olink:
             sample_key = "SampleName"
             warnings.warn(
@@ -43,6 +47,7 @@ def _detect_sample_key(df: pd.DataFrame, *, source: str = "") -> str:
                 UserWarning,
                 stacklevel=3,
             )
+    logger.debug("Sample key selected: %s", sample_key)
     return sample_key
 
 
@@ -124,14 +129,16 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
         aggfunc="first",
     )
     expression = expression.reindex(sample_order).reset_index(drop=True)
+    logger.debug("Pivot shape: %d samples x %d features", expression.shape[0], expression.shape[1])
 
     # Align features to match expression column order (pivot_table sorts columns)
     features = features.set_index("OlinkID").reindex(expression.columns).reset_index()
 
     metadata: dict[str, object] = {"source_file": str(path)}
 
-    # Build per-sample × per-assay LOD matrix if LOD column exists
+    # Build per-sample x per-assay LOD matrix if LOD column exists
     if "LOD" in df.columns:
+        logger.debug("LOD column present, building LOD matrix")
         lod_matrix = df.pivot_table(
             index=sample_key,
             columns="OlinkID",
@@ -140,6 +147,8 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
         )
         lod_matrix = lod_matrix.reindex(sample_order).reset_index(drop=True)
         metadata["lod_matrix"] = lod_matrix
+    else:
+        logger.debug("No LOD column in input")
 
     platform = _detect_olink_platform(features["OlinkID"])
 

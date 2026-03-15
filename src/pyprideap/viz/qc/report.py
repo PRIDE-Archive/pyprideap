@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import html as html_mod
+import logging
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from pyprideap.core import AffinityDataset
+
 from pyprideap.viz.qc.compute import (
     ColCheckData,
     CorrelationData,
@@ -27,6 +29,8 @@ from pyprideap.viz.qc.compute import (
     compute_all,
     compute_volcano,
 )
+
+logger = logging.getLogger(__name__)
 
 _HELP_TEXT: dict[str, str] = {
     "distribution": (
@@ -1238,6 +1242,7 @@ def qc_report(
     from pyprideap.viz.qc import render as R
 
     output = Path(output)
+    logger.debug("qc_report: starting report generation -> %s", output)
     plot_data = compute_all(dataset)
 
     _RENDERERS = {
@@ -1327,6 +1332,7 @@ def qc_report(
         toggle_html += '<button class="label-toggle-btn" onclick="toggleDimRedLabels(this)">Show Labels</button>'
 
         rendered["dimreduction"] = ("Dimensionality Reduction", combined_html, toggle_html)
+        logger.debug("qc_report: rendered dimreduction plot")
 
     # Find first key if not already set
     if first_key is None:
@@ -1350,6 +1356,7 @@ def qc_report(
         js = "cdn" if key == first_key else False
         plot_html = fig.to_html(full_html=False, include_plotlyjs=js, default_height=plot_height)
         rendered[key] = (data.title, plot_html)  # type: ignore[attr-defined]
+        logger.debug("qc_report: rendered %s plot", key)
 
     # SDRF-driven differential expression volcano plots
     if sdrf_path is not None:
@@ -1516,6 +1523,7 @@ def qc_report(
     )
 
     output.write_text(html)
+    logger.debug("qc_report: written %s (%d sections)", output, len(rendered))
     return output
 
 
@@ -1566,6 +1574,7 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger.debug("qc_report_split: starting split report generation -> %s", output_dir)
 
     plot_data = compute_all(dataset)
     lod_info = _lod_source_info(dataset)
@@ -1609,6 +1618,7 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
         page = _wrap_standalone_html(f"{title} — {platform_label}", body)
         (output_dir / f"{key}.html").write_text(page)
         written.append(key)
+        logger.debug("qc_report_split: rendered %s plot", key)
 
     # Combined PCA + t-SNE with toggle switch (matches full report)
     _pca_raw = plot_data.get("pca")
@@ -1676,4 +1686,5 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
     (output_dir / "summary.html").write_text(page)
     written.append("summary")
 
+    logger.debug("qc_report_split: written %d files to %s", len(written), output_dir)
     return output_dir

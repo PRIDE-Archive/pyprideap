@@ -83,7 +83,7 @@ urls = client.get_download_urls("PAD000001")
 
 ## Command-Line Interface
 
-pyprideap includes a CLI for generating QC reports:
+pyprideap includes a CLI (powered by [Click](https://click.palletsprojects.com/)) for generating QC reports:
 
 ```bash
 # From a local file (format auto-detected)
@@ -91,17 +91,46 @@ pyprideap report data.npx.csv
 pyprideap report data.parquet -o my_report.html
 
 # Force platform type
-pyprideap report ambiguous.csv -p olink
+pyprideap report data.csv -p olink
 pyprideap report data.adat -p somascan
 
 # From a PRIDE accession (downloads data automatically)
-pyprideap report PAD000001
+pyprideap report -a PAD000001
+
+# Generate individual plot files instead of a single report
+pyprideap report data.npx.csv --split -o plots_dir/
+
+# Include SDRF metadata for volcano plots
+pyprideap report data.npx.csv --sdrf samples.sdrf.tsv
+
+# Enable verbose logging (shows format detection, LOD method, PCA variance, etc.)
+pyprideap report data.npx.csv -v
+
+# List proteins above LOD
+pyprideap proteins-above-lod data.npx.csv
+pyprideap proteins-above-lod data.npx.csv -t 80 -o proteins.txt
 ```
 
 Or via `python -m`:
 
 ```bash
 python -m pyprideap report data.npx.csv
+```
+
+### Verbose mode
+
+Use `-v` / `--verbose` to enable detailed debug logging. This shows progress through each processing stage:
+
+```
+Reading olink_npx.csv...
+08:12:01 [DEBUG] pyprideap.io.readers.registry: Format detected: olink_csv
+08:12:01 [DEBUG] pyprideap.io.readers.olink_csv: Sample key selected: SampleID
+08:12:01 [DEBUG] pyprideap.io.readers.olink_csv: Pivot shape: 20 samples x 1470 features
+  20 samples, 1470 features (olink_explore)
+08:12:01 [DEBUG] pyprideap.processing.lod: LOD method selected: REPORTED
+08:12:02 [DEBUG] pyprideap.viz.qc.compute: Computing PCA...
+08:12:02 [DEBUG] pyprideap.viz.qc.compute: PCA: variance explained=[0.42, 0.18]
+...
 ```
 
 ## QC Report

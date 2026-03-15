@@ -19,6 +19,7 @@ objects are never mutated.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -26,6 +27,8 @@ import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_common_samples(
@@ -117,6 +120,12 @@ def bridge_normalize(
 
     ds1_bridge_idx = _resolve_bridge_mask(dataset1, bridge_samples)
     ds2_bridge_idx = _resolve_bridge_mask(dataset2, bridge_samples)
+    logger.debug(
+        "bridge_normalize: %d bridge samples requested, matched %d in ds1, %d in ds2",
+        len(bridge_samples),
+        len(ds1_bridge_idx),
+        len(ds2_bridge_idx),
+    )
     if ds1_bridge_idx.empty or ds2_bridge_idx.empty:
         raise ValueError(f"No bridge samples found in both datasets. Requested: {bridge_samples}")
 
@@ -129,6 +138,12 @@ def bridge_normalize(
     bridge_ds1 = dataset1.expression.loc[ds1_bridge_idx, overlapping_proteins]
     bridge_ds2 = dataset2.expression.loc[ds2_bridge_idx, overlapping_proteins]
     adjustment = bridge_ds1.median(axis=0) - bridge_ds2.median(axis=0)
+    logger.debug(
+        "bridge_normalize: %d overlapping proteins, median adjustment range [%.3f, %.3f]",
+        len(overlapping_proteins),
+        float(adjustment.min()),
+        float(adjustment.max()),
+    )
 
     # Apply adjustment to dataset2 (only overlapping columns are shifted;
     # non-overlapping columns in dataset2 are left as-is)
@@ -171,6 +186,11 @@ def subset_normalize(
     ref_in_ds1 = [p for p in reference_proteins if p in dataset1.expression.columns]
     ref_in_ds2 = [p for p in reference_proteins if p in dataset2.expression.columns]
     valid_ref = sorted(set(ref_in_ds1) & set(ref_in_ds2))
+    logger.debug(
+        "subset_normalize: %d reference proteins requested, %d found in both datasets",
+        len(reference_proteins),
+        len(valid_ref),
+    )
     if not valid_ref:
         raise ValueError(f"None of the reference proteins were found in both datasets. Requested: {reference_proteins}")
 
@@ -217,6 +237,12 @@ def reference_median_normalize(
 
     current_medians = dataset.expression[proteins_to_adjust].median(axis=0)
     adjustment = reference_medians[proteins_to_adjust] - current_medians
+    logger.debug(
+        "reference_median_normalize: adjusting %d proteins, median shift range [%.3f, %.3f]",
+        len(proteins_to_adjust),
+        float(adjustment.min()),
+        float(adjustment.max()),
+    )
 
     adjusted_expression = dataset.expression.copy()
     adjusted_expression[proteins_to_adjust] = adjusted_expression[proteins_to_adjust].add(adjustment, axis=1)
@@ -358,6 +384,11 @@ def select_bridge_samples(
         selected_idx = sorted_idx[positions]
 
     selected: list[str] = sample_ids.loc[selected_idx].tolist()
+    logger.debug(
+        "select_bridge_samples: %d candidates after filtering, selected %d bridge samples",
+        len(valid_idx),
+        len(selected),
+    )
     return selected
 
 
@@ -396,6 +427,11 @@ def assess_bridgeability(
         raise ValueError("No overlapping proteins between the two datasets.")
 
     aligned1, aligned2, common_samples = _resolve_common_samples(dataset1, dataset2)
+    logger.debug(
+        "assess_bridgeability: %d overlapping proteins, %d common samples",
+        len(overlapping_proteins),
+        len(common_samples),
+    )
 
     records: list[dict] = []
     for protein in overlapping_proteins:
@@ -667,6 +703,12 @@ def quantile_smooth_normalize(
     ref_bridge = ref_numeric.index.intersection(bridge_idx)
     tgt_bridge = tgt_numeric.index.intersection(bridge_idx)
     common_bridge = ref_bridge.intersection(tgt_bridge)
+    logger.debug(
+        "quantile_smooth_normalize: %d overlapping assays, %d common bridge samples, min_required=%d",
+        len(overlapping),
+        len(common_bridge),
+        min_bridge_samples,
+    )
 
     n_skipped = 0
     for protein in overlapping:
@@ -718,6 +760,12 @@ def quantile_smooth_normalize(
             # Fallback: linear interpolation
             all_tgt = tgt_numeric[protein].values
             normalized[protein] = np.interp(all_tgt, unique_tgt, mapped_ref)
+
+    logger.debug(
+        "quantile_smooth_normalize: normalized %d assays, skipped %d (insufficient bridge samples)",
+        len(overlapping) - n_skipped,
+        n_skipped,
+    )
 
     # Preserve NaN positions from original
     nan_mask = tgt_numeric.isna()
@@ -980,6 +1028,13 @@ def lift_somascan(
     full_scalars = pd.Series(1.0, index=dataset.expression.columns)
     matched = full_scalars.index.intersection(scalars.index)
     full_scalars[matched] = scalars[matched]
+    logger.debug(
+        "lift_somascan: %d/%d analytes have scalars, bridge=%s, target_version=%s",
+        len(matched),
+        len(dataset.expression.columns),
+        bridge,
+        target_version,
+    )
 
     scaled_expression = dataset.expression.multiply(full_scalars, axis=1)
     # Round to 1 decimal, matching SomaDataIO convention
@@ -1178,6 +1233,7 @@ def normalize_n(
         If schema validation fails.
     """
     _validate_norm_schema(steps)
+    logger.debug("normalize_n: %d steps, reference='%s'", len(steps), next(s.name for s in steps if s.order == 1))
 
     sorted_steps = sorted(steps, key=lambda s: s.order)
     ref_step = sorted_steps[0]
@@ -1211,6 +1267,13 @@ def normalize_n(
             )
 
         # Normalize
+        logger.debug(
+            "normalize_n: step '%s' (order=%d), type=%s, normalizing to %s",
+            step.name,
+            step.order,
+            step.normalization_type,
+            ref_names,
+        )
         norm_type = step.normalization_type.lower()
         if norm_type == "bridge":
             if step.bridge_samples is None:

@@ -11,10 +11,14 @@ adjusted *p*-values.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Lazy imports with user-friendly error messages
@@ -117,6 +121,9 @@ def _validate_group_var(
             f"group_var '{group_var}' must have at least {min_levels} unique non-NaN levels, but found {n_levels}."
         )
 
+    group_sizes = groups.dropna().value_counts().to_dict()
+    logger.debug("group_var '%s' validated: %d levels, sizes=%s", group_var, n_levels, group_sizes)
+
     return groups
 
 
@@ -164,6 +171,9 @@ def ttest(
     groups = _validate_group_var(dataset, group_var, exact_levels=2)
     assay_map = _resolve_assay_map(dataset)
 
+    test_type = "paired t-test" if pair_id else "Welch t-test"
+    logger.debug("ttest: using %s on %d proteins", test_type, len(dataset.expression.columns))
+
     levels = sorted(groups.dropna().unique())
     g1_label, g2_label = levels
 
@@ -171,6 +181,7 @@ def ttest(
     mask_g2 = groups == g2_label
 
     records: list[dict] = []
+    skipped = 0
 
     for protein_id in dataset.expression.columns:
         vals = dataset.expression[protein_id]
@@ -191,6 +202,7 @@ def ttest(
             pivot = pivot.dropna()
 
             if len(pivot) < 2:
+                skipped += 1
                 records.append(_empty_ttest_row(protein_id, assay_map))
                 continue
 
@@ -204,6 +216,7 @@ def ttest(
             b = vals[mask_g2].dropna().values
 
             if len(a) < 2 or len(b) < 2:
+                skipped += 1
                 records.append(_empty_ttest_row(protein_id, assay_map))
                 continue
 
@@ -221,11 +234,15 @@ def ttest(
         )
 
     result = pd.DataFrame(records)
+    if skipped:
+        logger.debug("ttest: skipped %d proteins (insufficient data)", skipped)
     if result.empty:
         return _empty_ttest_frame()
 
     result["adj_p_value"] = _bh_adjust(np.asarray(result["p_value"]))
     result["significant"] = result["adj_p_value"] < 0.05
+    n_sig = int(result["significant"].sum())
+    logger.debug("ttest: %d proteins tested, %d significant (adj_p < 0.05)", len(result), n_sig)
     return result
 
 
@@ -283,6 +300,9 @@ def wilcoxon(
     groups = _validate_group_var(dataset, group_var, exact_levels=2)
     assay_map = _resolve_assay_map(dataset)
 
+    test_type = "Wilcoxon signed-rank" if pair_id else "Mann-Whitney U"
+    logger.debug("wilcoxon: using %s on %d proteins", test_type, len(dataset.expression.columns))
+
     levels = sorted(groups.dropna().unique())
     g1_label, g2_label = levels
 
@@ -290,6 +310,7 @@ def wilcoxon(
     mask_g2 = groups == g2_label
 
     records: list[dict] = []
+    skipped = 0
 
     for protein_id in dataset.expression.columns:
         vals = dataset.expression[protein_id]
@@ -309,6 +330,7 @@ def wilcoxon(
             pivot = pivot.dropna()
 
             if len(pivot) < 2:
+                skipped += 1
                 records.append(_empty_ttest_row(protein_id, assay_map))
                 continue
 
@@ -318,6 +340,7 @@ def wilcoxon(
                 stat, pval = scipy_stats.wilcoxon(a, b)
             except ValueError:
                 # wilcoxon raises if all differences are zero
+                skipped += 1
                 records.append(_empty_ttest_row(protein_id, assay_map))
                 continue
             estimate = float(np.nanmean(a) - np.nanmean(b))
@@ -326,6 +349,7 @@ def wilcoxon(
             b = vals[mask_g2].dropna().values
 
             if len(a) < 1 or len(b) < 1:
+                skipped += 1
                 records.append(_empty_ttest_row(protein_id, assay_map))
                 continue
 
@@ -343,11 +367,15 @@ def wilcoxon(
         )
 
     result = pd.DataFrame(records)
+    if skipped:
+        logger.debug("wilcoxon: skipped %d proteins (insufficient data)", skipped)
     if result.empty:
         return _empty_ttest_frame()
 
     result["adj_p_value"] = _bh_adjust(np.asarray(result["p_value"]))
     result["significant"] = result["adj_p_value"] < 0.05
+    n_sig = int(result["significant"].sum())
+    logger.debug("wilcoxon: %d proteins tested, %d significant (adj_p < 0.05)", len(result), n_sig)
     return result
 
 
@@ -389,6 +417,8 @@ def anova(
     n_levels = len(levels)
 
     use_ols = covariates is not None and len(covariates) > 0
+    test_type = "OLS ANCOVA" if use_ols else "one-way ANOVA"
+    logger.debug("anova: using %s on %d proteins, %d groups", test_type, len(dataset.expression.columns), n_levels)
 
     if use_ols:
         assert covariates is not None  # narrowing for mypy
@@ -398,6 +428,7 @@ def anova(
                 raise ValueError(f"Covariate '{cov}' not found in dataset.samples.")
 
     records: list[dict] = []
+    skipped = 0
 
     for protein_id in dataset.expression.columns:
         vals = dataset.expression[protein_id]
@@ -414,6 +445,7 @@ def anova(
 
             # Need at least 2 observations in each group
             if any(len(arr) < 2 for arr in group_arrays):
+                skipped += 1
                 records.append(_empty_anova_row(protein_id, assay_map))
                 continue
 
@@ -422,12 +454,14 @@ def anova(
             df_w = total_n - n_levels
 
             if df_w < 1:
+                skipped += 1
                 records.append(_empty_anova_row(protein_id, assay_map))
                 continue
 
             stat, pval = scipy_stats.f_oneway(*group_arrays)
 
         if np.isnan(pval):
+            skipped += 1
             records.append(_empty_anova_row(protein_id, assay_map))
             continue
 
@@ -443,11 +477,15 @@ def anova(
         )
 
     result = pd.DataFrame(records)
+    if skipped:
+        logger.debug("anova: skipped %d proteins (insufficient data)", skipped)
     if result.empty:
         return _empty_anova_frame()
 
     result["adj_p_value"] = _bh_adjust(np.asarray(result["p_value"]))
     result["significant"] = result["adj_p_value"] < 0.05
+    n_sig = int(result["significant"].sum())
+    logger.debug("anova: %d proteins tested, %d significant (adj_p < 0.05)", len(result), n_sig)
     return result
 
 
@@ -559,6 +597,7 @@ def anova_posthoc(
     assay_map = _resolve_assay_map(dataset)
 
     protein_ids = list(proteins) if proteins is not None else list(dataset.expression.columns)
+    logger.debug("anova_posthoc: Tukey HSD on %d proteins", len(protein_ids))
 
     records: list[dict] = []
 
@@ -616,6 +655,7 @@ def anova_posthoc(
                 )
 
     result_df = pd.DataFrame(records)
+    logger.debug("anova_posthoc: %d pairwise comparisons computed", len(result_df))
     if result_df.empty:
         return pd.DataFrame(
             columns=[

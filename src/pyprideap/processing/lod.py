@@ -38,6 +38,7 @@ methods.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -48,6 +49,8 @@ import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
 from pyprideap.processing.filtering import _CONTROL_SAMPLE_TYPES
+
+logger = logging.getLogger(__name__)
 
 _MIN_CONTROLS_FOR_LOD = 10
 _MIN_STD_FLOOR = 0.2
@@ -121,6 +124,7 @@ def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
 
     is_negative = st.isin(_NEGATIVE_CONTROL_TYPES)
     if is_negative.any():
+        logger.debug("found %d negative control samples", is_negative.sum())
         return is_negative
 
     # Platform-aware fallback
@@ -249,6 +253,10 @@ def compute_nc_lod_detailed(
         max_counts = pd.Series(np.nan, index=lod_npx.index)
         lod_count = pd.Series(np.nan, index=lod_npx.index)
         lod_method = pd.Series("lod_npx", index=lod_npx.index)
+
+    n_npx = int((lod_method == "lod_npx").sum())
+    n_count = int((lod_method == "lod_count").sum())
+    logger.debug("NCLOD detailed: %d assays lod_npx, %d assays lod_count", n_npx, n_count)
 
     return NcLodDetail(
         lod_npx=lod_npx,
@@ -587,6 +595,7 @@ def load_fixed_lod(
         raise FileNotFoundError(f"FixedLOD file not found: {path}")
 
     lod_df = pd.read_csv(path, sep=None, engine="python")
+    logger.debug("fixed LOD file loaded: %s (%d rows)", path, len(lod_df))
 
     required = {"OlinkID", "LODNPX"}
     missing = required - set(lod_df.columns)
@@ -646,6 +655,8 @@ def get_lod_values(
     """
     if isinstance(method, str):
         method = LodMethod(method.upper())
+
+    logger.debug("LOD method selected: %s", method.value)
 
     if method is LodMethod.NCLOD:
         try:
@@ -767,6 +778,17 @@ def compute_lod_stats(
                 panel_total = int(expr_valid[panel_cols].sum().sum())
                 above_lod_per_panel[str(panel_name)] = panel_above / panel_total if panel_total > 0 else 0.0
 
+    logger.debug(
+        "LOD stats: source=%s, assays_with_lod=%d/%d, above_lod_rate=%.1f%%",
+        source,
+        n_assays_with_lod,
+        n_assays_total,
+        above_lod_rate * 100,
+    )
+    if above_lod_per_panel:
+        for panel, rate in sorted(above_lod_per_panel.items()):
+            logger.debug("  panel %s: above-LOD %.1f%%", panel, rate * 100)
+
     return LodStats(
         lod_source=source,
         n_assays_with_lod=n_assays_with_lod,
@@ -840,6 +862,7 @@ def get_proteins_above_lod(
         id_col = dataset.features.columns[0]
     id_to_uniprot = dict(zip(dataset.features[id_col], dataset.features["UniProt"]))
 
+    logger.debug("evaluating %d assays for above-LOD proteins (threshold=%.1f%%)", len(numeric.columns), threshold)
     proteins: set[str] = set()
     for col in numeric.columns:
         valid = numeric[col].notna() & has_lod[col]
@@ -852,6 +875,7 @@ def get_proteins_above_lod(
             if up and pd.notna(up):
                 proteins.add(str(up))
 
+    logger.debug("proteins above LOD: %d unique UniProt accessions", len(proteins))
     return sorted(proteins)
 
 
