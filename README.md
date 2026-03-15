@@ -9,7 +9,7 @@ Supports **Olink** (Explore, Explore HT, Target, Reveal) and **SomaScan** platfo
 > **Note:** pyprideap is not yet published on PyPI. Install directly from source:
 >
 > ```bash
-> pip install git+https://github.com/PRIDE-Archive/pyprideap.git
+> pip install "pyprideap[all] @ git+https://github.com/PRIDE-Archive/pyprideap.git"
 > ```
 
 Once available on PyPI:
@@ -286,46 +286,6 @@ plate_assignment = pp.randomize_plates(
     keep_paired="SubjectID",  # keep longitudinal samples on same plate
     seed=42,
 )
-```
-
-## Package Structure
-
-```
-pyprideap/
-├── api/             # PRIDE Archive REST API client
-├── io/
-│   ├── readers/     # Format-specific readers (CSV, Parquet, XLSX, ADAT, SDRF)
-│   └── validators/  # Data validation against PRIDE-AP guidelines
-├── processing/
-│   ├── filtering.py     # Sample filtering (controls, QC)
-│   ├── lod.py           # LOD computation (NCLOD, FixedLOD, eLOD)
-│   ├── normalization.py # Bridge, subset, reference, quantile, lift normalization
-│   ├── olink/           # Olink preprocessing pipeline
-│   └── somascan/        # SomaScan preprocessing pipeline
-├── stats/
-│   ├── descriptive.py       # Dataset summary statistics
-│   ├── design.py            # Plate randomization
-│   └── differential.py      # t-test, Wilcoxon, ANOVA
-└── viz/
-    ├── theme.py     # Color palettes and plot styling
-    ├── plots.py     # Standalone plots (boxplot)
-    └── qc/
-        ├── compute.py   # QC metric computation
-        ├── render.py    # Plotly figure rendering
-        └── report.py    # HTML report assembly
-```
-
-## Development
-
-```bash
-# Run tests
-pytest tests/ -v
-
-# Lint
-ruff check src/ tests/
-
-# Type check
-mypy src/pyprideap/
 ```
 
 ## License
