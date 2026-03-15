@@ -30,14 +30,6 @@ With statistical testing:
 pip install "pyprideap[all]"
 ```
 
-For development:
-
-```bash
-git clone https://github.com/PRIDE-Archive/pyprideap.git
-cd pyprideap
-pip install -e ".[dev]"
-```
-
 ## Quick Start
 
 ### Read a dataset
