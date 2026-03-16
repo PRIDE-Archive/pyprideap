@@ -7,6 +7,7 @@ Usage:
     pyprideap report <file> -p olink               Force platform type
     pyprideap report <file> --split                Output individual plots as separate HTML files
     pyprideap proteins-above-lod <file>            List UniProt accessions above LOD
+    pyprideap proteins-above-lod -a PAD000001      Download data from PRIDE and list proteins
     pyprideap proteins-above-lod <file> -t 80      Custom threshold (default 50%)
 
 Examples:
@@ -17,6 +18,7 @@ Examples:
     pyprideap report ambiguous.csv -p somascan
     pyprideap report data.npx.csv -v
     pyprideap proteins-above-lod data.npx.csv
+    pyprideap proteins-above-lod -a PAD000001
     pyprideap proteins-above-lod data.npx.csv -t 80 -o proteins.txt
 """
 
@@ -211,7 +213,8 @@ def report(
 
 
 @main.command("proteins-above-lod")
-@click.argument("input_file")
+@click.argument("input_file", required=False, default=None)
+@click.option("-a", "--accession", default=None, help="PAD accession to download from PRIDE (e.g. PAD000001).")
 @click.option("-o", "--output", default=None, help="Output file path (default: print to stdout).")
 @click.option(
     "-p",
@@ -229,32 +232,70 @@ def report(
 )
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose logging output.")
 def proteins_above_lod(
-    input_file: str, output: str | None, platform: str | None, threshold: float, verbose: bool
+    input_file: str | None,
+    accession: str | None,
+    output: str | None,
+    platform: str | None,
+    threshold: float,
+    verbose: bool,
 ) -> None:
     """List UniProt accessions for proteins above LOD."""
     _setup_logging(verbose)
 
     import pyprideap as pp
 
-    input_path = Path(input_file)
-    if not input_path.exists():
-        click.echo(f"Error: File not found: {input_path}", err=True)
+    if input_file is None and accession is None:
+        click.echo("Error: Provide either an input file or --accession / -a.", err=True)
         sys.exit(1)
 
-    click.echo(f"Reading {input_path.name}...", err=True)
-    ds = pp.read(input_path, platform=platform)
-    click.echo(
-        f"  {len(ds.samples)} samples, {len(ds.features)} features ({ds.platform.value})",
-        err=True,
-    )
+    if input_file is not None and accession is not None:
+        click.echo("Error: Provide either an input file or --accession, not both.", err=True)
+        sys.exit(1)
 
-    proteins = pp.get_proteins_above_lod(ds, threshold=threshold)
-    click.echo(f"  {len(proteins)} proteins above LOD (threshold={threshold}%)", err=True)
+    all_proteins: set[str] = set()
 
-    output_text = "\n".join(proteins)
+    if accession is not None:
+        accession = accession.upper()
+        click.echo(f"Fetching data from PRIDE for {accession}...", err=True)
+
+        with tempfile.TemporaryDirectory(prefix="pyprideap_") as tmpdir:
+            tmppath = Path(tmpdir)
+            files = _download_pad_files(accession, tmppath)
+
+            for f in files:
+                try:
+                    click.echo(f"Reading {f.name}...", err=True)
+                    ds = pp.read(f, platform=platform)
+                    click.echo(
+                        f"  {len(ds.samples)} samples, {len(ds.features)} features ({ds.platform.value})",
+                        err=True,
+                    )
+                    proteins = pp.get_proteins_above_lod(ds, threshold=threshold)
+                    click.echo(f"  {len(proteins)} proteins above LOD (threshold={threshold}%)", err=True)
+                    all_proteins.update(proteins)
+                except Exception as e:
+                    logger.debug("Error processing %s: %s", f.name, e, exc_info=True)
+                    click.echo(f"  Skipping {f.name}: {e}", err=True)
+    else:
+        input_path = Path(input_file)  # type: ignore[arg-type]
+        if not input_path.exists():
+            click.echo(f"Error: File not found: {input_path}", err=True)
+            sys.exit(1)
+
+        click.echo(f"Reading {input_path.name}...", err=True)
+        ds = pp.read(input_path, platform=platform)
+        click.echo(
+            f"  {len(ds.samples)} samples, {len(ds.features)} features ({ds.platform.value})",
+            err=True,
+        )
+        proteins = pp.get_proteins_above_lod(ds, threshold=threshold)
+        click.echo(f"  {len(proteins)} proteins above LOD (threshold={threshold}%)", err=True)
+        all_proteins.update(proteins)
+
+    output_text = "\n".join(sorted(all_proteins))
     if output:
         Path(output).write_text(output_text + "\n")
-        click.echo(f"  Saved to {output}", err=True)
+        click.echo(f"  Saved {len(all_proteins)} unique proteins to {output}", err=True)
     else:
         click.echo(output_text)
 
