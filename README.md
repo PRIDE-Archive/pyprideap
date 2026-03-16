@@ -111,9 +111,12 @@ pyprideap report data.npx.csv --sdrf samples.sdrf.tsv
 # Enable verbose logging (shows format detection, LOD method, PCA variance, etc.)
 pyprideap report data.npx.csv -v
 
-# List proteins above LOD
+# List proteins above LOD from a local file
 pyprideap proteins-above-lod data.npx.csv
 pyprideap proteins-above-lod data.npx.csv -t 80 -o proteins.txt
+
+# List proteins above LOD from a PRIDE accession
+pyprideap proteins-above-lod -a PAD000001
 ```
 
 Or via `python -m`:
