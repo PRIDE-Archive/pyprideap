@@ -597,13 +597,13 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
     FixedLOD reference CSV equivalent; instead, LOD is derived from the
     distribution of buffer RFU values.
     """
+    from pyprideap.core import Platform
     from pyprideap.processing.lod import (
         _MIN_CONTROLS_FOR_LOD,
         _find_negative_controls,
         get_bundled_fixed_lod_path,
         get_reported_lod,
     )
-    from pyprideap.core import Platform
 
     info: dict[str, Any] = {"active": None, "sources": []}
     sources: list[dict[str, str]] = []
@@ -649,9 +649,7 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
             if info["active"] is None:
                 info["active"] = "Reported LOD"
         else:
-            sources.append(
-                {"name": "Reported LOD", "status": "unavailable", "detail": "No LOD column in data file"}
-            )
+            sources.append({"name": "Reported LOD", "status": "unavailable", "detail": "No LOD column in data file"})
 
         # 2. NCLOD from negative controls
         try:
@@ -1172,7 +1170,7 @@ def _compute_sdrf_volcanoes(
     from dataclasses import replace as ds_replace
 
     from pyprideap.io.readers.sdrf import get_grouping_columns, merge_sdrf, read_sdrf
-    from pyprideap.stats.differential import ttest
+    from pyprideap.stats.differential import linear_model, ttest
 
     sdrf = read_sdrf(sdrf_path)
     ds = merge_sdrf(dataset, sdrf)
@@ -1197,6 +1195,9 @@ def _compute_sdrf_volcanoes(
         groups = ds_clean.samples[col].dropna().unique()
         n_groups = len(groups)
 
+        # Detect potential numeric covariates from SDRF columns
+        covariates = _detect_covariates(ds_clean, exclude={col})
+
         comparisons: list[tuple[str, VolcanoData]] = []
 
         if n_groups == 2:
@@ -1204,9 +1205,28 @@ def _compute_sdrf_volcanoes(
             try:
                 test_df = ttest(ds_clean, group_var=col)
                 label = f"{groups[0]} vs {groups[1]}"
+                n_sig = int((test_df["significant"] == True).sum()) if "significant" in test_df.columns else 0  # noqa: E712
+                method = "Welch t-test"
+
+                # Fallback: if t-test found 0 significant proteins and
+                # covariates are available, re-run with linear model
+                if n_sig == 0 and covariates:
+                    cov_names = list(covariates.keys())
+                    logger.debug(
+                        "t-test found 0 significant proteins for '%s'; retrying with linear model adjusting for %s",
+                        col,
+                        cov_names,
+                    )
+                    try:
+                        test_df = linear_model(ds_clean, group_var=col, covariates=cov_names)
+                        method = f"Linear model (adjusted for {', '.join(cov_names)})"
+                    except Exception:
+                        pass  # keep the t-test result
+
                 vdata = compute_volcano(test_df)
                 if vdata is not None:
                     vdata.title = f"{col}: {label}"
+                    vdata.method = method
                     comparisons.append((label, vdata))
             except (ValueError, Exception):
                 pass
@@ -1224,9 +1244,28 @@ def _compute_sdrf_volcanoes(
                     try:
                         test_df = ttest(ds_pair, group_var=col)
                         label = f"{g1} vs {g2}"
+                        n_sig = int((test_df["significant"] == True).sum()) if "significant" in test_df.columns else 0  # noqa: E712
+                        method = "Welch t-test"
+
+                        if n_sig == 0 and covariates:
+                            cov_names = list(covariates.keys())
+                            logger.debug(
+                                "t-test found 0 significant proteins for '%s: %s'; "
+                                "retrying with linear model adjusting for %s",
+                                col,
+                                label,
+                                cov_names,
+                            )
+                            try:
+                                test_df = linear_model(ds_pair, group_var=col, covariates=cov_names)
+                                method = f"Linear model (adjusted for {', '.join(cov_names)})"
+                            except Exception:
+                                pass
+
                         vdata = compute_volcano(test_df)
                         if vdata is not None:
                             vdata.title = f"{col}: {label}"
+                            vdata.method = method
                             comparisons.append((label, vdata))
                     except (ValueError, Exception):
                         pass
@@ -1235,6 +1274,53 @@ def _compute_sdrf_volcanoes(
             results[col] = comparisons
 
     return results
+
+
+def _detect_covariates(
+    dataset: AffinityDataset,
+    exclude: set[str],
+) -> dict[str, str]:
+    """Detect numeric covariates from SDRF-merged sample metadata.
+
+    Looks for columns like ``age`` (parses '55Y' -> 55) and ``sex``
+    (encodes as 0/1).  Returns a dict of {column_name: type} for
+    columns that were successfully coerced to numeric.
+    """
+    import pandas as pd
+
+    covariates: dict[str, str] = {}
+    samples = dataset.samples
+
+    for col in samples.columns:
+        col_lower = col.lower().strip()
+        if col in exclude or col_lower in exclude:
+            continue
+
+        if col_lower == "age":
+            # Parse age strings like "55Y", "62Y" -> numeric
+            try:
+                parsed = samples[col].astype(str).str.extract(r"(\d+)", expand=False)
+                numeric = pd.to_numeric(parsed, errors="coerce")
+                if numeric.notna().sum() >= len(samples) * 0.5:
+                    dataset.samples[col] = numeric
+                    covariates[col] = "numeric"
+            except Exception:
+                pass
+        elif col_lower == "sex":
+            # Encode sex as numeric (female=0, male=1)
+            try:
+                mapping = samples[col].astype(str).str.strip().str.lower()
+                unique_vals = set(mapping.dropna().unique()) - {"nan", "not available", "not applicable"}
+                if unique_vals <= {"female", "male"} and len(unique_vals) == 2:
+                    dataset.samples[col] = mapping.map({"female": 0, "male": 1})
+                    covariates[col] = "binary"
+            except Exception:
+                pass
+
+    if covariates:
+        logger.debug("Detected covariates for adjustment: %s", covariates)
+
+    return covariates
 
 
 def qc_report(

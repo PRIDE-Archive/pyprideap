@@ -75,7 +75,6 @@ def render_distribution(data: DistributionData) -> Figure:
     of individual traces for clearer visualization.
     """
     go, _ = _import_plotly()
-    import numpy as np
 
     n_samples = len(data.sample_ids)
 
@@ -1420,11 +1419,7 @@ def render_uniprot_duplicates(data: UniProtDuplicateData) -> Figure:
         marker_color="#2ecc71",
         text=[f"{pct_unique:.1f}%"],
         textposition="inside",
-        hovertemplate=(
-            "Unique proteins:<br>"
-            f"{n_unique} / {n_total} assays<br>"
-            "%{y:.1f}% of assays<extra></extra>"
-        ),
+        hovertemplate=(f"Unique proteins:<br>{n_unique} / {n_total} assays<br>%{{y:.1f}}% of assays<extra></extra>"),
     )
     fig.add_bar(
         x=["Assays"],
@@ -1441,10 +1436,7 @@ def render_uniprot_duplicates(data: UniProtDuplicateData) -> Figure:
     )
 
     fig.update_layout(
-        title=(
-            f"{data.title} — {n_unique} unique proteins, {n_total} assays "
-            f"({n_replicate} replicate assays)"
-        ),
+        title=(f"{data.title} — {n_unique} unique proteins, {n_total} assays ({n_replicate} replicate assays)"),
         barmode="stack",
         yaxis_title="% of Assays",
         yaxis=dict(range=[0, 100], ticksuffix="%"),
@@ -1533,6 +1525,24 @@ def render_volcano(data: VolcanoData) -> Figure:
         )
 
     set_plot_theme(fig)
+
+    # Add method annotation if available
+    annotations = []
+    if data.method:
+        annotations.append(
+            dict(
+                text=f"Method: {data.method}",
+                xref="paper",
+                yref="paper",
+                x=0.0,
+                y=1.02,
+                xanchor="left",
+                yanchor="bottom",
+                showarrow=False,
+                font=dict(size=11, color=PRIDE_COLORS["text_muted"]),
+            )
+        )
+
     fig.update_layout(
         title=dict(text=data.title, x=0.5, xanchor="center"),
         xaxis_title="Fold Change",
@@ -1552,6 +1562,7 @@ def render_volcano(data: VolcanoData) -> Figure:
             x=0.5,
         ),
         margin=dict(l=60, r=30, t=60, b=80),
+        annotations=annotations,
     )
     return fig
 

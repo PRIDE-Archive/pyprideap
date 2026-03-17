@@ -271,6 +271,121 @@ def _empty_ttest_frame() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# linear_model (covariate-adjusted)
+# ---------------------------------------------------------------------------
+
+
+def linear_model(
+    dataset: AffinityDataset,
+    group_var: str,
+    covariates: list[str],
+) -> pd.DataFrame:
+    """Per-protein OLS linear model adjusting for covariates.
+
+    Fits ``expression ~ group_var + cov1 + cov2 + ...`` for each protein
+    and extracts the coefficient, t-statistic, and p-value for the group
+    effect.  Useful when a simple t-test lacks power due to confounders
+    such as age or sex.
+
+    Parameters
+    ----------
+    dataset : AffinityDataset
+        Dataset containing expression data, sample metadata, and features.
+    group_var : str
+        Column in ``dataset.samples`` with exactly 2 unique non-NaN values.
+    covariates : list[str]
+        Columns in ``dataset.samples`` to adjust for.  Numeric columns are
+        used as continuous covariates; categorical columns are dummy-coded.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same schema as :func:`ttest`.
+    """
+    try:
+        from statsmodels.formula.api import ols
+    except ImportError:
+        raise ImportError("statsmodels is required for linear model testing. Install it with:  pip install statsmodels")
+
+    groups = _validate_group_var(dataset, group_var, exact_levels=2)
+    assay_map = _resolve_assay_map(dataset)
+
+    # Validate covariates
+    for cov in covariates:
+        if cov not in dataset.samples.columns:
+            raise ValueError(f"Covariate '{cov}' not found in dataset.samples.")
+
+    cov_str = " + ".join(covariates)
+    logger.debug(
+        "linear_model: OLS with covariates [%s] on %d proteins",
+        cov_str,
+        len(dataset.expression.columns),
+    )
+
+    levels = sorted(groups.dropna().unique())
+    g1_label, g2_label = levels
+
+    records: list[dict] = []
+    skipped = 0
+
+    for protein_id in dataset.expression.columns:
+        df_fit = pd.DataFrame({"y": dataset.expression[protein_id], group_var: groups})
+        for cov in covariates:
+            df_fit[cov] = dataset.samples[cov].values
+        df_fit = df_fit.dropna()
+
+        if len(df_fit) < len(covariates) + 3:
+            skipped += 1
+            records.append(_empty_ttest_row(protein_id, assay_map))
+            continue
+
+        formula = f"y ~ C({group_var}) + {cov_str}"
+        try:
+            model = ols(formula, data=df_fit).fit()
+        except Exception:
+            skipped += 1
+            records.append(_empty_ttest_row(protein_id, assay_map))
+            continue
+
+        # Extract the group effect coefficient
+        group_key = f"C({group_var})[T.{g2_label}]"
+        if group_key not in model.params.index:
+            skipped += 1
+            records.append(_empty_ttest_row(protein_id, assay_map))
+            continue
+
+        estimate = float(model.params[group_key])
+        stat = float(model.tvalues[group_key])
+        pval = float(model.pvalues[group_key])
+
+        records.append(
+            {
+                "protein_id": protein_id,
+                "assay": assay_map.get(protein_id, None),
+                "estimate": estimate,
+                "statistic": stat,
+                "p_value": pval,
+            }
+        )
+
+    result = pd.DataFrame(records)
+    if skipped:
+        logger.debug("linear_model: skipped %d proteins (insufficient data)", skipped)
+    if result.empty:
+        return _empty_ttest_frame()
+
+    result["adj_p_value"] = _bh_adjust(np.asarray(result["p_value"]))
+    result["significant"] = result["adj_p_value"] < 0.05
+    n_sig = int(result["significant"].sum())
+    logger.debug(
+        "linear_model: %d proteins tested, %d significant (adj_p < 0.05)",
+        len(result),
+        n_sig,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # wilcoxon
 # ---------------------------------------------------------------------------
 
