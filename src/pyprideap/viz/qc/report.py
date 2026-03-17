@@ -597,13 +597,13 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
     FixedLOD reference CSV equivalent; instead, LOD is derived from the
     distribution of buffer RFU values.
     """
+    from pyprideap.core import Platform
     from pyprideap.processing.lod import (
         _MIN_CONTROLS_FOR_LOD,
         _find_negative_controls,
         get_bundled_fixed_lod_path,
         get_reported_lod,
     )
-    from pyprideap.core import Platform
 
     info: dict[str, Any] = {"active": None, "sources": []}
     sources: list[dict[str, str]] = []

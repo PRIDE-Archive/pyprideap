@@ -75,7 +75,6 @@ def render_distribution(data: DistributionData) -> Figure:
     of individual traces for clearer visualization.
     """
     go, _ = _import_plotly()
-    import numpy as np
 
     n_samples = len(data.sample_ids)
 
