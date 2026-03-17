@@ -208,7 +208,7 @@ _SECTION_ORDER = [
     ("Sample Relationships", ["dimreduction", "correlation", "heatmap"]),
     ("Normalization QC", ["norm_scale"]),
     ("Variability", ["cv_distribution", "plate_cv"]),
-    ("Olink QC", ["iqr_median_qc", "uniprot_duplicates"]),
+    ("Assay QC", ["iqr_median_qc", "uniprot_duplicates"]),
     ("SomaScan QC", ["col_check"]),
     ("Differential Expression", ["differential_expression"]),
 ]
@@ -586,73 +586,30 @@ def _compact_fig(fig: Any, precision: int = 4) -> Any:
 
 
 def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
-    """Detect which LOD sources are available and which one is active."""
+    """Detect which LOD sources are available and which one is active.
+
+    For Olink datasets we consider three possible sources (Reported LOD,
+    NCLOD, FixedLOD) and pick the first available in that priority order.
+
+    For SomaScan datasets, the primary and typically only source is the
+    estimated LOD from buffer samples (eLOD). SomaScan ADAT files do not
+    usually contain per-sample reported LOD values and there is no
+    FixedLOD reference CSV equivalent; instead, LOD is derived from the
+    distribution of buffer RFU values.
+    """
     from pyprideap.processing.lod import (
         _MIN_CONTROLS_FOR_LOD,
         _find_negative_controls,
         get_bundled_fixed_lod_path,
         get_reported_lod,
     )
+    from pyprideap.core import Platform
 
     info: dict[str, Any] = {"active": None, "sources": []}
     sources: list[dict[str, str]] = []
 
-    # 1. Reported LOD
-    reported = get_reported_lod(dataset)
-    if reported is not None:
-        if hasattr(reported, "shape") and reported.ndim == 2:
-            n_assays = int(reported.notna().any(axis=0).sum())
-        else:
-            n_assays = int(reported.notna().sum())
-        sources.append(
-            {
-                "name": "Reported LOD",
-                "status": "available",
-                "detail": f"LOD column in NPX file ({n_assays} assays)",
-            }
-        )
-        if info["active"] is None:
-            info["active"] = "Reported LOD"
-    else:
-        sources.append({"name": "Reported LOD", "status": "unavailable", "detail": "No LOD column in data file"})
-
-    # 2. NCLOD from negative controls
-    try:
-        nc_mask = _find_negative_controls(dataset)
-        n_controls = int(nc_mask.sum())
-        if n_controls >= _MIN_CONTROLS_FOR_LOD:
-            sources.append(
-                {
-                    "name": "NCLOD",
-                    "status": "available",
-                    "detail": f"Computed from {n_controls} negative control samples",
-                }
-            )
-            if info["active"] is None:
-                info["active"] = "NCLOD"
-        else:
-            sources.append(
-                {
-                    "name": "NCLOD",
-                    "status": "insufficient",
-                    "detail": f"Only {n_controls} negative controls (need \u2265{_MIN_CONTROLS_FOR_LOD})",
-                }
-            )
-    except (ValueError, KeyError):
-        has_st = "SampleType" in dataset.samples.columns
-        sources.append(
-            {
-                "name": "NCLOD",
-                "status": "unavailable",
-                "detail": "No SampleType column" if not has_st else "No negative control samples found",
-            }
-        )
-
-    # 3. Platform-specific LOD sources
-    from pyprideap.core import Platform
-
     if dataset.platform == Platform.SOMASCAN:
-        # SomaScan: eLOD from buffer samples (not FixedLOD)
+        # SomaScan: only consider eLOD from buffer samples.
         try:
             from pyprideap.processing.lod import compute_soma_elod
 
@@ -661,21 +618,74 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                 {
                     "name": "eLOD",
                     "status": "available",
-                    "detail": "Computed from buffer samples (MAD formula)",
+                    "detail": "Estimated from buffer RFU using a robust MAD-based formula",
                 }
             )
-            if info["active"] is None:
-                info["active"] = "eLOD"
+            info["active"] = "eLOD"
         except (ValueError, KeyError, ImportError):
             sources.append(
                 {
                     "name": "eLOD",
                     "status": "unavailable",
-                    "detail": "No buffer samples found for eLOD computation",
+                    "detail": "No buffer samples (SampleType = 'Buffer') found for eLOD computation",
                 }
             )
     else:
-        # Olink: FixedLOD from bundled configs
+        # Olink: Reported LOD, NCLOD, and FixedLOD
+        # 1. Reported LOD
+        reported = get_reported_lod(dataset)
+        if reported is not None:
+            if hasattr(reported, "shape") and reported.ndim == 2:
+                n_assays = int(reported.notna().any(axis=0).sum())
+            else:
+                n_assays = int(reported.notna().sum())
+            sources.append(
+                {
+                    "name": "Reported LOD",
+                    "status": "available",
+                    "detail": f"LOD column in NPX file ({n_assays} assays)",
+                }
+            )
+            if info["active"] is None:
+                info["active"] = "Reported LOD"
+        else:
+            sources.append(
+                {"name": "Reported LOD", "status": "unavailable", "detail": "No LOD column in data file"}
+            )
+
+        # 2. NCLOD from negative controls
+        try:
+            nc_mask = _find_negative_controls(dataset)
+            n_controls = int(nc_mask.sum())
+            if n_controls >= _MIN_CONTROLS_FOR_LOD:
+                sources.append(
+                    {
+                        "name": "NCLOD",
+                        "status": "available",
+                        "detail": f"Computed from {n_controls} negative control samples",
+                    }
+                )
+                if info["active"] is None:
+                    info["active"] = "NCLOD"
+            else:
+                sources.append(
+                    {
+                        "name": "NCLOD",
+                        "status": "insufficient",
+                        "detail": f"Only {n_controls} negative controls (need \u2265{_MIN_CONTROLS_FOR_LOD})",
+                    }
+                )
+        except (ValueError, KeyError):
+            has_st = "SampleType" in dataset.samples.columns
+            sources.append(
+                {
+                    "name": "NCLOD",
+                    "status": "unavailable",
+                    "detail": "No SampleType column" if not has_st else "No negative control samples found",
+                }
+            )
+
+        # 3. FixedLOD from bundled configs
         fixed_path = get_bundled_fixed_lod_path(dataset.platform)
         if fixed_path is not None:
             sources.append(
@@ -700,8 +710,10 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
 
 
 def _render_lod_card(lod_info: dict[str, Any]) -> str:
-    """Render the LOD source summary as an HTML card."""
-    status_icons = {"available": "\u2705", "unavailable": "\u274c", "insufficient": "\u26a0\ufe0f"}
+    """Render the LOD source summary as an HTML card.
+    Use HTML entities for status icons so the output is ASCII-safe for writing with any encoding.
+    """
+    status_icons = {"available": "&#9989;", "unavailable": "&#10060;", "insufficient": "&#9888;"}
     rows = []
     for src in lod_info["sources"]:
         icon = status_icons.get(src["status"], "")
@@ -718,33 +730,67 @@ def _render_lod_card(lod_info: dict[str, Any]) -> str:
     # Warning banner when no LOD source is available
     no_lod = lod_info["active"] is None
     warning_html = ""
+    platform = lod_info.get("platform", "")
     if no_lod:
-        has_fallback = any(
-            s["name"] in ("FixedLOD", "eLOD") and s["status"] == "available" for s in lod_info["sources"]
-        )
-        if has_fallback:
-            fallback_name = next(
-                s["name"]
-                for s in lod_info["sources"]
-                if s["name"] in ("FixedLOD", "eLOD") and s["status"] == "available"
-            )
-            warning_html = (
-                '<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;'
-                'padding:10px 14px;margin-top:10px;color:#856404;font-size:0.92em;">'
-                "\u26a0\ufe0f <strong>Warning:</strong> No Reported LOD or NCLOD available. "
-                "LOD-dependent plots (QC Summary, LOD Analysis) will not be shown. "
-                f"Consider using <strong>{fallback_name}</strong> for this platform."
-                "</div>"
-            )
-        else:
+        if platform == "somascan":
             warning_html = (
                 '<div style="background:#f8d7da;border:1px solid #f5c6cb;border-radius:6px;'
                 'padding:10px 14px;margin-top:10px;color:#721c24;font-size:0.92em;">'
-                "\u26a0\ufe0f <strong>Warning:</strong> No LOD source is available for this dataset. "
-                "No Reported LOD in the data file and insufficient negative controls for NCLOD. "
-                "LOD-dependent plots (QC Summary, LOD Analysis) will not be shown."
+                "&#9888; <strong>Warning:</strong> No buffer samples (SampleType = 'Buffer') found; "
+                "eLOD could not be computed. LOD-dependent plots (QC Summary, LOD Analysis) will not be shown."
                 "</div>"
             )
+        else:
+            has_fallback = any(
+                s["name"] in ("FixedLOD", "eLOD") and s["status"] == "available" for s in lod_info["sources"]
+            )
+            if has_fallback:
+                fallback_name = next(
+                    s["name"]
+                    for s in lod_info["sources"]
+                    if s["name"] in ("FixedLOD", "eLOD") and s["status"] == "available"
+                )
+                warning_html = (
+                    '<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;'
+                    'padding:10px 14px;margin-top:10px;color:#856404;font-size:0.92em;">'
+                    "&#9888; <strong>Warning:</strong> No Reported LOD or NCLOD available. "
+                    "LOD-dependent plots (QC Summary, LOD Analysis) will not be shown. "
+                    f"Consider using <strong>{fallback_name}</strong> for this platform."
+                    "</div>"
+                )
+            else:
+                warning_html = (
+                    '<div style="background:#f8d7da;border:1px solid #f5c6cb;border-radius:6px;'
+                    'padding:10px 14px;margin-top:10px;color:#721c24;font-size:0.92em;">'
+                    "&#9888; <strong>Warning:</strong> No LOD source is available for this dataset. "
+                    "No Reported LOD in the data file and insufficient negative controls for NCLOD. "
+                    "LOD-dependent plots (QC Summary, LOD Analysis) will not be shown."
+                    "</div>"
+                )
+
+    if platform == "somascan":
+        help_text = (
+            "The Limit of Detection (LOD) determines whether a measured RFU signal is distinguishable from background "
+            "buffer noise. For SomaScan, this report uses the <strong>estimated LOD (eLOD)</strong> computed from "
+            "buffer samples only. For each analyte, eLOD is defined as "
+            "<code>median(buffer RFU) + 3.3 &times; 1.4826 &times; MAD(buffer RFU)</code>, following the "
+            "SomaDataIO <code>calc_eLOD()</code> implementation. The 1.4826 factor converts MAD to a "
+            "standard-deviation equivalent; the 3.3 multiplier targets approximately 95% detection probability. "
+            "At least one group of buffer samples (SampleType = 'Buffer') is required for eLOD calculation; "
+            "Calibrator and QC samples are <em>not</em> used as background."
+        )
+    else:
+        help_text = (
+            "The Limit of Detection (LOD) determines whether a measured protein signal is above background noise. "
+            "Three LOD sources are supported for Olink datasets: "
+            "<strong>Reported LOD</strong> comes from the LOD column in the original NPX file (per sample and assay). "
+            "<strong>NCLOD</strong> is computed from negative control samples using the formula "
+            "LOD = median(NC) + max(0.2, 3&times;SD(NC)), following the OlinkAnalyze R package and requiring "
+            "&ge;10 negative controls. "
+            "<strong>FixedLOD</strong> is a pre-computed reference from Olink, specific to the reagent lot and "
+            "Data Analysis Reference ID. The report uses the first available source in the order "
+            "Reported &gt; NCLOD &gt; FixedLOD."
+        )
 
     return (
         '<div class="plot-card" id="lod-sources" style="margin-bottom:24px;">'
@@ -752,26 +798,7 @@ def _render_lod_card(lod_info: dict[str, Any]) -> str:
         "<h3>LOD Sources</h3>"
         '<button class="help-toggle" title="About LOD sources" aria-label="Help">?</button>'
         "</div>"
-        '<div class="help-text">'
-        "The Limit of Detection (LOD) determines whether a measured protein signal is above background noise. "
-        + (
-            "Three LOD sources are supported: "
-            "<strong>Reported LOD</strong> comes from the LOD column in the original data file (per sample and assay). "
-            "<strong>NCLOD</strong> is computed from negative control samples using the formula "
-            "LOD = median(NC) + max(0.2, 3&times;SD(NC)). Requires &ge;10 negative controls. "
-            "<strong>eLOD</strong> is computed from buffer samples using a MAD-based formula. "
-            "The report uses the first available source (Reported &gt; NCLOD &gt; eLOD)."
-            if lod_info.get("platform") == "somascan"
-            else "Three LOD sources are supported: "
-            "<strong>Reported LOD</strong> comes from the LOD column in the original NPX file (per sample and assay). "
-            "<strong>NCLOD</strong> is computed from negative control samples using the formula "
-            "LOD = median(NC) + max(0.2, 3&times;SD(NC)), following the OlinkAnalyze R package. "
-            "Requires &ge;10 negative controls. "
-            "<strong>FixedLOD</strong> is a pre-computed reference from Olink, specific to the reagent lot and "
-            "Data Analysis Reference ID. "
-            "The report uses the first available source (Reported &gt; NCLOD &gt; FixedLOD)."
-        )
-        + "</div>"
+        f'<div class="help-text">{help_text}</div>'
         '<table style="width:100%;border-collapse:collapse;margin-top:8px;">'
         f"{''.join(rows)}"
         "</table>"
@@ -937,33 +964,33 @@ def _render_summary_table(
         if lod_active is not None:
             rows.append(_summary_row("", "LOD source", str(lod_active)))
 
-        if isinstance(lod_analysis, LodAnalysisData) and len(lod_analysis.above_lod_pct) > 0:
-            n_above = sum(1 for p in lod_analysis.above_lod_pct if p > 50)
-            n_total = len(lod_analysis.above_lod_pct)
-            frac_above = n_above / n_total
-            if frac_above > 0.80:
+        # Match the "Missing Frequency distribution" metric (Olink-recommended 30% missing threshold):
+        # Missing frequency = fraction of samples below LOD, so <30% missing ⇔ >70% above LOD.
+        n_pass_mf = None
+        n_total_mf = None
+        if isinstance(data_completeness, DataCompletenessData) and len(data_completeness.missing_freq) > 0:
+            mf = [float(x) for x in data_completeness.missing_freq if x is not None]
+            n_total_mf = len(mf)
+            n_pass_mf = sum(1 for x in mf if x < 0.30)
+        elif isinstance(lod_analysis, LodAnalysisData) and len(lod_analysis.above_lod_pct) > 0:
+            n_total_mf = len(lod_analysis.above_lod_pct)
+            n_pass_mf = sum(1 for p in lod_analysis.above_lod_pct if float(p) > 70.0)
+
+        if n_pass_mf is not None and n_total_mf is not None and n_total_mf > 0:
+            frac_pass = n_pass_mf / n_total_mf
+            if frac_pass > 0.80:
                 lod_dot = _status_dot("green")
-            elif frac_above >= 0.50:
+            elif frac_pass >= 0.50:
                 lod_dot = _status_dot("amber")
             else:
                 lod_dot = _status_dot("red")
             rows.append(
                 _summary_row(
                     lod_dot,
-                    "Assays above LOD in &gt;50% of samples",
-                    f"{n_above} / {n_total} ({frac_above:.1%})",
+                    "Assays with &lt;30% missing (MissingFreq)",
+                    f"{n_pass_mf} / {n_total_mf} ({frac_pass:.1%})",
                 )
             )
-
-        if isinstance(data_completeness, DataCompletenessData) and len(data_completeness.above_lod_rate) > 0:
-            overall_above = float(np.mean(data_completeness.above_lod_rate))
-            if overall_above > 0.75:
-                oa_dot = _status_dot("green")
-            elif overall_above >= 0.50:
-                oa_dot = _status_dot("amber")
-            else:
-                oa_dot = _status_dot("red")
-            rows.append(_summary_row(oa_dot, "Overall above-LOD rate", f"{overall_above:.1%}"))
 
     # --- Variability ---
     cv_data = plot_data.get("cv_distribution")
@@ -1061,7 +1088,7 @@ def _render_summary_table(
     uniprot_dup_data = plot_data.get("uniprot_duplicates")
     has_olink_qc = isinstance(iqr_median_data, IqrMedianQcData) or isinstance(uniprot_dup_data, UniProtDuplicateData)
     if has_olink_qc:
-        rows.append(_summary_group("Olink QC"))
+        rows.append(_summary_group("Assay QC"))
 
         if isinstance(iqr_median_data, IqrMedianQcData):
             n_outlier = iqr_median_data.n_outlier_samples
@@ -1082,19 +1109,14 @@ def _render_summary_table(
             )
 
         if isinstance(uniprot_dup_data, UniProtDuplicateData):
-            n_affected = uniprot_dup_data.n_affected_assays
-            n_total_assays = uniprot_dup_data.n_total_assays
-            if n_affected == 0:
-                dup_dot = _status_dot("green")
-            elif n_total_assays > 0 and n_affected / n_total_assays < 0.05:
-                dup_dot = _status_dot("amber")
-            else:
-                dup_dot = _status_dot("red")
+            n_proteins = uniprot_dup_data.n_unique_proteins
+            n_assays = uniprot_dup_data.n_total_assays
+            dup_dot = _status_dot("green")  # informational
             rows.append(
                 _summary_row(
                     dup_dot,
-                    "UniProt duplicate assays",
-                    f"{n_affected} / {n_total_assays}",
+                    "Unique proteins / Assays",
+                    f"{n_proteins} / {n_assays}",
                 )
             )
 
@@ -1521,7 +1543,7 @@ def qc_report(
         "</body>\n</html>"
     )
 
-    output.write_text(html)
+    output.write_text(html, encoding="utf-8")
     logger.debug("qc_report: written %s (%d sections)", output, len(rendered))
     return output
 
@@ -1615,7 +1637,7 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
         help_block = f'<div class="help-text open">{help_html}</div>' if help_html else ""
         body = f'<div class="plot-card"><div class="plot-header"><h3>{title}</h3></div>{help_block}{plot_html}</div>'
         page = _wrap_standalone_html(f"{title} — {platform_label}", body)
-        (output_dir / f"{key}.html").write_text(page)
+        (output_dir / f"{key}.html").write_text(page, encoding="utf-8")
         written.append(key)
         logger.debug("qc_report_split: rendered %s plot", key)
 
@@ -1670,19 +1692,19 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
             f"{combined_html}</div>"
         )
         page = _wrap_standalone_html(f"Dimensionality Reduction — {platform_label}", body)
-        (output_dir / "dimreduction.html").write_text(page)
+        (output_dir / "dimreduction.html").write_text(page, encoding="utf-8")
         written.append("dimreduction")
 
     # LOD sources card
     lod_card_html = _render_lod_card(lod_info)
     page = _wrap_standalone_html(f"LOD Sources — {platform_label}", lod_card_html, include_plotlyjs=False)
-    (output_dir / "lod_sources.html").write_text(page)
+    (output_dir / "lod_sources.html").write_text(page, encoding="utf-8")
     written.append("lod_sources")
 
     # Summary table
     summary_html = _render_summary_table(dataset, plot_data, lod_info)
     page = _wrap_standalone_html(f"Dataset Summary — {platform_label}", summary_html, include_plotlyjs=False)
-    (output_dir / "summary.html").write_text(page)
+    (output_dir / "summary.html").write_text(page, encoding="utf-8")
     written.append("summary")
 
     logger.debug("qc_report_split: written %d files to %s", len(written), output_dir)

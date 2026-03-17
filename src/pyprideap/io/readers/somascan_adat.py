@@ -99,11 +99,12 @@ def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     if not row_lines:
         raise ValueError(f"ADAT file has no ROW_DATA section content: {path}")
 
-    col_header = strip_meta(col_lines[0]).split("\t")
+    # Some ADATs include whitespace around header tokens; strip for stable column names
+    col_header = [h.strip() for h in strip_meta(col_lines[0]).split("\t")]
     col_rows = [line.split("\t") for line in col_lines[1:]]
     col_data = pd.DataFrame(col_rows, columns=col_header)
 
-    row_header = strip_meta(row_lines[0]).split("\t")
+    row_header = [h.strip() for h in strip_meta(row_lines[0]).split("\t")]
     row_rows = [line.split("\t") for line in row_lines[1:]]
     row_data = pd.DataFrame(row_rows, columns=row_header)
 

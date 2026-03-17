@@ -226,11 +226,18 @@ class IqrMedianQcData:
 
 @dataclass
 class UniProtDuplicateData:
-    """UniProt duplicate detection summary for Olink datasets."""
+    """Summary of proteins with multiple assays (UniProt → assay mapping).
 
-    n_affected_assays: int
+    Represents the inverse of assay→UniProt: for each UniProt that has more
+    than one assay, we store the list of assay IDs. So n_unique_proteins is
+    the number of distinct proteins, n_total_assays is the total number of
+    assays, and duplicates[uniprot] = list of assay IDs targeting that protein.
+    """
+
+    n_unique_proteins: int
     n_total_assays: int
     duplicates: dict[str, list[str]] = field(default_factory=dict)
+    """UniProt → list of assay IDs, only for proteins with >1 assay."""
     title: str = "UniProt Duplicate Detection"
 
 
@@ -334,8 +341,10 @@ def compute_distribution(dataset: AffinityDataset) -> DistributionData:
 
 def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     """QC status × LOD stacked bar. Falls back to simple QC counts if no LOD."""
-    if "SampleQC" not in dataset.samples.columns:
-        return None
+    # Some Olink exports (and some PAD uploads) don't include SampleQC.
+    # In that case we can still compute the overall % above/below LOD,
+    # but we can't stratify by PASS/WARN/FAIL.
+    has_sample_qc = "SampleQC" in dataset.samples.columns
 
     from pyprideap.processing.lod import _above_lod_matrix, get_lod_values
 
@@ -349,30 +358,45 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
         categories: list[str] = []
         counts: list[int] = []
 
-        for qc_val in ["PASS", "WARN", "FAIL"]:
-            mask = dataset.samples["SampleQC"] == qc_val
-            if mask.sum() == 0:
-                continue
+        if has_sample_qc:
+            for qc_val in ["PASS", "WARN", "FAIL"]:
+                mask = dataset.samples["SampleQC"] == qc_val
+                if mask.sum() == 0:
+                    continue
 
-            above_subset = above_lod.loc[mask] & has_lod.loc[mask]
-            valid_subset = numeric.loc[mask].notna() & has_lod.loc[mask]
+                above_subset = above_lod.loc[mask] & has_lod.loc[mask]
+                valid_subset = numeric.loc[mask].notna() & has_lod.loc[mask]
 
-            above = int(above_subset.sum().sum())
-            below = int(valid_subset.sum().sum()) - above
+                above = int(above_subset.sum().sum())
+                below = int(valid_subset.sum().sum()) - above
 
+                if above > 0:
+                    categories.append(f"{qc_val} & {unit} > LOD")
+                    counts.append(above)
+                if below > 0:
+                    categories.append(f"{qc_val} & {unit} ≤ LOD")
+                    counts.append(below)
+        else:
+            # No QC flags available: show overall above/below LOD split
+            valid = numeric.notna() & has_lod
+            above = int((above_lod & valid).sum().sum())
+            below = int(valid.sum().sum()) - above
             if above > 0:
-                categories.append(f"{qc_val} & {unit} > LOD")
+                categories.append(f"{unit} > LOD")
                 counts.append(above)
             if below > 0:
-                categories.append(f"{qc_val} & {unit} ≤ LOD")
+                categories.append(f"{unit} ≤ LOD")
                 counts.append(below)
 
         if categories:
             return QcLodSummaryData(categories=categories, counts=counts)
 
-    # Fallback: simple QC counts
-    vc = dataset.samples["SampleQC"].value_counts()
-    return QcLodSummaryData(categories=vc.index.tolist(), counts=vc.values.tolist())
+    # Fallback: simple QC counts when no LOD is available but SampleQC exists
+    if has_sample_qc:
+        vc = dataset.samples["SampleQC"].value_counts()
+        return QcLodSummaryData(categories=vc.index.tolist(), counts=vc.values.tolist())
+
+    return None
 
 
 def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
@@ -588,22 +612,46 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
     if numeric.shape[0] > max_samples:
         numeric = numeric.sample(n=max_samples, random_state=42)
 
-    # Sort samples by SampleType then PlateID so controls cluster together
-    sort_cols = []
-    for col in ("SampleType", "PlateID", "PlateId"):
-        if col in dataset.samples.columns:
-            sort_cols.append(col)
-    if sort_cols:
-        ordered_idx = dataset.samples.loc[numeric.index].sort_values(sort_cols).index
-        numeric = numeric.loc[ordered_idx]
-
+    # Compute correlation (samples x samples)
     corr = numeric.T.corr()
+
+    # Reorder samples by similarity (hierarchical clustering on correlation distance)
+    # If scipy isn't available, fall back to a metadata-based ordering so the plot is stable.
+    order = list(range(len(corr)))
+    try:
+        from scipy.cluster.hierarchy import leaves_list, linkage
+        from scipy.spatial.distance import squareform
+
+        # Convert correlation to a distance matrix in [0, 2]; NaNs -> max distance
+        dist = 1.0 - corr.astype(float)
+        dist = dist.fillna(1.0)
+
+        # Ensure symmetry and zero diagonal for squareform
+        np.fill_diagonal(dist.values, 0.0)
+        dist = (dist + dist.T) / 2.0
+
+        if dist.shape[0] > 2:
+            condensed = squareform(dist.values, checks=False)
+            order = leaves_list(linkage(condensed, method="average")).tolist()
+    except ImportError:
+        sort_cols = [c for c in ("SampleType", "PlateID", "PlateId") if c in dataset.samples.columns]
+        if sort_cols:
+            ordered_idx = dataset.samples.loc[numeric.index].sort_values(sort_cols).index
+            numeric = numeric.loc[ordered_idx]
+            corr = numeric.T.corr()
+            order = list(range(len(corr)))
+
+    if order and len(order) == len(corr):
+        corr = corr.iloc[order, order]
 
     id_col = _sample_id_col(dataset)
     if id_col in dataset.samples.columns:
         labels = dataset.samples.loc[numeric.index, id_col].astype(str).tolist()
     else:
         labels = [f"S{i}" for i in range(len(numeric))]
+
+    if order and len(order) == len(labels):
+        labels = [labels[i] for i in order]
 
     return CorrelationData(
         matrix=[[None if np.isnan(v) else round(v, 3) for v in row] for row in corr.values],
@@ -1079,37 +1127,79 @@ def compute_col_check(dataset: AffinityDataset) -> ColCheckData | None:
     """Compute ColCheck QC summary with calibrator QC ratio values for SomaScan data."""
     if dataset.platform != Platform.SOMASCAN:
         return None
-    if "ColCheck" not in dataset.features.columns:
-        return None
 
     from pyprideap.processing.somascan.qc_flags import get_col_check_summary
 
-    summary = get_col_check_summary(dataset)
+    # Try to find a calibrator QC ratio column in the feature metadata.
+    # Common ADATs provide one (or more) columns named CalQcRatio*.
+    ratio_col = None
+    for c in dataset.features.columns:
+        cs = str(c)
+        if cs.startswith("CalQcRatio"):
+            ratio_col = c
+            break
+    if ratio_col is None:
+        for c in dataset.features.columns:
+            cs = str(c).lower()
+            if "calqcratio" in cs or ("qc" in cs and "ratio" in cs and "cal" in cs):
+                ratio_col = c
+                break
+
+    # Fallback: some ADAT exports store calibrator QC ratios as multiple Cal_* columns
+    # (e.g. Cal_P0029868) with values centered at 1.0 and used to derive ColCheck.
+    cal_ratio_cols: list[str] = []
+    if ratio_col is None:
+        for c in dataset.features.columns:
+            cs = str(c)
+            if cs.startswith("Cal_") and cs != "CalReference":
+                cal_ratio_cols.append(cs)
+
+    has_flags = "ColCheck" in dataset.features.columns
+    has_ratios = ratio_col is not None or len(cal_ratio_cols) > 0
+    if not has_flags and not has_ratios:
+        return None
+
+    # Summary (PASS/FLAG counts). If ColCheck isn't present but ratios are,
+    # compute flags on the fly using SomaDataIO thresholds [0.8, 1.2].
+    if has_flags:
+        summary = get_col_check_summary(dataset)
+        flags_series = dataset.features["ColCheck"].astype(str)
+    else:
+        if ratio_col is not None:
+            ratios_tmp = pd.to_numeric(dataset.features[ratio_col], errors="coerce")
+        else:
+            # Use median across calibrator ratio columns when no explicit ratio column exists
+            cal_df = dataset.features[cal_ratio_cols].apply(pd.to_numeric, errors="coerce")
+            ratios_tmp = cal_df.median(axis=1, skipna=True)
+        in_range = ratios_tmp.between(0.8, 1.2)
+        flags_series = in_range.map({True: "PASS", False: "FLAG"}).where(ratios_tmp.notna(), other="PASS")
+        counts = flags_series.value_counts()
+        summary = {"PASS": int(counts.get("PASS", 0)), "FLAG": int(counts.get("FLAG", 0))}
 
     id_col = "SeqId" if "SeqId" in dataset.features.columns else dataset.features.columns[0]
     flagged_ids: list[str] = []
     if summary["FLAG"] > 0:
-        flag_mask = dataset.features["ColCheck"] == "FLAG"
+        flag_mask = flags_series == "FLAG"
         flagged_ids = dataset.features.loc[flag_mask, id_col].astype(str).tolist()
 
     # Extract CalQcRatio values for the scatter/strip plot
     qc_ratios: list[float] = []
     analyte_ids: list[str] = []
     col_check_flags: list[str] = []
-    ratio_col = None
-    for c in dataset.features.columns:
-        if c.startswith("CalQcRatio"):
-            ratio_col = c
-            break
 
+    ids = dataset.features[id_col].astype(str)
+    ratios = None
     if ratio_col is not None:
         ratios = pd.to_numeric(dataset.features[ratio_col], errors="coerce")
-        ids = dataset.features[id_col].astype(str)
-        flags = dataset.features["ColCheck"].astype(str)
+    elif cal_ratio_cols:
+        cal_df = dataset.features[cal_ratio_cols].apply(pd.to_numeric, errors="coerce")
+        ratios = cal_df.median(axis=1, skipna=True)
+
+    if ratios is not None:
         valid = ratios.notna()
         qc_ratios = ratios[valid].round(4).tolist()
         analyte_ids = ids[valid].tolist()
-        col_check_flags = flags[valid].tolist()
+        col_check_flags = flags_series[valid].astype(str).tolist()
 
     return ColCheckData(
         n_pass=summary["PASS"],
@@ -1229,24 +1319,45 @@ def compute_iqr_median_qc(
 
 
 def compute_uniprot_duplicates(dataset: AffinityDataset) -> UniProtDuplicateData | None:
-    """Detect UniProt duplicate mappings in Olink datasets.
+    """Summarise proteins with multiple assays (UniProt → assays).
 
-    Mirrors ``npx_check_uniprot_dups.R`` from OlinkAnalyze.
-    Returns None for SomaScan datasets or when required columns are absent.
+    Groups by UniProt and lists assay IDs per protein. So we get unique protein
+    count, total assay count, and which proteins are targeted by more than one
+    assay (e.g. SomaScan replicate aptamers, or Olink panels overlapping).
+    Returns None when UniProt or assay ID column is absent.
     """
+    if "UniProt" not in dataset.features.columns:
+        return None
+
     if dataset.platform == Platform.SOMASCAN:
-        return None
-    if "OlinkID" not in dataset.features.columns or "UniProt" not in dataset.features.columns:
-        return None
+        assay_id_col = "Name" if "Name" in dataset.features.columns else "SeqId"
+        if assay_id_col not in dataset.features.columns:
+            return None
+    else:
+        assay_id_col = "OlinkID"
+        if assay_id_col not in dataset.features.columns:
+            return None
 
-    from pyprideap.processing.olink.uniprot import detect_uniprot_duplicates
+    features = dataset.features
+    # Group by UniProt: for each protein, list of assay IDs
+    grouped = (
+        features[[assay_id_col, "UniProt"]]
+        .dropna(subset=["UniProt"])
+        .drop_duplicates()
+        .groupby("UniProt", sort=False)[assay_id_col]
+        .apply(list)
+        .to_dict()
+    )
 
-    info = detect_uniprot_duplicates(dataset)
+    n_unique_proteins = len(grouped)
+    n_total_assays = len(features)  # or len(dataset.expression.columns)
+    # Proteins with more than one assay
+    duplicates = {up: assays for up, assays in grouped.items() if len(assays) > 1}
 
     return UniProtDuplicateData(
-        n_affected_assays=info.n_affected_assays,
-        n_total_assays=info.n_total_assays,
-        duplicates=info.duplicates,
+        n_unique_proteins=n_unique_proteins,
+        n_total_assays=n_total_assays,
+        duplicates=duplicates,
     )
 
 
@@ -1330,7 +1441,9 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     # Olink-specific QC
     if dataset.platform != Platform.SOMASCAN:
         results["iqr_median_qc"] = compute_iqr_median_qc(dataset)
-        results["uniprot_duplicates"] = compute_uniprot_duplicates(dataset)
+
+    # UniProt duplicate detection (Olink and SomaScan when feature table has UniProt)
+    results["uniprot_duplicates"] = compute_uniprot_duplicates(dataset)
 
     available = {k: v for k, v in results.items() if v is not None}
     logger.debug("compute_all: %d/%d plots computed successfully", len(available), len(results))

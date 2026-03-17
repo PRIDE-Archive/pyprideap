@@ -53,6 +53,11 @@ _QC_LOD_COLORS = {
     "WARN & RFU ≤ LOD": "#e74c3c",
     "FAIL & RFU > LOD": "#95a5a6",
     "FAIL & RFU ≤ LOD": "#7f8c8d",
+    # LOD-only summary when SampleQC is absent
+    "NPX > LOD": "#2ecc71",
+    "NPX ≤ LOD": "#f39c12",
+    "RFU > LOD": "#2ecc71",
+    "RFU ≤ LOD": "#f39c12",
     "PASS": "#2ecc71",
     "WARN": "#f39c12",
     "FAIL": "#e74c3c",
@@ -70,6 +75,7 @@ def render_distribution(data: DistributionData) -> Figure:
     of individual traces for clearer visualization.
     """
     go, _ = _import_plotly()
+    import numpy as np
 
     n_samples = len(data.sample_ids)
 
@@ -77,7 +83,6 @@ def render_distribution(data: DistributionData) -> Figure:
         return _render_distribution_summary(data)
 
     fig = go.Figure()
-
     for sid, vals in zip(data.sample_ids, data.sample_values):
         if len(vals) == 0:
             continue
@@ -105,8 +110,7 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
     """Percentile band summary for large datasets.
 
     Shows median, IQR (25th-75th), and 5th-95th percentile bands computed
-    across all samples at shared bin edges, plus a random subsample of
-    individual traces for context.
+    across all samples at shared bin edges.
     """
     go, _ = _import_plotly()
     import numpy as np
@@ -122,7 +126,11 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
         return fig
 
     all_vals_arr = np.array(all_vals)
-    bin_edges = np.linspace(np.nanpercentile(all_vals_arr, 0.5), np.nanpercentile(all_vals_arr, 99.5), 81)
+    bin_edges = np.linspace(
+        np.nanpercentile(all_vals_arr, 0.5),
+        np.nanpercentile(all_vals_arr, 99.5),
+        81,
+    )
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
     # Compute histogram for each sample
@@ -246,7 +254,7 @@ def render_qc_summary(data: QcLodSummaryData) -> Figure:
         barmode="stack",
         yaxis_title="% of Measurements",
         yaxis=dict(range=[0, 100], ticksuffix="%"),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3),
+        showlegend=False,
     )
     return fig
 
@@ -618,6 +626,21 @@ def render_data_completeness(data: DataCompletenessData) -> Figure:
             ),
             row=2,
             col=1,
+        )
+        # Percentage of proteins below 30% missing frequency (Olink-recommended threshold)
+        n_below_30 = sum(1 for f in data.missing_freq if f < 0.30)
+        pct_below_30 = n_below_30 / len(data.missing_freq) * 100 if data.missing_freq else 0
+        fig.add_annotation(
+            text=f"{pct_below_30:.1f}% of proteins below 30% missing",
+            xref="x2 domain",
+            yref="y2 domain",
+            x=0.02,
+            y=0.98,
+            xanchor="left",
+            yanchor="top",
+            showarrow=False,
+            font=dict(size=12),
+            bgcolor="rgba(255,255,255,0.8)",
         )
         # Olink recommended 30% missing frequency threshold
         fig.add_vline(
@@ -1069,31 +1092,49 @@ def render_col_check(data: ColCheckData) -> Figure:
     go, _ = _import_plotly()
 
     if data.qc_ratios:
+        import numpy as np
+
+        # Using analyte IDs directly as categorical x can compress points to near-invisible
+        # when there are thousands of analytes. Plot against rank instead and show analyte
+        # IDs in hover.
+        n = len(data.qc_ratios)
+        order = np.argsort(np.asarray(data.qc_ratios, dtype=float), kind="mergesort").tolist()
+        rank = [i + 1 for i in range(n)]
+
+        ordered_rank = [rank[i] for i in range(n)]
+        ordered_ids = [data.analyte_ids[i] for i in order]
+        ordered_ratios = [data.qc_ratios[i] for i in order]
+        ordered_flags = [data.col_check_flags[i] for i in order]
+
         fig = go.Figure()
+
         # PASS points
-        pass_idx = [i for i, f in enumerate(data.col_check_flags) if f == "PASS"]
+        pass_idx = [i for i, f in enumerate(ordered_flags) if f == "PASS"]
         if pass_idx:
             fig.add_trace(
                 go.Scatter(
-                    x=[data.analyte_ids[i] for i in pass_idx],
-                    y=[data.qc_ratios[i] for i in pass_idx],
+                    x=[ordered_rank[i] for i in pass_idx],
+                    y=[ordered_ratios[i] for i in pass_idx],
                     mode="markers",
                     marker=dict(size=3, color="#2ecc71", opacity=0.5),
                     name=f"PASS ({data.n_pass})",
-                    hovertemplate="%{x}<br>QC Ratio: %{y:.3f}<extra></extra>",
+                    text=[ordered_ids[i] for i in pass_idx],
+                    hovertemplate="%{text}<br>QC Ratio: %{y:.3f}<extra></extra>",
                 )
             )
+
         # FLAG points
-        flag_idx = [i for i, f in enumerate(data.col_check_flags) if f != "PASS"]
+        flag_idx = [i for i, f in enumerate(ordered_flags) if f != "PASS"]
         if flag_idx:
             fig.add_trace(
                 go.Scatter(
-                    x=[data.analyte_ids[i] for i in flag_idx],
-                    y=[data.qc_ratios[i] for i in flag_idx],
+                    x=[ordered_rank[i] for i in flag_idx],
+                    y=[ordered_ratios[i] for i in flag_idx],
                     mode="markers",
-                    marker=dict(size=4, color="#e74c3c", opacity=0.7),
+                    marker=dict(size=4, color="#e74c3c", opacity=0.75),
                     name=f"FLAG ({data.n_flag})",
-                    hovertemplate="%{x}<br>QC Ratio: %{y:.3f}<extra></extra>",
+                    text=[ordered_ids[i] for i in flag_idx],
+                    hovertemplate="%{text}<br>QC Ratio: %{y:.3f}<extra></extra>",
                 )
             )
         # Acceptance thresholds
@@ -1124,7 +1165,7 @@ def render_col_check(data: ColCheckData) -> Figure:
 
         fig.update_layout(
             title=data.title,
-            xaxis_title="Analyte",
+            xaxis_title="Analyte rank (sorted by QC ratio)",
             yaxis_title="Calibrator QC Ratio",
             xaxis=dict(showticklabels=False),
             legend=dict(orientation="h", yanchor="bottom", y=-0.15),
@@ -1356,41 +1397,58 @@ def render_iqr_median_qc(data: IqrMedianQcData) -> Figure:
 
 
 def render_uniprot_duplicates(data: UniProtDuplicateData) -> Figure:
-    """Bar chart summarizing UniProt duplicate detection results."""
+    """Stacked bar showing fraction of assays that are unique vs replicate."""
     go, _ = _import_plotly()
 
-    if not data.duplicates:
-        # No duplicates — show a simple pass indicator
-        fig = go.Figure(
-            data=go.Bar(
-                x=["UniProt Mapping"],
-                y=[data.n_total_assays],
-                marker_color="#2ecc71",
-                text=[f"{data.n_total_assays} assays, no duplicates"],
-                textposition="inside",
-            )
-        )
-        fig.update_layout(title=data.title, yaxis_title="Number of Assays")
+    n_unique = data.n_unique_proteins
+    n_total = data.n_total_assays
+    n_replicate = max(0, n_total - n_unique)
+
+    if n_total <= 0:
+        fig = go.Figure()
+        fig.update_layout(title=data.title)
         return fig
 
-    # Show top duplicates
-    oids = list(data.duplicates.keys())[:20]  # top 20
-    n_uniprots = [len(data.duplicates[oid]) for oid in oids]
+    pct_unique = n_unique / n_total * 100.0
+    pct_replicate = n_replicate / n_total * 100.0
 
-    fig = go.Figure(
-        data=go.Bar(
-            x=oids,
-            y=n_uniprots,
-            marker_color="#f39c12",
-            text=[", ".join(data.duplicates[oid]) for oid in oids],
-            hovertemplate="%{x}<br>UniProt IDs: %{text}<extra></extra>",
-        )
+    fig = go.Figure()
+    fig.add_bar(
+        x=["Assays"],
+        y=[pct_unique],
+        name="Unique proteins",
+        marker_color="#2ecc71",
+        text=[f"{pct_unique:.1f}%"],
+        textposition="inside",
+        hovertemplate=(
+            "Unique proteins:<br>"
+            f"{n_unique} / {n_total} assays<br>"
+            "%{y:.1f}% of assays<extra></extra>"
+        ),
     )
+    fig.add_bar(
+        x=["Assays"],
+        y=[pct_replicate],
+        name="Replicate assays",
+        marker_color="#e74c3c",
+        text=[f"{pct_replicate:.1f}%"] if pct_replicate > 0 else [""],
+        textposition="inside",
+        hovertemplate=(
+            "Replicate assays (same UniProt):<br>"
+            f"{n_replicate} / {n_total} assays<br>"
+            "%{y:.1f}% of assays<extra></extra>"
+        ),
+    )
+
     fig.update_layout(
-        title=f"{data.title} ({data.n_affected_assays} assays with multiple UniProt IDs)",
-        xaxis_title="OlinkID",
-        yaxis_title="Number of UniProt IDs",
-        xaxis_tickangle=-45,
+        title=(
+            f"{data.title} — {n_unique} unique proteins, {n_total} assays "
+            f"({n_replicate} replicate assays)"
+        ),
+        barmode="stack",
+        yaxis_title="% of Assays",
+        yaxis=dict(range=[0, 100], ticksuffix="%"),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
     )
     return fig
 
