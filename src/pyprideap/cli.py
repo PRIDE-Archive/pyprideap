@@ -86,11 +86,11 @@ def _download_pad_files(accession: str, dest_dir: Path) -> list[Path]:
 
 
 def _generate_report(
-    input_path: Path,
-    output_path: Path | None,
-    platform: str | None = None,
-    split: bool = False,
-    sdrf_path: Path | None = None,
+        input_path: Path,
+        output_path: Path | None,
+        platform: str | None = None,
+        split: bool = False,
+        sdrf_path: Path | None = None,
 ) -> Path:
     """Read a data file and generate a QC report."""
     import pyprideap as pp
@@ -159,13 +159,13 @@ def main() -> None:
 @click.option("--sdrf", default=None, type=click.Path(exists=True), help="Path to SDRF TSV file for volcano plots.")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose logging output.")
 def report(
-    input_file: str | None,
-    accession: str | None,
-    output: str | None,
-    platform: str | None,
-    split: bool,
-    sdrf: str | None,
-    verbose: bool,
+        input_file: str | None,
+        accession: str | None,
+        output: str | None,
+        platform: str | None,
+        split: bool,
+        sdrf: str | None,
+        verbose: bool,
 ) -> None:
     """Generate a QC report from a data file or PAD accession."""
     _setup_logging(verbose)
@@ -230,12 +230,12 @@ def report(
 )
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose logging output.")
 def proteins_above_lod(
-    input_file: str | None,
-    accession: str | None,
-    output: str | None,
-    platform: str | None,
-    threshold: float,
-    verbose: bool,
+        input_file: str | None,
+        accession: str | None,
+        output: str | None,
+        platform: str | None,
+        threshold: float,
+        verbose: bool,
 ) -> None:
     """List UniProt accessions for proteins above LOD."""
     _setup_logging(verbose)
