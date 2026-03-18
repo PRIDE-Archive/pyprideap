@@ -178,7 +178,7 @@ def report(
         click.echo("Error: Provide either an input file or --accession, not both.", err=True)
         sys.exit(1)
 
-    output_path = Path(output) if output else '.'
+    output_path = Path(output) if output else Path('.')
     sdrf_path = Path(sdrf) if sdrf else None
 
     if accession is not None:
