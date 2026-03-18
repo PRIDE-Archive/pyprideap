@@ -1648,8 +1648,7 @@ def _wrap_standalone_html(
     """Wrap plot HTML in a standalone page with PRIDE styling."""
     plotly_cdn = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>\n' if include_plotlyjs else ""
     border_override = (
-        "    .plot-card { border: none; box-shadow: none; }\n"
-        "    .plot-card:hover { box-shadow: none; }\n"
+        "    .plot-card { border: none; box-shadow: none; }\n    .plot-card:hover { box-shadow: none; }\n"
         if no_border
         else ""
     )
