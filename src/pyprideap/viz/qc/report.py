@@ -899,6 +899,51 @@ def _render_summary_table(
     else:
         rows.append(_summary_row(_status_dot("amber"), "QC columns", "None detected — QC metrics may be limited"))
 
+    # --- LOD (right after General) ---
+    lod_active = lod_info.get("active")
+    lod_analysis = plot_data.get("lod_analysis")
+    data_completeness = plot_data.get("data_completeness")
+    has_any_lod = lod_active is not None or lod_analysis is not None or data_completeness is not None
+    if has_any_lod or lod_info.get("sources"):
+        rows.append(_summary_group("Limit of Detection"))
+        if lod_active is not None:
+            rows.append(_summary_row("", "LOD source", str(lod_active)))
+
+        # Inline LOD sources overview
+        status_icons = {"available": "&#9989;", "unavailable": "&#10060;", "insufficient": "&#9888;"}
+        for src in lod_info.get("sources", []):
+            icon = status_icons.get(src["status"], "")
+            active_tag = " <strong>(active)</strong>" if src["name"] == lod_info.get("active") else ""
+            rows.append(_summary_row(icon, src["name"] + str(active_tag), src["detail"]))
+
+        # Match the "Missing Frequency distribution" metric (Olink-recommended 30% missing threshold):
+        # Missing frequency = fraction of samples below LOD, so <30% missing ⇔ >70% above LOD.
+        n_pass_mf = None
+        n_total_mf = None
+        if isinstance(data_completeness, DataCompletenessData) and len(data_completeness.missing_freq) > 0:
+            mf = [float(x) for x in data_completeness.missing_freq if x is not None]
+            n_total_mf = len(mf)
+            n_pass_mf = sum(1 for x in mf if x < 0.30)
+        elif isinstance(lod_analysis, LodAnalysisData) and len(lod_analysis.above_lod_pct) > 0:
+            n_total_mf = len(lod_analysis.above_lod_pct)
+            n_pass_mf = sum(1 for p in lod_analysis.above_lod_pct if float(p) > 70.0)
+
+        if n_pass_mf is not None and n_total_mf is not None and n_total_mf > 0:
+            frac_pass = n_pass_mf / n_total_mf
+            if frac_pass > 0.80:
+                lod_dot = _status_dot("green")
+            elif frac_pass >= 0.50:
+                lod_dot = _status_dot("amber")
+            else:
+                lod_dot = _status_dot("red")
+            rows.append(
+                _summary_row(
+                    lod_dot,
+                    "Assays with &lt;30% missing (MissingFreq)",
+                    f"{n_pass_mf} / {n_total_mf} ({frac_pass:.1%})",
+                )
+            )
+
     # --- Proteins ---
     rows.append(_summary_group("Proteins"))
     if "UniProt" in features.columns:
@@ -951,44 +996,6 @@ def _render_summary_table(
     else:
         hmp_dot = _status_dot("red")
     rows.append(_summary_row(hmp_dot, "Proteins with &gt;50% missing", str(n_high_miss_prot)))
-
-    # --- LOD ---
-    lod_active = lod_info.get("active")
-    lod_analysis = plot_data.get("lod_analysis")
-    data_completeness = plot_data.get("data_completeness")
-    has_any_lod = lod_active is not None or lod_analysis is not None or data_completeness is not None
-    if has_any_lod:
-        rows.append(_summary_group("Limit of Detection"))
-        if lod_active is not None:
-            rows.append(_summary_row("", "LOD source", str(lod_active)))
-
-        # Match the "Missing Frequency distribution" metric (Olink-recommended 30% missing threshold):
-        # Missing frequency = fraction of samples below LOD, so <30% missing ⇔ >70% above LOD.
-        n_pass_mf = None
-        n_total_mf = None
-        if isinstance(data_completeness, DataCompletenessData) and len(data_completeness.missing_freq) > 0:
-            mf = [float(x) for x in data_completeness.missing_freq if x is not None]
-            n_total_mf = len(mf)
-            n_pass_mf = sum(1 for x in mf if x < 0.30)
-        elif isinstance(lod_analysis, LodAnalysisData) and len(lod_analysis.above_lod_pct) > 0:
-            n_total_mf = len(lod_analysis.above_lod_pct)
-            n_pass_mf = sum(1 for p in lod_analysis.above_lod_pct if float(p) > 70.0)
-
-        if n_pass_mf is not None and n_total_mf is not None and n_total_mf > 0:
-            frac_pass = n_pass_mf / n_total_mf
-            if frac_pass > 0.80:
-                lod_dot = _status_dot("green")
-            elif frac_pass >= 0.50:
-                lod_dot = _status_dot("amber")
-            else:
-                lod_dot = _status_dot("red")
-            rows.append(
-                _summary_row(
-                    lod_dot,
-                    "Assays with &lt;30% missing (MissingFreq)",
-                    f"{n_pass_mf} / {n_total_mf} ({frac_pass:.1%})",
-                )
-            )
 
     # --- Variability ---
     cv_data = plot_data.get("cv_distribution")
@@ -1532,9 +1539,8 @@ def qc_report(
                 "".join(volcano_html_parts),
             )
 
-    # LOD source summary card (computed early for use in summary table)
+    # LOD source info (used in summary table)
     lod_info = _lod_source_info(dataset)
-    lod_card_html = _render_lod_card(lod_info)
 
     # Build grouped sections and TOC with section labels
     toc_html_parts: list[str] = []
@@ -1568,12 +1574,12 @@ def qc_report(
             toc_html_parts.append(f'<div class="toc-group-label">{group_title}</div>')
             toc_html_parts.append(f"<ul>{''.join(group_toc_items)}</ul>")
             group_sections.append(f'<div class="section-group"><h2>{group_title}</h2>{"".join(cards)}</div>')
-    # Dataset Summary section (always last)
+    # Dataset Summary section (always first)
     summary_html = _render_summary_table(dataset, plot_data, lod_info)
     summary_section = f'<div class="section-group"><h2>Dataset Summary</h2>{summary_html}</div>'
-    group_sections.append(summary_section)
-    toc_html_parts.append('<div class="toc-group-label">Summary</div>')
-    toc_html_parts.append('<ul><li><a href="#dataset-summary">Dataset Summary</a></li></ul>')
+    group_sections.insert(0, summary_section)
+    toc_html_parts.insert(0, '<ul><li><a href="#dataset-summary">Dataset Summary</a></li></ul>')
+    toc_html_parts.insert(0, '<div class="toc-group-label">Summary</div>')
 
     toc_inner = "".join(toc_html_parts)
 
@@ -1618,7 +1624,6 @@ def qc_report(
         f"                {''.join(stat_items)}\n"
         f"            </div>\n"
         "        </header>\n"
-        f"        {lod_card_html}\n"
         '        <div class="pride-embedded-empty" style="display:none;text-align:center;'
         'padding:40px;color:#777;">No QC plots available for this dataset.</div>\n'
         f"        {''.join(group_sections)}\n"
@@ -1634,16 +1639,26 @@ def qc_report(
     return output
 
 
-def _wrap_standalone_html(title: str, body: str, include_plotlyjs: bool = True) -> str:
+def _wrap_standalone_html(
+    title: str,
+    body: str,
+    include_plotlyjs: bool = True,
+    no_border: bool = False,
+) -> str:
     """Wrap plot HTML in a standalone page with PRIDE styling."""
     plotly_cdn = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>\n' if include_plotlyjs else ""
+    border_override = (
+        "    .plot-card { border: none; box-shadow: none; }\n    .plot-card:hover { box-shadow: none; }\n"
+        if no_border
+        else ""
+    )
     return (
         f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         f'    <meta charset="utf-8">\n'
         f'    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"    <title>{title}</title>\n"
         f"    {plotly_cdn}"
-        f"    <style>\n{_CSS}    </style>\n"
+        f"    <style>\n{_CSS}{border_override}    </style>\n"
         f"</head>\n<body>\n"
         f'<div style="max-width:1100px;margin:0 auto;padding:28px 36px;">\n'
         f"{body}\n"
@@ -1653,7 +1668,11 @@ def _wrap_standalone_html(title: str, body: str, include_plotlyjs: bool = True) 
     )
 
 
-def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
+def qc_report_split(
+    dataset: AffinityDataset,
+    output_dir: str | Path,
+    no_border: bool = False,
+) -> Path:
     """Generate individual QC plot HTML files in a directory.
 
     Each plot is saved as a standalone HTML file named by its plot type
@@ -1666,6 +1685,8 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
         The dataset to generate plots for.
     output_dir : str | Path
         Directory to write individual HTML files into. Created if it doesn't exist.
+    no_border : bool
+        If True, remove card borders and shadows from standalone plot files.
 
     Returns
     -------
@@ -1720,9 +1741,13 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
         plot_html = fig.to_html(full_html=False, include_plotlyjs=False, default_height=plot_height)
         title = getattr(data, "title", key.replace("_", " ").title())
         help_html = _HELP_TEXT.get(key, "")
-        help_block = f'<div class="help-text open">{help_html}</div>' if help_html else ""
-        body = f'<div class="plot-card"><div class="plot-header"><h3>{title}</h3></div>{help_block}{plot_html}</div>'
-        page = _wrap_standalone_html(f"{title} — {platform_label}", body)
+        help_toggle = '<button class="help-toggle" title="How to read this plot" aria-label="Help">?</button>'
+        help_block = f'<div class="help-text">{help_html}</div>' if help_html else ""
+        body = (
+            f'<div class="plot-card"><div class="plot-header"><h3>{title}</h3>'
+            f"{help_toggle}</div>{help_block}{plot_html}</div>"
+        )
+        page = _wrap_standalone_html(f"{title} — {platform_label}", body, no_border=no_border)
         (output_dir / f"{key}.html").write_text(page, encoding="utf-8")
         written.append(key)
         logger.debug("qc_report_split: rendered %s plot", key)
@@ -1771,25 +1796,22 @@ def qc_report_split(dataset: AffinityDataset, output_dir: str | Path) -> Path:
         toggle_html += '<button class="label-toggle-btn" onclick="toggleDimRedLabels(this)">Show Labels</button>'
 
         help_text = _HELP_TEXT.get("dimreduction", "")
+        help_toggle = '<button class="help-toggle" title="How to read this plot" aria-label="Help">?</button>'
         body = (
             f'<div class="plot-card"><div class="plot-header">'
-            f"<h3>Dimensionality Reduction</h3>{toggle_html}</div>"
-            f'<div class="help-text open">{help_text}</div>'
+            f"<h3>Dimensionality Reduction</h3>{toggle_html}{help_toggle}</div>"
+            f'<div class="help-text">{help_text}</div>'
             f"{combined_html}</div>"
         )
-        page = _wrap_standalone_html(f"Dimensionality Reduction — {platform_label}", body)
+        page = _wrap_standalone_html(f"Dimensionality Reduction — {platform_label}", body, no_border=no_border)
         (output_dir / "dimreduction.html").write_text(page, encoding="utf-8")
         written.append("dimreduction")
 
-    # LOD sources card
-    lod_card_html = _render_lod_card(lod_info)
-    page = _wrap_standalone_html(f"LOD Sources — {platform_label}", lod_card_html, include_plotlyjs=False)
-    (output_dir / "lod_sources.html").write_text(page, encoding="utf-8")
-    written.append("lod_sources")
-
-    # Summary table
+    # Summary table (includes LOD sources inline)
     summary_html = _render_summary_table(dataset, plot_data, lod_info)
-    page = _wrap_standalone_html(f"Dataset Summary — {platform_label}", summary_html, include_plotlyjs=False)
+    page = _wrap_standalone_html(
+        f"Dataset Summary — {platform_label}", summary_html, include_plotlyjs=False, no_border=no_border
+    )
     (output_dir / "summary.html").write_text(page, encoding="utf-8")
     written.append("summary")
 

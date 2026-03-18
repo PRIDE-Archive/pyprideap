@@ -355,7 +355,6 @@ class TestQcReport:
         assert (output_dir / "summary.html").exists()
         assert (output_dir / "distribution.html").exists()
         assert (output_dir / "correlation.html").exists()
-        assert (output_dir / "lod_sources.html").exists()
         # Each file should be valid standalone HTML
         for html_file in output_dir.glob("*.html"):
             content = html_file.read_text()
