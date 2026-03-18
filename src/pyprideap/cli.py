@@ -91,7 +91,7 @@ def _generate_report(
     platform: str | None = None,
     split: bool = False,
     sdrf_path: Path | None = None,
-    no_border: bool = False,
+    no_border: bool = True,
 ) -> Path:
     """Read a data file and generate a QC report."""
     import pyprideap as pp
@@ -158,7 +158,9 @@ def main() -> None:
     "--split", is_flag=True, default=False, help="Output individual plot HTML files instead of a single report."
 )
 @click.option("--sdrf", default=None, type=click.Path(exists=True), help="Path to SDRF TSV file for volcano plots.")
-@click.option("--no-border", is_flag=True, default=False, help="Remove card borders from split plot files.")
+@click.option(
+    "--no-border/--border", default=True, help="Remove card borders from split plot files (default: no border)."
+)
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose logging output.")
 def report(
     input_file: str | None,
