@@ -210,7 +210,10 @@ def report(
         if not input_path.exists():
             click.echo(f"Error: File not found: {input_path}", err=True)
             sys.exit(1)
-        _generate_report(input_path, output_path, platform=platform, split=split, sdrf_path=sdrf_path, no_border=no_border)
+        _generate_report(
+            input_path, output_path, platform=platform, split=split,
+            sdrf_path=sdrf_path, no_border=no_border,
+        )
 
 
 @main.command("proteins-above-lod")

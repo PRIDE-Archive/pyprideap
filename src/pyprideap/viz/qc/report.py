@@ -1744,7 +1744,10 @@ def qc_report_split(
         help_html = _HELP_TEXT.get(key, "")
         help_toggle = '<button class="help-toggle" title="How to read this plot" aria-label="Help">?</button>'
         help_block = f'<div class="help-text">{help_html}</div>' if help_html else ""
-        body = f'<div class="plot-card"><div class="plot-header"><h3>{title}</h3>{help_toggle}</div>{help_block}{plot_html}</div>'
+        body = (
+            f'<div class="plot-card"><div class="plot-header"><h3>{title}</h3>'
+            f"{help_toggle}</div>{help_block}{plot_html}</div>"
+        )
         page = _wrap_standalone_html(f"{title} — {platform_label}", body, no_border=no_border)
         (output_dir / f"{key}.html").write_text(page, encoding="utf-8")
         written.append(key)
