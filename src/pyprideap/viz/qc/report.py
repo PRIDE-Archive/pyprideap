@@ -895,22 +895,6 @@ def _render_summary_table(
 
     rows.append(_summary_row("", "Features (assays)", str(n_features)))
 
-    # QC columns available in the dataset
-    _known_qc_cols = [
-        "SampleQC",
-        "QC_Warning",
-        "AssayQC",
-        "SampleType",
-        "RowCheck",
-        "ColCheck",
-        "HybControlNormScale",
-    ]
-    qc_cols_found = [c for c in _known_qc_cols if c in samples.columns or c in features.columns]
-    if qc_cols_found:
-        rows.append(_summary_row("", "QC columns", ", ".join(qc_cols_found)))
-    else:
-        rows.append(_summary_row(_status_dot("amber"), "QC columns", "None detected — QC metrics may be limited"))
-
     # --- LOD (right after General) ---
     lod_active = lod_info.get("active")
     lod_analysis = plot_data.get("lod_analysis")
@@ -918,8 +902,6 @@ def _render_summary_table(
     has_any_lod = lod_active is not None or lod_analysis is not None or data_completeness is not None
     if has_any_lod or lod_info.get("sources"):
         rows.append(_summary_group("Limit of Detection"))
-        if lod_active is not None:
-            rows.append(_summary_row("", "LOD source", str(lod_active)))
 
         # Inline LOD sources overview
         status_icons = {"available": "&#9989;", "unavailable": "&#10060;", "insufficient": "&#9888;"}
@@ -972,42 +954,43 @@ def _render_summary_table(
     median_per_sample = float(proteins_per_sample.median())
     rows.append(_summary_row("", "Proteins per sample (median)", f"{median_per_sample:.0f}"))
 
-    # --- Missing Data ---
-    rows.append(_summary_group("Missing Data"))
-    total_cells = numeric.size
-    if total_cells > 0:
-        detection_rate = float(numeric.notna().sum().sum() / total_cells)
-    else:
-        detection_rate = 0.0
-    if detection_rate > 0.90:
-        dr_dot = _status_dot("green")
-    elif detection_rate >= 0.70:
-        dr_dot = _status_dot("amber")
-    else:
-        dr_dot = _status_dot("red")
-    rows.append(_summary_row(dr_dot, "Detection rate", f"{detection_rate:.1%}"))
+    # --- Missing Data (only when no LOD info, since LOD-based completeness is more informative) ---
+    if not has_any_lod:
+        rows.append(_summary_group("Missing Data"))
+        total_cells = numeric.size
+        if total_cells > 0:
+            detection_rate = float(numeric.notna().sum().sum() / total_cells)
+        else:
+            detection_rate = 0.0
+        if detection_rate > 0.90:
+            dr_dot = _status_dot("green")
+        elif detection_rate >= 0.70:
+            dr_dot = _status_dot("amber")
+        else:
+            dr_dot = _status_dot("red")
+        rows.append(_summary_row(dr_dot, "Detection rate", f"{detection_rate:.1%}"))
 
-    # Samples with >20% missing
-    row_miss = numeric.isna().mean(axis=1)
-    n_high_miss_samples = int((row_miss > 0.2).sum())
-    if n_high_miss_samples == 0:
-        hms_dot = _status_dot("green")
-    elif n_samples > 0 and n_high_miss_samples / n_samples <= 0.10:
-        hms_dot = _status_dot("amber")
-    else:
-        hms_dot = _status_dot("red")
-    rows.append(_summary_row(hms_dot, "Samples with &gt;20% missing", str(n_high_miss_samples)))
+        # Samples with >20% missing
+        row_miss = numeric.isna().mean(axis=1)
+        n_high_miss_samples = int((row_miss > 0.2).sum())
+        if n_high_miss_samples == 0:
+            hms_dot = _status_dot("green")
+        elif n_samples > 0 and n_high_miss_samples / n_samples <= 0.10:
+            hms_dot = _status_dot("amber")
+        else:
+            hms_dot = _status_dot("red")
+        rows.append(_summary_row(hms_dot, "Samples with &gt;20% missing", str(n_high_miss_samples)))
 
-    # Proteins with >50% missing
-    col_miss = numeric.isna().mean(axis=0)
-    n_high_miss_prot = int((col_miss > 0.5).sum())
-    if n_high_miss_prot == 0:
-        hmp_dot = _status_dot("green")
-    elif n_features > 0 and n_high_miss_prot / n_features <= 0.05:
-        hmp_dot = _status_dot("amber")
-    else:
-        hmp_dot = _status_dot("red")
-    rows.append(_summary_row(hmp_dot, "Proteins with &gt;50% missing", str(n_high_miss_prot)))
+        # Proteins with >50% missing
+        col_miss = numeric.isna().mean(axis=0)
+        n_high_miss_prot = int((col_miss > 0.5).sum())
+        if n_high_miss_prot == 0:
+            hmp_dot = _status_dot("green")
+        elif n_features > 0 and n_high_miss_prot / n_features <= 0.05:
+            hmp_dot = _status_dot("amber")
+        else:
+            hmp_dot = _status_dot("red")
+        rows.append(_summary_row(hmp_dot, "Proteins with &gt;50% missing", str(n_high_miss_prot)))
 
     # --- Variability ---
     cv_data = plot_data.get("cv_distribution")
@@ -1042,22 +1025,6 @@ def _render_summary_table(
             else:
                 pi_dot = _status_dot("red")
             rows.append(_summary_row(pi_dot, "Median inter-plate CV", f"{med_inter:.1%}"))
-
-    # --- Expression ---
-    rows.append(_summary_group("Expression"))
-    vals = numeric.values.flatten()
-    vals_clean = vals[~np.isnan(vals)] if len(vals) > 0 else vals
-    if len(vals_clean) > 0:
-        med_expr = float(np.median(vals_clean))
-        dyn_range = float(np.max(vals_clean) - np.min(vals_clean))
-        sd_expr = float(np.std(vals_clean))
-        rows.append(_summary_row("", "Median expression", f"{med_expr:.2f}"))
-        rows.append(_summary_row("", "Dynamic range", f"{dyn_range:.2f}"))
-        rows.append(_summary_row("", "SD of expression", f"{sd_expr:.2f}"))
-    else:
-        rows.append(_summary_row("", "Median expression", "N/A"))
-        rows.append(_summary_row("", "Dynamic range", "N/A"))
-        rows.append(_summary_row("", "SD of expression", "N/A"))
 
     # --- QC Status (Olink only) ---
     if "SampleQC" in samples.columns:
@@ -1102,40 +1069,24 @@ def _render_summary_table(
     from pyprideap.core import Platform as _Platform
 
     iqr_median_data = plot_data.get("iqr_median_qc")
-    uniprot_dup_data = plot_data.get("uniprot_duplicates")
-    has_olink_qc = isinstance(iqr_median_data, IqrMedianQcData) or isinstance(uniprot_dup_data, UniProtDuplicateData)
-    if has_olink_qc:
+    if isinstance(iqr_median_data, IqrMedianQcData):
         rows.append(_summary_group("Assay QC"))
-
-        if isinstance(iqr_median_data, IqrMedianQcData):
-            n_outlier = iqr_median_data.n_outlier_samples
-            n_total = iqr_median_data.n_total_samples
-            outlier_rate = n_outlier / n_total if n_total > 0 else 0.0
-            if n_outlier == 0:
-                iqr_dot = _status_dot("green")
-            elif outlier_rate < 0.10:
-                iqr_dot = _status_dot("amber")
-            else:
-                iqr_dot = _status_dot("red")
-            rows.append(
-                _summary_row(
-                    iqr_dot,
-                    "IQR/Median outlier samples",
-                    f"{n_outlier} / {n_total}",
-                )
+        n_outlier = iqr_median_data.n_outlier_samples
+        n_total = iqr_median_data.n_total_samples
+        outlier_rate = n_outlier / n_total if n_total > 0 else 0.0
+        if n_outlier == 0:
+            iqr_dot = _status_dot("green")
+        elif outlier_rate < 0.10:
+            iqr_dot = _status_dot("amber")
+        else:
+            iqr_dot = _status_dot("red")
+        rows.append(
+            _summary_row(
+                iqr_dot,
+                "IQR/Median outlier samples",
+                f"{n_outlier} / {n_total}",
             )
-
-        if isinstance(uniprot_dup_data, UniProtDuplicateData):
-            n_proteins = uniprot_dup_data.n_unique_proteins
-            n_assays = uniprot_dup_data.n_total_assays
-            dup_dot = _status_dot("green")  # informational
-            rows.append(
-                _summary_row(
-                    dup_dot,
-                    "Unique proteins / Assays",
-                    f"{n_proteins} / {n_assays}",
-                )
-            )
+        )
 
     # --- SomaScan QC Flags ---
     if dataset.platform == _Platform.SOMASCAN:
