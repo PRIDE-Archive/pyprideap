@@ -1659,7 +1659,6 @@ def qc_report_split(
     output_dir: str | Path,
     no_border: bool = False,
     strip_plot_title: bool = True,
-    two_sides: bool = True,
 ) -> Path:
     """Generate individual QC plot HTML files in a directory.
 
@@ -1677,11 +1676,6 @@ def qc_report_split(
         If True, remove card borders and shadows from standalone plot files.
     strip_plot_title : bool
         Remove the Plotly figure title from each plot (default ``True``).
-    two_sides : bool
-        When ``True``, also generate combined HTML files that stack
-        logically related plots so that each combined file is
-        height-matched for side-by-side panel layouts
-        (e.g. Dataset Summary on the left, QC + LOD overview on the right).
 
     Returns
     -------
@@ -1723,18 +1717,6 @@ def qc_report_split(
     }
 
     written: list[str] = []
-    # Collect body fragments keyed by plot name for two_sides combinations
-    bodies: dict[str, str] = {}
-
-    # Keys that will be merged into combined files (skip individual output)
-    _TWO_SIDES_COMBOS = [
-        ("qc_lod_overview", "QC & LOD Overview", ["qc_summary", "lod_analysis"]),
-        ("iqr_platecv", "Outlier & Plate CV", ["iqr_median_qc", "plate_cv"]),
-    ]
-    combined_keys: set[str] = set()
-    if two_sides:
-        for _, _, keys in _TWO_SIDES_COMBOS:
-            combined_keys.update(keys)
 
     # Map split renderer keys to their compute_all data keys
     _DATA_KEY_MAP = {
@@ -1767,11 +1749,6 @@ def qc_report_split(
             f'<div class="plot-card"><div class="plot-header"><h3>{title}</h3>'
             f"{help_toggle}</div>{help_block}{plot_html}</div>"
         )
-        bodies[key] = body
-        # Skip individual file when this key will be in a combined file
-        if key in combined_keys:
-            logger.debug("qc_report_split: %s deferred to combined file", key)
-            continue
         page = _wrap_standalone_html(f"{title} — {platform_label}", body, no_border=no_border)
         (output_dir / f"{key}.html").write_text(page, encoding="utf-8")
         written.append(key)
@@ -1828,42 +1805,21 @@ def qc_report_split(
             f'<div class="help-text">{help_text}</div>'
             f"{combined_html}</div>"
         )
-        bodies["dimreduction"] = body
-        if "dimreduction" not in combined_keys:
-            page = _wrap_standalone_html(
-                f"Dimensionality Reduction — {platform_label}",
-                body,
-                no_border=no_border,
-            )
-            (output_dir / "dimreduction.html").write_text(page, encoding="utf-8")
-            written.append("dimreduction")
-        else:
-            logger.debug("qc_report_split: dimreduction deferred to combined file")
+        page = _wrap_standalone_html(
+            f"Dimensionality Reduction — {platform_label}",
+            body,
+            no_border=no_border,
+        )
+        (output_dir / "dimreduction.html").write_text(page, encoding="utf-8")
+        written.append("dimreduction")
 
     # Summary table (includes LOD sources inline)
     summary_html = _render_summary_table(dataset, plot_data, lod_info)
-    bodies["summary"] = summary_html
     page = _wrap_standalone_html(
         f"Dataset Summary — {platform_label}", summary_html, include_plotlyjs=False, no_border=no_border
     )
     (output_dir / "summary.html").write_text(page, encoding="utf-8")
     written.append("summary")
-
-    # --- two_sides: generate combined HTML files for side-by-side layout ---
-    if two_sides:
-        for filename, page_title, keys in _TWO_SIDES_COMBOS:
-            parts = [bodies[k] for k in keys if k in bodies]
-            if not parts:
-                continue
-            combined_body = "\n".join(parts)
-            page = _wrap_standalone_html(
-                f"{page_title} — {platform_label}",
-                combined_body,
-                no_border=no_border,
-            )
-            (output_dir / f"{filename}.html").write_text(page, encoding="utf-8")
-            written.append(filename)
-            logger.debug("qc_report_split: two_sides combined %s", filename)
 
     logger.debug("qc_report_split: written %d files to %s", len(written), output_dir)
     return output_dir
