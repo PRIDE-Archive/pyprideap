@@ -59,7 +59,13 @@ dataset = pp.read("olink_npx.csv")
 pp.qc_report(dataset, "my_report.html")
 ```
 
-The report includes interactive plots: expression distributions, PCA/t-SNE, LOD analysis, sample correlation, data completeness, CV distributions, and more. All plots are rendered with Plotly and include help tooltips explaining how to interpret each visualization.
+The report includes a dataset summary table with traffic-light quality indicators and interactive plots: expression distributions, PCA/t-SNE, LOD analysis, sample correlation, completeness, CV distributions, and more. All plots are rendered with Plotly and include help tooltips explaining how to interpret each visualization.
+
+Generate individual plot files for embedding:
+
+```python
+pp.qc_report_split(dataset, "plots_dir/")
+```
 
 ### Validate against PRIDE-AP guidelines
 
@@ -149,10 +155,14 @@ The HTML report is a self-contained, interactive document with a sidebar table o
 |---------|-------|
 | **Quality Overview** | LOD source comparison, QC x LOD stacked bar |
 | **Signal & Distribution** | Per-sample expression histograms, protein detectability |
-| **Data Completeness** | Per-sample above/below LOD, missing frequency distribution |
-| **Sample Relationships** | PCA / t-SNE (dropdown toggle), sample correlation heatmap, clustered expression heatmap |
+| **Sample Completeness** | Per-sample above/below LOD stacked bars |
+| **Missing Frequency Distribution** | Per-protein missing rate histogram with 30% threshold |
+| **Sample Relationships** | PCA / t-SNE (toggle switch), sample correlation heatmap, clustered expression heatmap |
 | **Normalization QC** | Hybridization control scale (SomaScan) |
 | **Variability** | CV distribution, intra/inter-plate CV |
+| **Assay QC** | IQR/Median outlier detection, UniProt duplicate mapping (Olink) |
+| **SomaScan QC** | ColCheck pass/flag summary (SomaScan) |
+| **Differential Expression** | Volcano plots per variable (requires SDRF metadata) |
 
 Each plot has a **?** help button with guidance on interpretation.
 
