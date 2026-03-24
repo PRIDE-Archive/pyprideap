@@ -26,7 +26,7 @@ Examples:
     pyprideap unique-samples data.npx.csv
     pyprideap unique-samples -a PAD000001
     pyprideap unique-samples data.npx.csv -o samples.txt
-    pyprideap unique-samples data.npx.csv --include-controls
+    pyprideap unique-samples data.npx.csv --exclude-controls
 """
 
 from __future__ import annotations
@@ -336,10 +336,10 @@ def proteins_above_lod(
     help="Force platform type (default: auto-detect).",
 )
 @click.option(
-    "--include-controls",
+    "--exclude-controls",
     is_flag=True,
     default=False,
-    help="Include control/QC samples (default: exclude them).",
+    help="Exclude control/QC samples (default: include all).",
 )
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose logging output.")
 def unique_samples(
@@ -347,7 +347,7 @@ def unique_samples(
     accession: str | None,
     output: str | None,
     platform: str | None,
-    include_controls: bool,
+    exclude_controls: bool,
     verbose: bool,
 ) -> None:
     """List unique sample identifiers in a dataset."""
@@ -381,7 +381,7 @@ def unique_samples(
                         f"  {len(ds.samples)} samples, {len(ds.features)} features ({ds.platform.value})",
                         err=True,
                     )
-                    samples = pp.get_unique_samples(ds, exclude_controls=not include_controls)
+                    samples = pp.get_unique_samples(ds, exclude_controls=exclude_controls)
                     click.echo(f"  {len(samples)} unique samples", err=True)
                     all_samples.update(samples)
                 except Exception as e:
@@ -399,7 +399,7 @@ def unique_samples(
             f"  {len(ds.samples)} samples, {len(ds.features)} features ({ds.platform.value})",
             err=True,
         )
-        samples = pp.get_unique_samples(ds, exclude_controls=not include_controls)
+        samples = pp.get_unique_samples(ds, exclude_controls=exclude_controls)
         click.echo(f"  {len(samples)} unique samples", err=True)
         all_samples.update(samples)
 

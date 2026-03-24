@@ -78,14 +78,14 @@ def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
 def get_unique_samples(
     dataset: AffinityDataset,
     *,
-    exclude_controls: bool = True,
+    exclude_controls: bool = False,
 ) -> list[str]:
     """Return sorted unique sample identifiers from a dataset.
 
     Args:
         dataset: The AffinityDataset to extract samples from.
-        exclude_controls: If True (default), remove control/QC samples
-            before collecting unique identifiers.
+        exclude_controls: If True, remove control/QC samples
+            before collecting unique identifiers (default: False).
 
     Returns:
         Sorted list of unique sample identifier strings.
