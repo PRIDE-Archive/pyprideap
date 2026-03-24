@@ -9,6 +9,9 @@ Usage:
     pyprideap proteins-above-lod <file>            List UniProt accessions above LOD
     pyprideap proteins-above-lod -a PAD000001      Download data from PRIDE and list proteins
     pyprideap proteins-above-lod <file> -t 80      Custom threshold (default 50%)
+    pyprideap unique-samples <file>                List unique sample identifiers
+    pyprideap unique-samples -a PAD000001          Download data from PRIDE and list samples
+    pyprideap unique-samples <file> -o samples.txt Save to file
 
 Examples:
     pyprideap report data.npx.csv
@@ -20,6 +23,10 @@ Examples:
     pyprideap proteins-above-lod data.npx.csv
     pyprideap proteins-above-lod -a PAD000001
     pyprideap proteins-above-lod data.npx.csv -t 80 -o proteins.txt
+    pyprideap unique-samples data.npx.csv
+    pyprideap unique-samples -a PAD000001
+    pyprideap unique-samples data.npx.csv -o samples.txt
+    pyprideap unique-samples data.npx.csv --include-controls
 """
 
 from __future__ import annotations
@@ -313,6 +320,93 @@ def proteins_above_lod(
     if output:
         Path(output).write_text(output_text + "\n")
         click.echo(f"  Saved {len(all_proteins)} unique proteins to {output}", err=True)
+    else:
+        click.echo(output_text)
+
+
+@main.command("unique-samples")
+@click.argument("input_file", required=False, default=None)
+@click.option("-a", "--accession", default=None, help="PAD accession to download from PRIDE (e.g. PAD000001).")
+@click.option("-o", "--output", default=None, help="Output file path (default: print to stdout).")
+@click.option(
+    "-p",
+    "--platform",
+    type=click.Choice(["olink", "somascan"], case_sensitive=False),
+    default=None,
+    help="Force platform type (default: auto-detect).",
+)
+@click.option(
+    "--include-controls",
+    is_flag=True,
+    default=False,
+    help="Include control/QC samples (default: exclude them).",
+)
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose logging output.")
+def unique_samples(
+    input_file: str | None,
+    accession: str | None,
+    output: str | None,
+    platform: str | None,
+    include_controls: bool,
+    verbose: bool,
+) -> None:
+    """List unique sample identifiers in a dataset."""
+    _setup_logging(verbose)
+
+    import pyprideap as pp
+
+    if input_file is None and accession is None:
+        click.echo("Error: Provide either an input file or --accession / -a.", err=True)
+        sys.exit(1)
+
+    if input_file is not None and accession is not None:
+        click.echo("Error: Provide either an input file or --accession, not both.", err=True)
+        sys.exit(1)
+
+    all_samples: set[str] = set()
+
+    if accession is not None:
+        accession = accession.upper()
+        click.echo(f"Fetching data from PRIDE for {accession}...", err=True)
+
+        with tempfile.TemporaryDirectory(prefix="pyprideap_") as tmpdir:
+            tmppath = Path(tmpdir)
+            files = _download_pad_files(accession, tmppath)
+
+            for f in files:
+                try:
+                    click.echo(f"Reading {f.name}...", err=True)
+                    ds = pp.read(f, platform=platform)
+                    click.echo(
+                        f"  {len(ds.samples)} samples, {len(ds.features)} features ({ds.platform.value})",
+                        err=True,
+                    )
+                    samples = pp.get_unique_samples(ds, exclude_controls=not include_controls)
+                    click.echo(f"  {len(samples)} unique samples", err=True)
+                    all_samples.update(samples)
+                except Exception as e:
+                    logger.debug("Error processing %s: %s", f.name, e, exc_info=True)
+                    click.echo(f"  Skipping {f.name}: {e}", err=True)
+    else:
+        input_path = Path(input_file)  # type: ignore[arg-type]
+        if not input_path.exists():
+            click.echo(f"Error: File not found: {input_path}", err=True)
+            sys.exit(1)
+
+        click.echo(f"Reading {input_path.name}...", err=True)
+        ds = pp.read(input_path, platform=platform)
+        click.echo(
+            f"  {len(ds.samples)} samples, {len(ds.features)} features ({ds.platform.value})",
+            err=True,
+        )
+        samples = pp.get_unique_samples(ds, exclude_controls=not include_controls)
+        click.echo(f"  {len(samples)} unique samples", err=True)
+        all_samples.update(samples)
+
+    output_text = "\n".join(sorted(all_samples))
+    if output:
+        Path(output).write_text(output_text + "\n")
+        click.echo(f"  Saved {len(all_samples)} unique samples to {output}", err=True)
     else:
         click.echo(output_text)
 

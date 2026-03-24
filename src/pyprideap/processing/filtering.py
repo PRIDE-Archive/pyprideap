@@ -75,6 +75,48 @@ def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
     )
 
 
+def get_unique_samples(
+    dataset: AffinityDataset,
+    *,
+    exclude_controls: bool = True,
+) -> list[str]:
+    """Return sorted unique sample identifiers from a dataset.
+
+    Args:
+        dataset: The AffinityDataset to extract samples from.
+        exclude_controls: If True (default), remove control/QC samples
+            before collecting unique identifiers.
+
+    Returns:
+        Sorted list of unique sample identifier strings.
+    """
+    import pandas as pd
+
+    samples = dataset.samples
+
+    if exclude_controls and "SampleType" in samples.columns:
+        is_control = samples["SampleType"].astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+        samples = samples[~is_control]
+        logger.debug(
+            "get_unique_samples: excluded %d control samples", int(is_control.sum()),
+        )
+
+    # Prefer SampleID, fall back to SampleName, then index
+    if "SampleID" in samples.columns:
+        id_col = "SampleID"
+    elif "SampleName" in samples.columns:
+        id_col = "SampleName"
+    else:
+        logger.debug("get_unique_samples: no SampleID or SampleName column, using row index")
+        ids = [str(i) for i in samples.index]
+        return sorted(set(ids))
+
+    raw = samples[id_col].dropna().astype(str).str.strip()
+    unique = sorted(set(raw) - {""})
+    logger.debug("get_unique_samples: %d unique samples (column=%s)", len(unique), id_col)
+    return unique
+
+
 def filter_qc(
     dataset: AffinityDataset,
     *,
