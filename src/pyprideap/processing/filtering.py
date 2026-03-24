@@ -96,7 +96,8 @@ def get_unique_samples(
         is_control = samples["SampleType"].astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
         samples = samples[~is_control]
         logger.debug(
-            "get_unique_samples: excluded %d control samples", int(is_control.sum()),
+            "get_unique_samples: excluded %d control samples",
+            int(is_control.sum()),
         )
 
     # Prefer SampleID, fall back to SampleName, then index
