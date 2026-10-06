@@ -766,7 +766,7 @@ def render_cv_distribution(data: CvDistributionData) -> Figure:
         line_dash="dash",
         line_color="#27ae60",
         line_width=2,
-        annotation_text="CV = 0.2",
+        annotation_text="guide: CV = 0.2",
         annotation_position="top right",
         annotation_font_color="#27ae60",
     )

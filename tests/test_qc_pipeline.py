@@ -439,3 +439,54 @@ class TestLodResolution:
         result = compute_qc_summary(_make_olink_with_negative_controls())
         assert result is not None
         assert any("LOD" in c for c in result.categories)
+
+
+# ---------------------------------------------------------------------------
+# CV definitions (distribution and plate-level share one definition)
+# ---------------------------------------------------------------------------
+
+
+def _make_olink_two_plates():
+    import numpy as np
+
+    rng = np.random.default_rng(1)
+    n_per_plate = 6
+    types = (["SAMPLE"] * 5 + ["NEGATIVE"]) * 2
+    expr = rng.normal(5, 1, (2 * n_per_plate, 2))
+    expr[[5, 11], :] = -3.0  # controls: far from study samples
+    return AffinityDataset(
+        platform=Platform.OLINK_EXPLORE,
+        samples=pd.DataFrame(
+            {
+                "SampleID": [f"S{i}" for i in range(2 * n_per_plate)],
+                "SampleType": types,
+                "PlateID": ["P1"] * n_per_plate + ["P2"] * n_per_plate,
+            }
+        ),
+        features=pd.DataFrame({"OlinkID": ["O1", "O2"], "UniProt": ["P1", "P2"], "Panel": ["Inf"] * 2}),
+        expression=pd.DataFrame(expr, columns=["O1", "O2"]),
+        metadata={},
+    )
+
+
+class TestCvDefinitions:
+    def test_cv_distribution_linear_scale_study_samples_only(self):
+        import numpy as np
+
+        ds = _make_olink_two_plates()
+        study = ds.expression[ds.samples["SampleType"] == "SAMPLE"]
+        expected = (2**study).std() / (2**study).mean()
+        result = compute_cv_distribution(ds)
+        assert result.cv_values == pytest.approx(expected.tolist())
+        assert np.all(np.array(result.cv_values) > 0)
+
+    def test_plate_cv_olink_plateid_linear_scale(self):
+        from pyprideap.viz.qc.compute import compute_plate_cv
+
+        ds = _make_olink_two_plates()
+        result = compute_plate_cv(ds)
+        assert result is not None
+        assert result.plate_ids == ["P1", "P2"]
+        p1 = ds.expression.iloc[:5]
+        expected_p1 = ((2**p1).std() / (2**p1).mean()).tolist()
+        assert result.intra_cv[:2] == pytest.approx(expected_p1)
