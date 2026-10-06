@@ -722,19 +722,6 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
 
     # Filter out control samples — only show biological samples
     ds = filter_controls(dataset)
-    # For SomaScan, also exclude Buffer/Calibrator/QC (not in _CONTROL_SAMPLE_TYPES)
-    if "SampleType" in ds.samples.columns:
-        st = ds.samples["SampleType"].astype(str).str.strip()
-        non_bio = st.str.lower().isin({"buffer", "calibrator", "qc"})
-        if non_bio.any():
-            keep = ~non_bio
-            ds = AffinityDataset(
-                platform=ds.platform,
-                samples=ds.samples.loc[keep].reset_index(drop=True),
-                features=ds.features,
-                expression=ds.expression.loc[keep].reset_index(drop=True),
-                metadata=ds.metadata,
-            )
 
     numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
     sample_ids = _sample_ids(ds)

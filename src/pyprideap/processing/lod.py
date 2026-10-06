@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
-from pyprideap.processing.filtering import _CONTROL_SAMPLE_TYPES
+from pyprideap.processing.filtering import _CONTROL_SAMPLE_TYPES, normalize_sample_type
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +60,11 @@ _NEGATIVE_CONTROL_TYPES = frozenset(
     {
         "negative",
         "negative control",
-        "negative_control",
         "neg",
     }
 )
+# Fallback when no explicit negative controls exist: labels that denote blanks.
+_BLANK_CONTROL_TYPES = frozenset({"control", "blank", "buffer", "buffer control"})
 
 
 class LodMethod(Enum):
@@ -110,7 +111,8 @@ class LodStats:
 def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
     """Return a boolean mask over ``dataset.samples`` for negative controls.
 
-    For Olink: matches NEGATIVE_CONTROL types, falls back to generic controls.
+    For Olink: matches NEGATIVE_CONTROL types, falls back to generic blank-like
+    controls (never plate/sample/positive controls or calibrators, which contain protein).
     For SomaScan: matches NEGATIVE_CONTROL types, falls back to Buffer samples
     only (Calibrator/QC samples contain protein at known concentrations and
     must NOT be used as negative controls).
@@ -120,7 +122,7 @@ def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
     if "SampleType" not in dataset.samples.columns:
         raise ValueError("SampleType column required to identify negative controls")
 
-    st = dataset.samples["SampleType"].astype(str).str.lower().str.strip()
+    st = normalize_sample_type(dataset.samples["SampleType"])
 
     is_negative = st.isin(_NEGATIVE_CONTROL_TYPES)
     if is_negative.any():
@@ -134,8 +136,8 @@ def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
         if is_buffer.any():
             return is_buffer
     else:
-        # Olink: fall back to generic control-like samples
-        is_control = st.isin(_CONTROL_SAMPLE_TYPES)
+        # Olink: fall back to generic blank-like controls
+        is_control = st.isin(_BLANK_CONTROL_TYPES)
         if is_control.any():
             return is_control
 
@@ -369,7 +371,7 @@ def _find_buffer_samples(dataset: AffinityDataset) -> pd.Series:
     if "SampleType" not in dataset.samples.columns:
         raise ValueError("SampleType column required to identify buffer samples")
 
-    st = dataset.samples["SampleType"].astype(str).str.lower().str.strip()
+    st = normalize_sample_type(dataset.samples["SampleType"])
     is_buffer = st.isin(_BUFFER_SAMPLE_TYPES)
     if not is_buffer.any():
         raise ValueError(
@@ -426,7 +428,7 @@ def _intensity_adjustment(
 
     st = dataset.samples.get("SampleType")
     if st is not None:
-        is_ext_ctrl = st.astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+        is_ext_ctrl = normalize_sample_type(st).isin(_CONTROL_SAMPLE_TYPES)
     else:
         is_ext_ctrl = pd.Series(False, index=dataset.samples.index)
 
