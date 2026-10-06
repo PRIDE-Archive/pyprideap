@@ -108,9 +108,12 @@ _HELP_TEXT: dict[str, str] = {
         "Blocks of correlated colour reveal co-regulated protein groups or sample batches."
     ),
     "cv_distribution": (
-        "Histogram of the coefficient of variation (CV = standard deviation / mean) across all proteins. "
-        "CV measures relative variability: values below 0.2 (dashed line) indicate tight reproducibility, "
-        "while a long right tail suggests some proteins have high technical or biological variability."
+        "Histogram of the coefficient of variation (CV = standard deviation / mean) of each protein across "
+        "study samples (controls excluded). It reflects biological plus technical variability, not "
+        "replicate reproducibility. Olink NPX is converted to linear scale (2<sup>NPX</sup>) before the CV "
+        "is computed; SomaScan RFU is used as deposited, so its CVs depend on the normalization applied "
+        "to the submitted file (e.g. ANML can compress apparent CVs). The dashed line at CV = 0.2 is a "
+        "visual guide within this dataset only, not a pass/fail threshold or a cross-platform comparison."
     ),
     "norm_scale": (
         "Shows the hybridization control normalization scale factor (HybControlNormScale) per sample, "
@@ -122,12 +125,14 @@ _HELP_TEXT: dict[str, str] = {
     ),
     "plate_cv": (
         "Two-panel view of plate-level variability. "
+        "CVs use the same definition as the CV distribution (study samples only; Olink NPX on linear "
+        "scale, SomaScan RFU as deposited). "
         "<strong>Top — Intra-plate CV:</strong> for each plate, the CV (SD / mean) is computed "
         "per analyte across samples within that plate. Each violin shows the distribution of "
-        "these CVs. A plate with a notably higher distribution suggests worse reproducibility. "
+        "these CVs; a plate with a notably higher distribution may indicate a plate effect. "
         "<strong>Bottom — Inter-plate CV:</strong> for each analyte, the CV of plate medians "
-        "across all plates. This measures how consistently an analyte is measured between plates. "
-        "Lower CV indicates better reproducibility in both panels."
+        "across all plates. This measures how consistently an analyte is measured between plates, "
+        "assuming samples were randomized across plates."
     ),
     "lod_comparison": (
         "Scatter plot comparing LOD values from different sources for each protein. "
@@ -1005,26 +1010,15 @@ def _render_summary_table(
                 rows.append(_summary_row("", "Median CV", "N/A (single sample)"))
                 rows.append(_summary_row("", "CV range (5th\u201395th pctl)", "N/A"))
             else:
+                # No traffic-light status: CV across study samples is not a pass/fail metric
                 med_cv = float(np.median(cv_data.cv_values))
-                if med_cv < 0.15:
-                    cv_dot = _status_dot("green")
-                elif med_cv <= 0.25:
-                    cv_dot = _status_dot("amber")
-                else:
-                    cv_dot = _status_dot("red")
-                rows.append(_summary_row(cv_dot, "Median CV", f"{med_cv:.1%}"))
+                rows.append(_summary_row("", "Median CV", f"{med_cv:.1%}"))
                 p5, p95 = np.percentile(cv_data.cv_values, [5, 95])
                 rows.append(_summary_row("", "CV range (5th\u201395th pctl)", f"{p5:.1%} \u2013 {p95:.1%}"))
 
         if isinstance(plate_cv_data, PlateCvData) and len(plate_cv_data.inter_cv) > 0:
             med_inter = float(np.median(plate_cv_data.inter_cv))
-            if med_inter < 0.20:
-                pi_dot = _status_dot("green")
-            elif med_inter <= 0.30:
-                pi_dot = _status_dot("amber")
-            else:
-                pi_dot = _status_dot("red")
-            rows.append(_summary_row(pi_dot, "Median inter-plate CV", f"{med_inter:.1%}"))
+            rows.append(_summary_row("", "Median inter-plate CV", f"{med_inter:.1%}"))
 
     # --- QC Status (Olink only) ---
     if "SampleQC" in samples.columns:

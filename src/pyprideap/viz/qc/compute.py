@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -807,14 +807,29 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
     )
 
 
-def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | None:
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+def _linear_study_samples(dataset: AffinityDataset) -> AffinityDataset:
+    """Study samples only, with values on a linear scale for CV = SD / mean.
 
-    # Olink NPX values are log2-scale — CV = SD/mean is meaningless on log data.
-    # Convert to linear scale (2^NPX) before computing CV.
-    # SomaScan RFU values are already linear.
-    if dataset.platform != Platform.SOMASCAN:
+    Control samples are dropped. Olink NPX is log2, so it is converted to
+    2^NPX (SD / mean is meaningless on log data); SomaScan RFU is already
+    linear and is used as deposited.
+    """
+    from pyprideap.processing.filtering import filter_controls
+
+    ds = filter_controls(dataset)
+    numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+    if ds.platform != Platform.SOMASCAN:
         numeric = np.power(2, numeric)
+    return replace(ds, expression=numeric)
+
+
+def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | None:
+    """Per-analyte CV (SD / mean) across study samples, on a linear scale.
+
+    See :func:`_linear_study_samples` for the transformation; the same
+    definition is used by :func:`compute_plate_cv`.
+    """
+    numeric = _linear_study_samples(dataset).expression
 
     means = numeric.mean()
     stds = numeric.std()
@@ -841,23 +856,29 @@ def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | No
 def compute_plate_cv(dataset: AffinityDataset) -> PlateCvData | None:
     """Compute intra-plate and inter-plate CV.
 
+    Uses the same definition as :func:`compute_cv_distribution`: study samples
+    only, Olink NPX converted to linear scale (2^NPX), SomaScan RFU as deposited.
+
     Intra-plate CV: for each plate, CV = SD / mean per analyte across samples.
     Returned in long format (one entry per analyte per plate).
 
     Inter-plate CV: for each analyte, CV of plate medians across plates.
     One value per analyte.
 
-    Only applicable when PlateId column exists with >= 2 plates.
+    Only applicable when a plate column (SomaScan ``PlateId``, Olink
+    ``PlateID``) exists with >= 2 plates.
     """
-    if "PlateId" not in dataset.samples.columns:
+    plate_col = next((c for c in ("PlateId", "PlateID") if c in dataset.samples.columns), None)
+    if plate_col is None:
         return None
 
-    plates = dataset.samples["PlateId"]
-    unique_plates = sorted(plates.unique(), key=str)
+    ds = _linear_study_samples(dataset)
+    plates = ds.samples[plate_col]
+    unique_plates = sorted(plates.dropna().unique(), key=str)
     if len(unique_plates) < 2:
         return None
 
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = ds.expression
 
     # --- Intra-plate CV (long format) ---
     intra_cv: list[float] = []
