@@ -371,3 +371,71 @@ class TestQcReport:
         result = qc_report(ds, output)
         assert result.exists()
         assert "Somascan" in result.read_text()
+
+
+# ---------------------------------------------------------------------------
+# LOD source resolution
+# ---------------------------------------------------------------------------
+
+
+def _make_somascan_with_buffers(n_bio=5, n_buffers=12):
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n = n_bio + n_buffers
+    expr = np.abs(np.vstack([rng.normal(5000, 1000, (n_bio, 3)), rng.normal(100, 20, (n_buffers, 3))]))
+    return AffinityDataset(
+        platform=Platform.SOMASCAN,
+        samples=pd.DataFrame(
+            {"SampleId": [f"S{i}" for i in range(n)], "SampleType": ["Sample"] * n_bio + ["Buffer"] * n_buffers}
+        ),
+        features=pd.DataFrame({"SeqId": ["1-1", "2-2", "3-3"], "UniProt": ["P1", "P2", "P3"]}),
+        expression=pd.DataFrame(expr, columns=["SL1", "SL2", "SL3"]),
+        metadata={},
+    )
+
+
+def _make_olink_with_negative_controls(n_bio=5, n_nc=10):
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n = n_bio + n_nc
+    expr = np.vstack([rng.normal(5, 1, (n_bio, 3)), rng.normal(0.5, 0.2, (n_nc, 3))])
+    return AffinityDataset(
+        platform=Platform.OLINK_EXPLORE,
+        samples=pd.DataFrame(
+            {
+                "SampleID": [f"S{i}" for i in range(n)],
+                "SampleType": ["SAMPLE"] * n_bio + ["NEGATIVE_CONTROL"] * n_nc,
+                "SampleQC": ["PASS"] * n,
+            }
+        ),
+        features=pd.DataFrame({"OlinkID": ["O1", "O2", "O3"], "UniProt": ["P1", "P2", "P3"], "Panel": ["Inf"] * 3}),
+        expression=pd.DataFrame(expr, columns=["O1", "O2", "O3"]),
+        metadata={},
+    )
+
+
+class TestLodResolution:
+    def test_somascan_uses_elod_not_nclod_with_many_buffers(self):
+        from pyprideap.processing.lod import compute_soma_elod
+        from pyprideap.viz.qc.compute import resolve_lod_with_source
+
+        ds = _make_somascan_with_buffers()
+        lod, source = resolve_lod_with_source(ds)
+        assert source == "eLOD"
+        pd.testing.assert_series_equal(lod, compute_soma_elod(ds))
+
+    def test_report_active_source_matches_resolver(self):
+        from pyprideap.viz.qc.compute import resolve_lod_with_source
+        from pyprideap.viz.qc.report import _lod_source_info
+
+        for ds in (_make_somascan_with_buffers(), _make_olink_with_negative_controls()):
+            assert _lod_source_info(ds)["active"] == resolve_lod_with_source(ds)[1]
+        assert _lod_source_info(_make_olink_with_negative_controls())["active"] == "NCLOD"
+
+    def test_qc_summary_uses_resolved_lod(self):
+        # No LOD column in the file: the summary must still split by NCLOD
+        result = compute_qc_summary(_make_olink_with_negative_controls())
+        assert result is not None
+        assert any("LOD" in c for c in result.categories)
