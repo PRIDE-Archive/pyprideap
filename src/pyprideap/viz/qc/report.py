@@ -601,7 +601,9 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
     """Detect which LOD sources are available and which one is active.
 
     For Olink datasets we consider three possible sources (Reported LOD,
-    NCLOD, FixedLOD) and pick the first available in that priority order.
+    NCLOD, FixedLOD). The active source is whichever one
+    :func:`~pyprideap.viz.qc.compute.resolve_lod_with_source` actually used,
+    so the summary always matches the LOD applied in the plots.
 
     For SomaScan datasets, the primary and typically only source is the
     estimated LOD from buffer samples (eLOD). SomaScan ADAT files do not
@@ -616,6 +618,7 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
         get_bundled_fixed_lod_path,
         get_reported_lod,
     )
+    from pyprideap.viz.qc.compute import resolve_lod_with_source
 
     info: dict[str, Any] = {"active": None, "sources": []}
     sources: list[dict[str, str]] = []
@@ -633,7 +636,6 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                     "detail": "Estimated from buffer RFU using a robust MAD-based formula",
                 }
             )
-            info["active"] = "eLOD"
         except (ValueError, KeyError, ImportError):
             sources.append(
                 {
@@ -658,8 +660,6 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                     "detail": f"LOD column in NPX file ({n_assays} assays)",
                 }
             )
-            if info["active"] is None:
-                info["active"] = "Reported LOD"
         else:
             sources.append({"name": "Reported LOD", "status": "unavailable", "detail": "No LOD column in data file"})
 
@@ -675,8 +675,6 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                         "detail": f"Computed from {n_controls} negative control samples",
                     }
                 )
-                if info["active"] is None:
-                    info["active"] = "NCLOD"
             else:
                 sources.append(
                     {
@@ -713,6 +711,10 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                     "detail": f"No bundled file for {dataset.platform.value}",
                 }
             )
+
+    _, info["active"] = resolve_lod_with_source(dataset)
+    if info["active"] == "Reported LOD" and not any(src["name"] == "Reported LOD" for src in sources):
+        sources.insert(0, {"name": "Reported LOD", "status": "available", "detail": "LOD values in data file"})
 
     info["sources"] = sources
     info["platform"] = dataset.platform.value
