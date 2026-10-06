@@ -10,6 +10,7 @@ import numpy as np
 
 from pyprideap.core import AffinityDataset
 from pyprideap.viz.qc.compute import (
+    BatchEffectData,
     ColCheckData,
     CorrelationData,
     CvDistributionData,
@@ -22,7 +23,9 @@ from pyprideap.viz.qc.compute import (
     NormScaleData,
     PcaData,
     PlateCvData,
+    QcFlagData,
     QcLodSummaryData,
+    ReplicateCvData,
     UmapData,
     UniProtDuplicateData,
     VolcanoData,
@@ -33,6 +36,34 @@ from pyprideap.viz.qc.compute import (
 logger = logging.getLogger(__name__)
 
 _HELP_TEXT: dict[str, str] = {
+    "replicate_cv": (
+        "Technical precision from replicate controls of a single material: Olink sample controls or "
+        "SomaScan QC samples. Plate controls and calibrators are not used because they feed the vendor "
+        "normalization or calibration, which would make their CVs look artificially small. CVs are on a "
+        "linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited) and, when an LOD is available, "
+        "only assays detected above LOD in the controls are included. The study-sample CV (blue) adds "
+        "biological variation between participants, so it is expected to be much larger. Both depend on "
+        "the normalization applied to the deposited file."
+    ),
+    "batch_effect": (
+        "Principal component analysis of study samples (Olink NPX, SomaScan log10 RFU). Each bar is the "
+        "share of that component's variance explained by plate (η², between-plate over total sum of "
+        "squares); the label gives the component's share of total variance. A high value on a major "
+        "component suggests a plate/batch effect. It can also be legitimate when plates were not "
+        "randomized and coincide with study groups, which is a design issue to check rather than a "
+        "data error."
+    ),
+    "plate_signal": (
+        "Median signal per study sample, grouped by plate. Plates whose box is shifted from the others "
+        "indicate a plate-level offset that normalization did not remove, or a plate holding different "
+        "kinds of samples."
+    ),
+    "qc_flags": (
+        "Vendor quality flags for each measurement in study samples, per panel. Assay QC is Olink's "
+        "per-assay flag (AssayQC / Assay_Warning); Sample QC is the per-sample flag, which Olink reports "
+        "separately for each panel or block, so one sample can pass in one block and fail in another. "
+        "NA means the vendor did not assess that measurement."
+    ),
     "distribution": (
         "Shows the intensity distribution of expression values for each sample as overlaid histograms. "
         "Each protein (assay) produces one NPX value per sample, so this plot shows how all protein "
@@ -225,7 +256,8 @@ _SECTION_ORDER = [
     ("Missing Frequency Distribution", ["missing_frequency_distribution"]),
     ("Sample Relationships", ["dimreduction", "correlation", "heatmap"]),
     ("Normalization QC", ["norm_scale"]),
-    ("Variability", ["cv_distribution", "plate_cv"]),
+    ("Variability", ["cv_distribution", "replicate_cv", "plate_cv"]),
+    ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags"]),
     ("Assay QC", ["iqr_median_qc", "uniprot_duplicates"]),
     ("SomaScan QC", ["col_check"]),
     ("Differential Expression", ["differential_expression"]),
@@ -1059,8 +1091,10 @@ def _render_summary_table(
     # --- Variability ---
     cv_data = plot_data.get("cv_distribution")
     plate_cv_data = plot_data.get("plate_cv")
-    has_cv = (isinstance(cv_data, CvDistributionData) and len(cv_data.cv_values) > 0) or (
-        isinstance(plate_cv_data, PlateCvData) and len(plate_cv_data.inter_cv) > 0
+    has_cv = (
+        (isinstance(cv_data, CvDistributionData) and len(cv_data.cv_values) > 0)
+        or (isinstance(plate_cv_data, PlateCvData) and len(plate_cv_data.inter_cv) > 0)
+        or isinstance(plot_data.get("replicate_cv"), ReplicateCvData)
     )
     if has_cv:
         rows.append(_summary_group("Variability"))
@@ -1079,21 +1113,49 @@ def _render_summary_table(
             med_inter = float(np.median(plate_cv_data.inter_cv))
             rows.append(_summary_row("", "Median inter-plate CV", f"{med_inter:.1%}"))
 
+        rep_cv = plot_data.get("replicate_cv")
+        if isinstance(rep_cv, ReplicateCvData) and rep_cv.technical_cv:
+            scope = f"{len(rep_cv.technical_cv)} assays &gt; LOD" if rep_cv.lod_filtered else "all assays"
+            rows.append(
+                _summary_row(
+                    "",
+                    f"Technical CV, median ({rep_cv.control_label.lower()}, n={rep_cv.n_replicates})",
+                    f"{float(np.median(rep_cv.technical_cv)):.1%} ({scope})",
+                )
+            )
+
+    batch = plot_data.get("batch_effect")
+    if isinstance(batch, BatchEffectData) and batch.plate_r2:
+        rows.append(_summary_group("Batch"))
+        top = ", ".join(f"{pc} {r2:.0%}" for pc, r2 in zip(batch.pc_labels[:2], batch.plate_r2[:2]))
+        rows.append(_summary_row("", "Variance explained by plate", top))
+
     # --- QC Status (Olink only) ---
-    if "SampleQC" in samples.columns:
+    qc_flags = plot_data.get("qc_flags")
+    worst = qc_flags.sample_worst if isinstance(qc_flags, QcFlagData) else {}
+    if worst or "SampleQC" in samples.columns:
         rows.append(_summary_group("QC Status"))
-        qc_counts = samples["SampleQC"].value_counts()
+        if worst:
+            # Olink reports SampleQC per panel/block; count each study sample by its worst block
+            qc_counts = pd.Series(worst)
+            qc_label = "PASS / WARN / FAIL (study samples, worst block)"
+        else:
+            qc_counts = samples["SampleQC"].value_counts()
+            qc_label = "PASS / WARN / FAIL"
         n_pass = int(qc_counts.get("PASS", 0))
         n_warn = int(qc_counts.get("WARN", 0))
         n_fail = int(qc_counts.get("FAIL", 0))
-        fail_rate = n_fail / n_samples if n_samples > 0 else 0.0
+        n_rated = n_pass + n_warn + n_fail
+        fail_rate = n_fail / n_rated if n_rated > 0 else 0.0
         if fail_rate == 0:
             qc_dot = _status_dot("green")
         elif fail_rate < 0.10:
             qc_dot = _status_dot("amber")
         else:
             qc_dot = _status_dot("red")
-        rows.append(_summary_row(qc_dot, "PASS / WARN / FAIL", f"{n_pass} / {n_warn} / {n_fail}"))
+        rows.append(_summary_row(qc_dot, qc_label, f"{n_pass} / {n_warn} / {n_fail}"))
+        if isinstance(qc_flags, QcFlagData) and qc_flags.flagged_assay_pct is not None:
+            rows.append(_summary_row("", "Measurements with assay QC WARN/FAIL", f"{qc_flags.flagged_assay_pct:.2f}%"))
 
     # --- Normalization (SomaScan only) ---
     if "HybControlNormScale" in samples.columns:
@@ -1402,6 +1464,11 @@ def qc_report(
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
         # SomaScan-specific renderers
         "col_check": (ColCheckData, R.render_col_check),
+        # Technical QC
+        "replicate_cv": (ReplicateCvData, R.render_replicate_cv),
+        "batch_effect": (BatchEffectData, R.render_batch_effect),
+        "plate_signal": (BatchEffectData, R.render_plate_signal),
+        "qc_flags": (QcFlagData, R.render_qc_flags),
     }
 
     # Determine display order from _SECTION_ORDER so first-displayed plot gets plotly.js
@@ -1418,6 +1485,7 @@ def qc_report(
     _DATA_KEY_MAP = {
         "sample_completeness": "data_completeness",
         "missing_frequency_distribution": "data_completeness",
+        "plate_signal": "batch_effect",
     }
 
     # Handle combined dimensionality reduction (PCA + t-SNE in one panel with toggle)
@@ -1715,11 +1783,9 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
         "Signal & variability",
         [
             ("distribution", "half"),
-            ("cv_distribution", "half"),
             ("sample_completeness", "half"),
-            ("iqr_median_qc", "half"),
-            ("norm_scale", "half"),
-            ("col_check", "half"),
+            ("cv_distribution", "half"),
+            ("replicate_cv", "half"),
             ("plate_cv", "full"),
             ("lod_comparison", "full"),
         ],
@@ -1728,6 +1794,18 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
         "structure",
         "Sample structure",
         [("correlation", "half"), ("dimreduction", "half"), ("heatmap", "full")],
+    ),
+    (
+        "technical",
+        "Technical QC",
+        [
+            ("batch_effect", "half"),
+            ("plate_signal", "half"),
+            ("qc_flags", "full"),
+            ("iqr_median_qc", "half"),
+            ("norm_scale", "half"),
+            ("col_check", "half"),
+        ],
     ),
 ]
 
@@ -1741,6 +1819,9 @@ _SPLIT_PLOT_HEIGHTS = {
     "missing_frequency_distribution": 360,
     "distribution": 380,
     "cv_distribution": 380,
+    "replicate_cv": 380,
+    "batch_effect": 360,
+    "plate_signal": 360,
     "sample_completeness": 360,
     "iqr_median_qc": 360,
     "norm_scale": 360,
@@ -1903,6 +1984,11 @@ def qc_report_split(
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
         # SomaScan-specific renderers
         "col_check": (ColCheckData, R.render_col_check),
+        # Technical QC
+        "replicate_cv": (ReplicateCvData, R.render_replicate_cv),
+        "batch_effect": (BatchEffectData, R.render_batch_effect),
+        "plate_signal": (BatchEffectData, R.render_plate_signal),
+        "qc_flags": (QcFlagData, R.render_qc_flags),
     }
 
     written: list[str] = []
@@ -1911,6 +1997,7 @@ def qc_report_split(
     _DATA_KEY_MAP = {
         "sample_completeness": "data_completeness",
         "missing_frequency_distribution": "data_completeness",
+        "plate_signal": "batch_effect",
     }
 
     # Render each plot as a standalone HTML file

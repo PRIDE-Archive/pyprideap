@@ -581,3 +581,106 @@ class TestSplitPlotTweaks:
         fig = render_distribution(data)
         in_legend = [t.name for t in fig.data if t.showlegend is not False]
         assert in_legend == ["5th–95th percentile", "IQR (25th–75th)", "Median"]
+
+
+# ---------------------------------------------------------------------------
+# Technical QC: replicate CV, batch effect, vendor QC flags
+# ---------------------------------------------------------------------------
+
+
+def _make_olink_technical(n_per_plate=8, n_ctrl=4, n_assays=6, plate_shift=0.0):
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    plates, types = [], []
+    for p in ("P1", "P2"):
+        plates += [p] * (n_per_plate + n_ctrl)
+        types += ["SAMPLE"] * n_per_plate + ["SAMPLE_CONTROL"] * n_ctrl
+    n = len(plates)
+    expr = rng.normal(5, 1.0, (n, n_assays))
+    ctrl = np.array([t == "SAMPLE_CONTROL" for t in types])
+    expr[ctrl] = 5 + rng.normal(0, 0.05, (ctrl.sum(), n_assays))  # tight technical replicates
+    expr[np.array(plates) == "P2"] += plate_shift
+    assays = [f"O{j}" for j in range(n_assays)]
+    assay_qc = pd.DataFrame("PASS", index=range(n), columns=assays)
+    assay_qc.iloc[0, 0] = "WARN"
+    sample_qc = pd.DataFrame("PASS", index=range(n), columns=assays)
+    sample_qc.iloc[1, :3] = "FAIL"  # sample S1 fails in one block only
+    return AffinityDataset(
+        platform=Platform.OLINK_EXPLORE,
+        samples=pd.DataFrame(
+            {"SampleID": [f"S{i}" for i in range(n)], "SampleType": types, "PlateID": plates, "SampleQC": "PASS"}
+        ),
+        features=pd.DataFrame({"OlinkID": assays, "UniProt": assays, "Panel": ["Inf"] * 3 + ["Onc"] * 3}),
+        expression=pd.DataFrame(expr, columns=assays),
+        metadata={"assay_qc_matrix": assay_qc, "sample_qc_matrix": sample_qc},
+    )
+
+
+class TestTechnicalQc:
+    def test_replicate_cv_uses_sample_controls_only(self):
+        from pyprideap.viz.qc.compute import compute_replicate_cv
+
+        r = compute_replicate_cv(_make_olink_technical())
+        assert r.control_label == "Sample controls" and r.n_replicates == 8
+        import numpy as np
+
+        assert np.median(r.technical_cv) < 0.1 < np.median(r.study_cv)
+
+    def test_replicate_cv_needs_three_replicates(self):
+        from pyprideap.viz.qc.compute import compute_replicate_cv
+
+        ds = _make_olink_technical(n_ctrl=1)
+        assert compute_replicate_cv(ds) is None
+
+    def test_batch_effect_detects_plate_shift(self):
+        from pyprideap.viz.qc.compute import compute_batch_effect
+
+        shifted = compute_batch_effect(_make_olink_technical(plate_shift=3.0))
+        assert shifted.plate_r2[0] > 0.8
+        assert shifted.plate_ids == ["P1", "P2"]
+        assert [len(v) for v in shifted.plate_sample_medians] == [8, 8]  # controls excluded
+        plain = compute_batch_effect(_make_olink_technical(plate_shift=0.0))
+        assert max(plain.plate_r2) < shifted.plate_r2[0]
+
+    def test_qc_flags_per_panel_and_worst_block(self):
+        from pyprideap.viz.qc.compute import compute_qc_flags
+
+        q = compute_qc_flags(_make_olink_technical())
+        assert q.rows == ["Inf · Assay QC", "Inf · Sample QC", "Onc · Assay QC", "Onc · Sample QC"]
+        assert q.sample_worst == {"PASS": 15, "FAIL": 1}
+        assert q.flagged_assay_pct == pytest.approx(100 / (16 * 6), abs=0.01)
+
+    def test_summary_uses_worst_block_sample_qc(self, tmp_path):
+        out = qc_report_split(_make_olink_technical(), tmp_path / "split")
+        summary = (out / "summary.html").read_text()
+        assert "PASS / WARN / FAIL (study samples, worst block)" in summary
+        assert "15 / 0 / 1" in summary
+        assert "Technical CV, median (sample controls, n=8)" in summary
+        manifest = json.loads((out / "manifest.json").read_text())
+        technical = next(t for t in manifest["tabs"] if t["id"] == "technical")
+        assert [i["key"] for i in technical["items"]][:3] == ["batch_effect", "plate_signal", "qc_flags"]
+
+    def test_olink_reader_keeps_qc_flag_matrices(self, tmp_path):
+        rows = []
+        for sid in ("A", "B"):
+            for oid, block_qc in (("OID1", "PASS"), ("OID2", "FAIL" if sid == "B" else "PASS")):
+                rows.append(
+                    {
+                        "SampleID": sid,
+                        "OlinkID": oid,
+                        "NPX": 1.0,
+                        "UniProt": "P1",
+                        "Assay": oid,
+                        "Panel": "X",
+                        "SampleQC": block_qc,
+                        "AssayQC": "WARN" if oid == "OID1" else "PASS",
+                    }
+                )
+        path = tmp_path / "flags.npx.csv"
+        pd.DataFrame(rows).to_csv(path, index=False)
+        from pyprideap.io.readers.olink_csv import read_olink_csv
+
+        ds = read_olink_csv(path)
+        assert ds.metadata["assay_qc_matrix"].values.tolist() == [["WARN", "PASS"], ["WARN", "PASS"]]
+        assert ds.metadata["sample_qc_matrix"].values.tolist() == [["PASS", "PASS"], ["PASS", "FAIL"]]

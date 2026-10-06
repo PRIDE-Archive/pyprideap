@@ -35,6 +35,9 @@ _CONTROL_SAMPLE_TYPES = frozenset(
     }
 )
 
+# Sample x assay matrices in metadata that must be subset together with samples
+_PER_SAMPLE_METADATA = ("lod_matrix", "count_matrix", "ext_count", "assay_qc_matrix", "sample_qc_matrix")
+
 # SDRF characteristics[sample type] after read_sdrf() shortens the column name
 _SDRF_SAMPLE_TYPE_COLUMN = "sample type"
 
@@ -89,7 +92,7 @@ def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
     expression = dataset.expression[keep_mask].reset_index(drop=True)
 
     metadata = dict(dataset.metadata)
-    for key in ("lod_matrix", "count_matrix", "ext_count"):
+    for key in _PER_SAMPLE_METADATA:
         df = metadata.get(key)
         if isinstance(df, pd.DataFrame):
             metadata[key] = df[keep_mask].reset_index(drop=True)
@@ -135,7 +138,7 @@ def filter_qc(
     expression = dataset.expression[keep_mask].reset_index(drop=True)
 
     metadata = dict(dataset.metadata)
-    for key in ("lod_matrix", "count_matrix", "ext_count"):
+    for key in _PER_SAMPLE_METADATA:
         df = metadata.get(key)
         if isinstance(df, pd.DataFrame):
             metadata[key] = df[keep_mask].reset_index(drop=True)
