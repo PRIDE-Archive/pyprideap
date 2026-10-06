@@ -347,9 +347,10 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     # but we can't stratify by PASS/WARN/FAIL.
     has_sample_qc = "SampleQC" in dataset.samples.columns
 
-    from pyprideap.processing.lod import _above_lod_matrix, get_lod_values
+    from pyprideap.processing.lod import _above_lod_matrix
 
-    lod = get_lod_values(dataset)
+    # Same LOD source as the completeness / LOD analysis plots
+    lod = _resolve_lod(dataset)
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
 
     if lod is not None and (isinstance(lod, pd.DataFrame) or len(lod) > 0):
@@ -663,11 +664,16 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
     )
 
 
-def _resolve_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:
-    """Try all LOD sources in priority order.
+def resolve_lod_with_source(dataset: AffinityDataset) -> tuple[pd.DataFrame | pd.Series | None, str | None]:
+    """Resolve the LOD used throughout the QC report, and name its source.
 
-    Olink:    Reported → NCLOD → FixedLOD
-    SomaScan: Reported → NCLOD → eLOD (buffer-based, MAD formula)
+    Olink:    Reported LOD → NCLOD (≥10 negative controls) → FixedLOD
+    SomaScan: Reported LOD → eLOD (buffer-based, MAD formula)
+
+    NCLOD (median + max(0.2, 3·SD)) is defined on log2 NPX by OlinkAnalyze and
+    is never applied to SomaScan RFU, even when there are ≥10 buffer samples.
+
+    Returns ``(lod, source_name)``, or ``(None, None)`` when no source applies.
     """
     from pyprideap.processing.lod import (
         compute_nclod,
@@ -676,32 +682,32 @@ def _resolve_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:
         load_fixed_lod,
     )
 
-    # 1. Reported LOD (from data file)
     lod = get_reported_lod(dataset)
     if lod is not None:
-        return lod
+        return lod, "Reported LOD"
 
-    # 2. NCLOD (from negative controls)
+    if dataset.platform == Platform.SOMASCAN:
+        try:
+            return compute_soma_elod(dataset), "eLOD"
+        except (ValueError, KeyError):
+            return None, None
+
     try:
-        return compute_nclod(dataset, plate_adjusted=True)
+        return compute_nclod(dataset, plate_adjusted=True), "NCLOD"
     except (ValueError, KeyError):
         pass
 
-    # 3. Platform-specific fallback
-    if dataset.platform == Platform.SOMASCAN:
-        # SomaScan eLOD from buffer samples
-        try:
-            return compute_soma_elod(dataset)
-        except (ValueError, KeyError):
-            pass
-    else:
-        # Olink FixedLOD from bundled config
-        try:
-            return load_fixed_lod(dataset)
-        except (ValueError, FileNotFoundError):
-            pass
+    try:
+        return load_fixed_lod(dataset), "FixedLOD"
+    except (ValueError, FileNotFoundError):
+        pass
 
-    return None
+    return None, None
+
+
+def _resolve_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:
+    """LOD from :func:`resolve_lod_with_source`, without the source name."""
+    return resolve_lod_with_source(dataset)[0]
 
 
 def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData | None:
@@ -722,19 +728,6 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
 
     # Filter out control samples — only show biological samples
     ds = filter_controls(dataset)
-    # For SomaScan, also exclude Buffer/Calibrator/QC (not in _CONTROL_SAMPLE_TYPES)
-    if "SampleType" in ds.samples.columns:
-        st = ds.samples["SampleType"].astype(str).str.strip()
-        non_bio = st.str.lower().isin({"buffer", "calibrator", "qc"})
-        if non_bio.any():
-            keep = ~non_bio
-            ds = AffinityDataset(
-                platform=ds.platform,
-                samples=ds.samples.loc[keep].reset_index(drop=True),
-                features=ds.features,
-                expression=ds.expression.loc[keep].reset_index(drop=True),
-                metadata=ds.metadata,
-            )
 
     numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
     sample_ids = _sample_ids(ds)

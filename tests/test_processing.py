@@ -237,6 +237,34 @@ class TestFiltering:
         assert len(result.samples) == 2
         assert len(result.expression) == 2
 
+    def test_filter_controls_matches_vendor_underscore_types(self):
+        # Olink Explore HT exports use upper-case, underscore-separated types
+        ds = _make_olink_dataset(
+            n_samples=5,
+            sample_types=["SAMPLE", "PLATE_CONTROL", "SAMPLE_CONTROL", "NEGATIVE_CONTROL", "SAMPLE"],
+            qc_values=["PASS"] * 5,
+        )
+        result = filter_controls(ds)
+        assert result.samples["SampleID"].tolist() == ["S0", "S4"]
+
+    def test_filter_controls_uses_sdrf_sample_type(self):
+        ds = _make_olink_dataset(n_samples=4, sample_types=["Sample"] * 4, qc_values=["PASS"] * 4)
+        ds.samples["sample type"] = ["study sample", "buffer control", "bridge sample", "calibrator"]
+        result = filter_controls(ds)
+        # Bridge samples are biological samples measured across runs and are kept
+        assert result.samples["SampleID"].tolist() == ["S0", "S2"]
+
+    def test_nclod_fallback_ignores_protein_containing_controls(self):
+        from pyprideap.processing.lod import _find_negative_controls
+
+        ds = _make_olink_dataset(
+            n_samples=4,
+            sample_types=["SAMPLE", "PLATE_CONTROL", "SAMPLE_CONTROL", "SAMPLE"],
+            qc_values=["PASS"] * 4,
+        )
+        with pytest.raises(ValueError, match="No negative control"):
+            _find_negative_controls(ds)
+
     def test_filter_qc_keeps_pass_and_warn(self):
         ds = _make_olink_dataset(
             n_samples=4,

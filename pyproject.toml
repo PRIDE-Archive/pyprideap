@@ -67,6 +67,8 @@ select = ["E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/test_differential.py" = ["E402"]
+# Scripts add src/ to sys.path before importing pyprideap
+"scripts/*" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

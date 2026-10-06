@@ -313,10 +313,9 @@ def select_bridge_samples(
     keep = pd.Series(True, index=dataset.samples.index)
     if sid_col in dataset.samples.columns:
         keep &= ~sample_ids.str.contains("CONTROL_SAMPLE", case=False, na=False)
-    if "SampleType" in dataset.samples.columns:
-        from pyprideap.processing.filtering import _CONTROL_SAMPLE_TYPES
+    from pyprideap.processing.filtering import control_sample_mask
 
-        keep &= ~dataset.samples["SampleType"].astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+    keep &= ~control_sample_mask(dataset.samples)
 
     # 2. Exclude QC outliers
     if exclude_qc_outliers:
