@@ -210,6 +210,8 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
                 line=dict(width=0.8),
                 opacity=0.4,
                 name=data.sample_ids[idx],
+                # Context traces: hover only; the legend shows the summary bands
+                showlegend=False,
                 hovertemplate=f"{data.sample_ids[idx]}<br>{data.xlabel}: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>",
             )
         )
@@ -219,8 +221,8 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
         title=f"{data.title} (summary of {n_samples} samples)",
         xaxis_title=data.xlabel,
         yaxis_title=data.ylabel,
-        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
-        margin=dict(b=120),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+        margin=dict(b=80),
     )
     return fig
 
@@ -670,6 +672,10 @@ def render_data_completeness(data: DataCompletenessData) -> Figure:
     return fig
 
 
+# Above this many samples, per-sample tick labels are hidden (hover still shows them)
+_MAX_SAMPLE_TICKS = 40
+
+
 def render_sample_completeness(data: DataCompletenessData) -> Figure:
     """Per-sample stacked bar showing above/below LOD as standalone plot."""
     go, _ = _import_plotly()
@@ -698,14 +704,19 @@ def render_sample_completeness(data: DataCompletenessData) -> Figure:
             hovertemplate="%{customdata}<br>Below LOD: %{y:.1f}%<extra></extra>",
         ),
     )
-    fig.update_xaxes(title_text="", tickangle=-45)
+    many = len(short_ids) > _MAX_SAMPLE_TICKS
+    if many:
+        # Sample names would overlap; they remain available on hover
+        fig.update_xaxes(showticklabels=False, title_text=f"Samples (n = {len(short_ids)})")
+    else:
+        fig.update_xaxes(title_text="", tickangle=-45)
     fig.update_yaxes(title_text="% of Proteins", range=[0, 100], ticksuffix="%")
     fig.update_layout(
         title="Sample Completeness",
         barmode="stack",
         height=500,
-        legend=dict(orientation="h", yanchor="top", y=-0.18),
-        margin=dict(b=100),
+        legend=dict(orientation="h", yanchor="top", y=-0.12 if many else -0.18),
+        margin=dict(b=60 if many else 100),
     )
     return fig
 

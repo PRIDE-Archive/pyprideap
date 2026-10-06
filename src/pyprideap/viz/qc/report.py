@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_mod
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -422,6 +423,10 @@ footer {
 .dot-green { background: #2ecc71; }
 .dot-amber { background: #f39c12; }
 .dot-red { background: #e74c3c; }
+.summary-columns {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; align-items: start;
+}
+@media (max-width: 700px) { .summary-columns { grid-template-columns: 1fr; } }
 /* --- PRIDE embedded mode --- */
 body.pride-embedded {
     --bg: transparent;
@@ -860,15 +865,47 @@ def _summary_group(title: str) -> str:
     return f'<tr class="summary-group"><td colspan="3">{title}</td></tr>'
 
 
+def _split_summary_columns(rows: list[str], columns: int) -> list[list[str]]:
+    """Split summary rows into *columns* lists at group boundaries, balancing row counts."""
+    groups: list[list[str]] = []
+    for row in rows:
+        if row.startswith('<tr class="summary-group">') or not groups:
+            groups.append([])
+        groups[-1].append(row)
+    if columns <= 1 or len(groups) < 2:
+        return [rows]
+    total = len(rows)
+    best_k, best_diff, running = 1, total, 0
+    for k in range(1, len(groups)):
+        running += len(groups[k - 1])
+        diff = abs(total - 2 * running)
+        if diff < best_diff:
+            best_k, best_diff = k, diff
+    return [[r for g in groups[:best_k] for r in g], [r for g in groups[best_k:] for r in g]]
+
+
 def _render_summary_table(
     dataset: AffinityDataset,
     plot_data: dict[str, object],
     lod_info: dict[str, Any],
+    columns: int = 1,
 ) -> str:
-    """Build the Dataset Summary HTML table with traffic-light indicators."""
+    """Build the Dataset Summary HTML table with traffic-light indicators.
+
+    With ``columns=2`` the groups are laid out as two side-by-side tables
+    (split at a group boundary so both halves have similar length), which
+    keeps the summary short when it spans a wide card.
+    """
     import pandas as pd
 
-    from pyprideap.viz.qc.compute import CvDistributionData, DataCompletenessData, LodAnalysisData, PlateCvData
+    from pyprideap.viz.qc.compute import (
+        CvDistributionData,
+        DataCompletenessData,
+        LodAnalysisData,
+        PlateCvData,
+        QcLodSummaryData,
+        UniProtDuplicateData,
+    )
 
     rows: list[str] = []
     samples = dataset.samples
@@ -945,6 +982,15 @@ def _render_summary_table(
                 )
             )
 
+        # Share of all measurements above LOD (the QC and LOD Summary bar, as one number)
+        qc_lod = plot_data.get("qc_summary")
+        if isinstance(qc_lod, QcLodSummaryData) and any("> LOD" in c for c in qc_lod.categories):
+            n_total = sum(qc_lod.counts)
+            n_above = sum(n for c, n in zip(qc_lod.categories, qc_lod.counts) if "> LOD" in c)
+            if n_total > 0:
+                source = f" ({html_mod.escape(str(lod_active))})" if lod_active else ""
+                rows.append(_summary_row("", f"Measurements &gt; LOD{source}", f"{n_above / n_total:.1%}"))
+
     # --- Proteins ---
     rows.append(_summary_group("Proteins"))
     if "UniProt" in features.columns:
@@ -960,6 +1006,17 @@ def _render_summary_table(
     proteins_per_sample = numeric.notna().sum(axis=1)
     median_per_sample = float(proteins_per_sample.median())
     rows.append(_summary_row("", "Proteins per sample (median)", f"{median_per_sample:.0f}"))
+
+    dup = plot_data.get("uniprot_duplicates")
+    if isinstance(dup, UniProtDuplicateData) and dup.n_total_assays > 0:
+        n_replicate = sum(len(assays) for assays in dup.duplicates.values())
+        rows.append(
+            _summary_row(
+                "",
+                "Assays sharing a UniProt ID",
+                f"{n_replicate} / {dup.n_total_assays} ({len(dup.duplicates)} proteins)",
+            )
+        )
 
     # --- Missing Data (only when no LOD info, since LOD-based completeness is more informative) ---
     if not has_any_lod:
@@ -1106,7 +1163,12 @@ def _render_summary_table(
                 )
             )
 
-    table_html = f'<table class="summary-table">{"".join(rows)}</table>'
+    parts = _split_summary_columns(rows, columns)
+    if len(parts) == 1:
+        table_html = f'<table class="summary-table">{"".join(rows)}</table>'
+    else:
+        tables = "".join(f'<table class="summary-table">{"".join(part)}</table>' for part in parts)
+        table_html = f'<div class="summary-columns">{tables}</div>'
 
     return (
         '<div class="plot-card" id="dataset-summary">'
@@ -1631,6 +1693,112 @@ _EMBED_CSS = """\
 # already shows it); Plotly's default 100px leaves a blank band above the plot.
 _SPLIT_PLOT_TOP_MARGIN = 40
 
+# ---------------------------------------------------------------------------
+# Split-report layout manifest
+# ---------------------------------------------------------------------------
+# qc_report_split writes manifest.json describing how the plot files should be
+# arranged (tabs, order, half/full width). Plots shown side by side get the same
+# figure height so card borders line up in a two-column grid.
+
+SPLIT_MANIFEST_NAME = "manifest.json"
+_SPLIT_MANIFEST_SCHEMA = 1
+
+# (tab id, tab title, [(plot key, preferred width), ...]) in display order
+_SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
+    (
+        "overview",
+        "Overview",
+        [("summary", "full"), ("lod_analysis", "half"), ("missing_frequency_distribution", "half")],
+    ),
+    (
+        "signal",
+        "Signal & variability",
+        [
+            ("distribution", "half"),
+            ("cv_distribution", "half"),
+            ("sample_completeness", "half"),
+            ("iqr_median_qc", "half"),
+            ("norm_scale", "half"),
+            ("col_check", "half"),
+            ("plate_cv", "full"),
+            ("lod_comparison", "full"),
+        ],
+    ),
+    (
+        "structure",
+        "Sample structure",
+        [("correlation", "half"), ("dimreduction", "half"), ("heatmap", "full")],
+    ),
+]
+
+# Plots whose content is summarised as rows of the Dataset Summary table and
+# therefore left out of the layout (files are still written for older clients).
+_SPLIT_FOLDED_INTO_SUMMARY = ("qc_summary", "uniprot_duplicates")
+
+# Figure heights (px) for split plots; pairs in the same row share a height.
+_SPLIT_PLOT_HEIGHTS = {
+    "lod_analysis": 360,
+    "missing_frequency_distribution": 360,
+    "distribution": 380,
+    "cv_distribution": 380,
+    "sample_completeness": 360,
+    "iqr_median_qc": 360,
+    "norm_scale": 360,
+    "col_check": 360,
+    "lod_comparison": 420,
+    "correlation": 460,
+    "dimreduction": 460,
+    "heatmap": 560,
+}
+
+
+def _build_split_manifest(written: list[str], platform: str) -> dict[str, Any]:
+    """Arrange the written plot files into tabs of a two-column grid.
+
+    Half-width plots are paired in order; a half-width plot left without a
+    partner (e.g. Olink has no ColCheck) is widened to full width so every
+    grid row is complete and borders stay aligned. Empty tabs are dropped.
+    """
+    import pyprideap
+
+    available = set(written)
+    tabs = []
+    for tab_id, title, plots in _SPLIT_LAYOUT:
+        items: list[dict[str, Any]] = []
+        pending: dict[str, Any] | None = None
+        for key, width in plots:
+            if key not in available:
+                continue
+            item: dict[str, Any] = {"key": key, "file": f"{key}.html", "width": width}
+            if key in _SPLIT_PLOT_HEIGHTS:
+                item["height"] = _SPLIT_PLOT_HEIGHTS[key]
+            if width == "full":
+                if pending is not None:
+                    pending["width"] = "full"
+                    pending = None
+                items.append(item)
+            elif pending is None:
+                pending = item
+                items.append(item)
+            else:
+                pending = None
+                items.append(item)
+        if pending is not None:
+            pending["width"] = "full"
+        if items:
+            tabs.append({"id": tab_id, "title": title, "items": items})
+
+    placed = {item["key"] for tab in tabs for item in tab["items"]}
+    return {
+        "schema": _SPLIT_MANIFEST_SCHEMA,
+        "generator": f"pyprideap {pyprideap.__version__}",
+        "platform": platform,
+        "tabs": tabs,
+        "folded_into_summary": [k for k in _SPLIT_FOLDED_INTO_SUMMARY if k in available],
+        # Anything written but not placed (new plot types) still gets shown by clients
+        "unplaced": sorted(available - placed - set(_SPLIT_FOLDED_INTO_SUMMARY)),
+    }
+
 
 def _plotlyjs_cdn_url() -> str:
     """CDN URL for the plotly.js version bundled with the installed plotly package."""
@@ -1681,7 +1849,9 @@ def qc_report_split(
 
     Each plot is saved as a standalone HTML file named by its plot type
     (e.g., ``distribution.html``, ``correlation.html``). A ``summary.html``
-    file with the dataset summary table is always generated.
+    file with the dataset summary table is always generated, together with
+    ``manifest.json``, which tells embedding pages (e.g. PRIDE) how to arrange
+    the files: tabs, order and half/full width (see ``_build_split_manifest``).
 
     Parameters
     ----------
@@ -1752,8 +1922,9 @@ def qc_report_split(
         fig = renderer(data)  # type: ignore[operator]
         if strip_plot_title:
             fig.update_layout(title="", margin_t=_SPLIT_PLOT_TOP_MARGIN)
-        current_height = fig.layout.height
-        if current_height is None:
+        if key in _SPLIT_PLOT_HEIGHTS:
+            fig.update_layout(height=_SPLIT_PLOT_HEIGHTS[key])
+        elif fig.layout.height is None:
             fig.update_layout(height=500)
         plot_height = f"{fig.layout.height}px"
         plot_html = fig.to_html(full_html=False, include_plotlyjs=False, default_height=plot_height)
@@ -1785,18 +1956,26 @@ def qc_report_split(
 
         if pca_data is not None:
             pca_fig = R.render_pca(pca_data)
-            pca_fig.update_layout(title="" if strip_plot_title else pca_data.title, height=500)
+            pca_fig.update_layout(
+                title="" if strip_plot_title else pca_data.title, height=_SPLIT_PLOT_HEIGHTS["dimreduction"]
+            )
             if strip_plot_title:
                 pca_fig.update_layout(margin_t=_SPLIT_PLOT_TOP_MARGIN)
-            pca_html = pca_fig.to_html(full_html=False, include_plotlyjs=False, default_height="500px")
+            pca_html = pca_fig.to_html(
+                full_html=False, include_plotlyjs=False, default_height=f"{_SPLIT_PLOT_HEIGHTS['dimreduction']}px"
+            )
             dimred_parts.append(f'<div class="dimred-panel" id="dimred-pca">{pca_html}</div>')
 
         if umap_data is not None:
             tsne_fig = R.render_tsne(umap_data)
-            tsne_fig.update_layout(title="" if strip_plot_title else umap_data.title, height=500)
+            tsne_fig.update_layout(
+                title="" if strip_plot_title else umap_data.title, height=_SPLIT_PLOT_HEIGHTS["dimreduction"]
+            )
             if strip_plot_title:
                 tsne_fig.update_layout(margin_t=_SPLIT_PLOT_TOP_MARGIN)
-            tsne_html = tsne_fig.to_html(full_html=False, include_plotlyjs=False, default_height="500px")
+            tsne_html = tsne_fig.to_html(
+                full_html=False, include_plotlyjs=False, default_height=f"{_SPLIT_PLOT_HEIGHTS['dimreduction']}px"
+            )
             hidden = ' style="display:none"' if pca_data is not None else ""
             dimred_parts.append(f'<div class="dimred-panel" id="dimred-tsne"{hidden}>{tsne_html}</div>')
 
@@ -1837,12 +2016,15 @@ def qc_report_split(
         written.append("dimreduction")
 
     # Summary table (includes LOD sources inline)
-    summary_html = _render_summary_table(dataset, plot_data, lod_info)
+    summary_html = _render_summary_table(dataset, plot_data, lod_info, columns=2)
     page = _wrap_standalone_html(
         f"Dataset Summary — {platform_label}", summary_html, include_plotlyjs=False, no_border=no_border
     )
     (output_dir / "summary.html").write_text(page, encoding="utf-8")
     written.append("summary")
+
+    manifest = _build_split_manifest(written, dataset.platform.value)
+    (output_dir / SPLIT_MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     logger.debug("qc_report_split: written %d files to %s", len(written), output_dir)
     return output_dir
