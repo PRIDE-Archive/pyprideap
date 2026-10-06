@@ -15,6 +15,7 @@ from pyprideap.viz.qc.compute import (
     CorrelationData,
     CvDistributionData,
     DataCompletenessData,
+    DilutionQcData,
     DistributionData,
     HeatmapData,
     IqrMedianQcData,
@@ -23,9 +24,11 @@ from pyprideap.viz.qc.compute import (
     NormScaleData,
     PcaData,
     PlateCvData,
+    PreanalyticalData,
     QcFlagData,
     QcLodSummaryData,
     ReplicateCvData,
+    SexCheckData,
     UmapData,
     UniProtDuplicateData,
     VolcanoData,
@@ -57,6 +60,36 @@ _HELP_TEXT: dict[str, str] = {
         "Median signal per study sample, grouped by plate. Plates whose box is shifted from the others "
         "indicate a plate-level offset that normalization did not remove, or a plate holding different "
         "kinds of samples."
+    ),
+    "preanalytical": (
+        "Indicator scores for pre-analytical handling, computed per study sample as the mean z-score "
+        "of marker proteins present on the panel (listed on the axes): erythrocyte proteins for "
+        "<strong>hemolysis</strong> and platelet proteins for <strong>platelet activation</strong> "
+        "(delayed processing, serum vs plasma handling). Samples more than 3 robust SDs above the "
+        "median are shown in red. These are indicators, not diagnoses: high values can also be "
+        "biological (e.g. hematological disease) and should be checked against the sample "
+        "processing metadata."
+    ),
+    "dilution_cv": (
+        "SomaScan measures each reagent in one of three sample dilutions (20%, 0.5%, 0.005%) chosen "
+        "by the expected abundance of its target. CVs per dilution bin for study samples (biological "
+        "plus technical) and QC replicates (technical). The axis labels give the number of assays and "
+        "the share detected above LOD in most study samples. Normalization and calibration are "
+        "applied per dilution, so problems can affect a single bin."
+    ),
+    "dilution_norm_scale": (
+        "Per-sample SomaScan normalization scale factor for each dilution bin (NormScale_20, "
+        "NormScale_0_5, NormScale_0_005). Values near 1 are expected; SomaLogic flags samples outside "
+        "0.4–2.5 (red lines). A bin whose factors drift while the others do not points to a "
+        "dilution-specific problem."
+    ),
+    "sex_check": (
+        "Sex score from sex-linked proteins on the panel: Y-chromosome genes and KLK3 (male-specific) "
+        "minus PZP (higher in females). With an annotated <code>sex</code> column, samples whose "
+        "protein score falls on the other group's side of the threshold are shown in red as possible "
+        "sample swaps or annotation errors. Without annotation, a prediction is shown only when the "
+        "scores form two clearly separated groups. Pregnancy, hormone therapy and some cancers "
+        "(e.g. prostate, for KLK3) can shift the score."
     ),
     "qc_flags": (
         "Vendor quality flags for each measurement in study samples, per panel. Assay QC is Olink's "
@@ -249,6 +282,13 @@ _HELP_TEXT: dict[str, str] = {
     ),
 }
 
+# Titles for plots rendered from another plot's data (see _DATA_KEY_MAP)
+_DERIVED_PLOT_TITLES = {
+    "plate_signal": "Sample Signal by Plate",
+    "dilution_cv": "CV by Dilution",
+    "dilution_norm_scale": "Normalization Scale by Dilution",
+}
+
 _SECTION_ORDER = [
     ("Quality Overview", ["lod_comparison", "qc_summary"]),
     ("Signal & Distribution", ["distribution", "lod_analysis"]),
@@ -258,6 +298,8 @@ _SECTION_ORDER = [
     ("Normalization QC", ["norm_scale"]),
     ("Variability", ["cv_distribution", "replicate_cv", "plate_cv"]),
     ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags"]),
+    ("Pre-analytical & Sample Identity", ["preanalytical", "sex_check"]),
+    ("Dilution QC", ["dilution_cv", "dilution_norm_scale"]),
     ("Assay QC", ["iqr_median_qc", "uniprot_duplicates"]),
     ("SomaScan QC", ["col_check"]),
     ("Differential Expression", ["differential_expression"]),
@@ -1130,6 +1172,21 @@ def _render_summary_table(
         top = ", ".join(f"{pc} {r2:.0%}" for pc, r2 in zip(batch.pc_labels[:2], batch.plate_r2[:2]))
         rows.append(_summary_row("", "Variance explained by plate", top))
 
+    pre = plot_data.get("preanalytical")
+    sex = plot_data.get("sex_check")
+    if isinstance(pre, PreanalyticalData) or isinstance(sex, SexCheckData):
+        rows.append(_summary_group("Pre-analytical &amp; Identity"))
+        if isinstance(pre, PreanalyticalData):
+            for name, ids in pre.outliers.items():
+                label = "Possible hemolysis" if name == "hemolysis" else "Possible platelet activation"
+                rows.append(_summary_row("", f"{label} (indicator outliers)", f"{len(ids)} / {len(pre.sample_ids)}"))
+        if isinstance(sex, SexCheckData):
+            n_m, n_f = sex.predicted.count("male"), sex.predicted.count("female")
+            rows.append(_summary_row("", "Protein-predicted sex (F / M)", f"{n_f} / {n_m}"))
+            if any(sex.annotated):
+                dot = _status_dot("green") if not sex.mismatches else _status_dot("amber")
+                rows.append(_summary_row(dot, "Sex mismatches vs annotation", str(len(sex.mismatches))))
+
     # --- QC Status (Olink only) ---
     qc_flags = plot_data.get("qc_flags")
     worst = qc_flags.sample_worst if isinstance(qc_flags, QcFlagData) else {}
@@ -1469,6 +1526,10 @@ def qc_report(
         "batch_effect": (BatchEffectData, R.render_batch_effect),
         "plate_signal": (BatchEffectData, R.render_plate_signal),
         "qc_flags": (QcFlagData, R.render_qc_flags),
+        "preanalytical": (PreanalyticalData, R.render_preanalytical),
+        "dilution_cv": (DilutionQcData, R.render_dilution_cv),
+        "dilution_norm_scale": (DilutionQcData, R.render_dilution_norm_scale),
+        "sex_check": (SexCheckData, R.render_sex_check),
     }
 
     # Determine display order from _SECTION_ORDER so first-displayed plot gets plotly.js
@@ -1486,6 +1547,8 @@ def qc_report(
         "sample_completeness": "data_completeness",
         "missing_frequency_distribution": "data_completeness",
         "plate_signal": "batch_effect",
+        "dilution_cv": "dilution_qc",
+        "dilution_norm_scale": "dilution_qc",
     }
 
     # Handle combined dimensionality reduction (PCA + t-SNE in one panel with toggle)
@@ -1576,7 +1639,7 @@ def qc_report(
         js = "cdn" if key == first_key else False
         plot_html = fig.to_html(full_html=False, include_plotlyjs=js, default_height=plot_height)
         if key in _DATA_KEY_MAP:
-            title = key.replace("_", " ").title()
+            title = _DERIVED_PLOT_TITLES.get(key, key.replace("_", " ").title())
         else:
             title = getattr(data, "title", key.replace("_", " ").title())
         rendered[key] = (title, plot_html)  # type: ignore[attr-defined]
@@ -1802,6 +1865,10 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("batch_effect", "half"),
             ("plate_signal", "half"),
             ("qc_flags", "full"),
+            ("preanalytical", "half"),
+            ("sex_check", "half"),
+            ("dilution_cv", "half"),
+            ("dilution_norm_scale", "half"),
             ("iqr_median_qc", "half"),
             ("norm_scale", "half"),
             ("col_check", "half"),
@@ -1822,6 +1889,10 @@ _SPLIT_PLOT_HEIGHTS = {
     "replicate_cv": 380,
     "batch_effect": 360,
     "plate_signal": 360,
+    "preanalytical": 380,
+    "sex_check": 380,
+    "dilution_cv": 380,
+    "dilution_norm_scale": 380,
     "sample_completeness": 360,
     "iqr_median_qc": 360,
     "norm_scale": 360,
@@ -1989,6 +2060,10 @@ def qc_report_split(
         "batch_effect": (BatchEffectData, R.render_batch_effect),
         "plate_signal": (BatchEffectData, R.render_plate_signal),
         "qc_flags": (QcFlagData, R.render_qc_flags),
+        "preanalytical": (PreanalyticalData, R.render_preanalytical),
+        "dilution_cv": (DilutionQcData, R.render_dilution_cv),
+        "dilution_norm_scale": (DilutionQcData, R.render_dilution_norm_scale),
+        "sex_check": (SexCheckData, R.render_sex_check),
     }
 
     written: list[str] = []
@@ -1998,6 +2073,8 @@ def qc_report_split(
         "sample_completeness": "data_completeness",
         "missing_frequency_distribution": "data_completeness",
         "plate_signal": "batch_effect",
+        "dilution_cv": "dilution_qc",
+        "dilution_norm_scale": "dilution_qc",
     }
 
     # Render each plot as a standalone HTML file
@@ -2016,7 +2093,7 @@ def qc_report_split(
         plot_height = f"{fig.layout.height}px"
         plot_html = fig.to_html(full_html=False, include_plotlyjs=False, default_height=plot_height)
         if key in _DATA_KEY_MAP:
-            title = key.replace("_", " ").title()
+            title = _DERIVED_PLOT_TITLES.get(key, key.replace("_", " ").title())
         else:
             title = getattr(data, "title", key.replace("_", " ").title())
         help_html = _HELP_TEXT.get(key, "")
