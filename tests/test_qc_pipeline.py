@@ -365,6 +365,21 @@ class TestQcReport:
         assert "Dataset Summary" in summary
         assert "Features (assays)" in summary
 
+    def test_split_report_embedding_layout(self, tmp_path):
+        from plotly.offline import get_plotlyjs_version
+
+        embedded = qc_report_split(_make_olink_dataset(), tmp_path / "embedded", no_border=True)
+        page = (embedded / "distribution.html").read_text()
+        # plotly.js matches the installed plotly package, not a pinned old version
+        assert f"plotly-{get_plotlyjs_version()}.min.js" in page
+        # Compact, content-height layout for iframes; no fixed 1100px card wrapper
+        assert "height: auto; min-height: 0;" in page
+        assert "padding:28px 36px" not in page
+        assert '"t":40' in page.replace(" ", "")
+
+        bordered = qc_report_split(_make_olink_dataset(), tmp_path / "bordered", no_border=False)
+        assert "padding:28px 36px" in (bordered / "distribution.html").read_text()
+
     def test_somascan_report(self, tmp_path):
         ds = _make_somascan_dataset()
         output = tmp_path / "somascan_report.html"

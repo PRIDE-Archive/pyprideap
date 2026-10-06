@@ -1627,19 +1627,40 @@ def qc_report(
     return output
 
 
+_EMBED_CSS = """\
+    html, body { background: transparent; height: auto; min-height: 0; }
+    .plot-card { border: none; box-shadow: none; padding: 0; margin: 0; background: transparent; }
+    .plot-card:hover { box-shadow: none; }
+"""
+
+# Top margin for split plots whose Plotly title is stripped (the card header
+# already shows it); Plotly's default 100px leaves a blank band above the plot.
+_SPLIT_PLOT_TOP_MARGIN = 40
+
+
+def _plotlyjs_cdn_url() -> str:
+    """CDN URL for the plotly.js version bundled with the installed plotly package."""
+    from plotly.offline import get_plotlyjs_version
+
+    return f"https://cdn.plot.ly/plotly-{get_plotlyjs_version()}.min.js"
+
+
 def _wrap_standalone_html(
     title: str,
     body: str,
     include_plotlyjs: bool = True,
     no_border: bool = False,
 ) -> str:
-    """Wrap plot HTML in a standalone page with PRIDE styling."""
-    plotly_cdn = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>\n' if include_plotlyjs else ""
-    border_override = (
-        "    .plot-card { border: none; box-shadow: none; }\n    .plot-card:hover { box-shadow: none; }\n"
-        if no_border
-        else ""
-    )
+    """Wrap plot HTML in a standalone page with PRIDE styling.
+
+    With *no_border* the page is laid out for embedding in an iframe (as on
+    the PRIDE dataset pages, which supply their own card): no card chrome,
+    minimal padding, transparent background and an auto-height body, so the
+    page height is exactly its content height.
+    """
+    plotly_cdn = f'<script src="{_plotlyjs_cdn_url()}"></script>\n' if include_plotlyjs else ""
+    border_override = _EMBED_CSS if no_border else ""
+    wrapper_style = "padding:8px 12px;" if no_border else "max-width:1100px;margin:0 auto;padding:28px 36px;"
     return (
         f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         f'    <meta charset="utf-8">\n'
@@ -1648,7 +1669,7 @@ def _wrap_standalone_html(
         f"    {plotly_cdn}"
         f"    <style>\n{_CSS}{border_override}    </style>\n"
         f"</head>\n<body>\n"
-        f'<div style="max-width:1100px;margin:0 auto;padding:28px 36px;">\n'
+        f'<div class="standalone-wrapper" style="{wrapper_style}">\n'
         f"{body}\n"
         f"</div>\n"
         f"    <script>\n{_JS}    </script>\n"
@@ -1675,7 +1696,9 @@ def qc_report_split(
     output_dir : str | Path
         Directory to write individual HTML files into. Created if it doesn't exist.
     no_border : bool
-        If True, remove card borders and shadows from standalone plot files.
+        If True, lay files out for iframe embedding (e.g. PRIDE dataset pages):
+        no card border/shadow/padding, minimal page padding, transparent
+        background and content-height body.
     strip_plot_title : bool
         Remove the Plotly figure title from each plot (default ``True``).
 
@@ -1734,7 +1757,7 @@ def qc_report_split(
             continue
         fig = renderer(data)  # type: ignore[operator]
         if strip_plot_title:
-            fig.update_layout(title="")
+            fig.update_layout(title="", margin_t=_SPLIT_PLOT_TOP_MARGIN)
         current_height = fig.layout.height
         if current_height is None:
             fig.update_layout(height=500)
@@ -1769,12 +1792,16 @@ def qc_report_split(
         if pca_data is not None:
             pca_fig = R.render_pca(pca_data)
             pca_fig.update_layout(title="" if strip_plot_title else pca_data.title, height=500)
+            if strip_plot_title:
+                pca_fig.update_layout(margin_t=_SPLIT_PLOT_TOP_MARGIN)
             pca_html = pca_fig.to_html(full_html=False, include_plotlyjs=False, default_height="500px")
             dimred_parts.append(f'<div class="dimred-panel" id="dimred-pca">{pca_html}</div>')
 
         if umap_data is not None:
             tsne_fig = R.render_tsne(umap_data)
             tsne_fig.update_layout(title="" if strip_plot_title else umap_data.title, height=500)
+            if strip_plot_title:
+                tsne_fig.update_layout(margin_t=_SPLIT_PLOT_TOP_MARGIN)
             tsne_html = tsne_fig.to_html(full_html=False, include_plotlyjs=False, default_height="500px")
             hidden = ' style="display:none"' if pca_data is not None else ""
             dimred_parts.append(f'<div class="dimred-panel" id="dimred-tsne"{hidden}>{tsne_html}</div>')
