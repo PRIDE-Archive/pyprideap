@@ -505,3 +505,79 @@ class TestCvDefinitions:
         p1 = ds.expression.iloc[:5]
         expected_p1 = ((2**p1).std() / (2**p1).mean()).tolist()
         assert result.intra_cv[:2] == pytest.approx(expected_p1)
+
+
+# ---------------------------------------------------------------------------
+# Split-report layout manifest and summary columns
+# ---------------------------------------------------------------------------
+
+
+class TestSplitLayout:
+    def test_manifest_lists_written_files_in_complete_rows(self, tmp_path):
+        out = qc_report_split(_make_olink_dataset(), tmp_path / "split")
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert manifest["schema"] == 1
+        assert [t["id"] for t in manifest["tabs"]][0] == "overview"
+        for tab in manifest["tabs"]:
+            half_run = 0
+            for item in tab["items"]:
+                assert (out / item["file"]).exists()
+                if item["width"] == "half":
+                    half_run += 1
+                else:
+                    assert half_run % 2 == 0, f"orphan half-width plot before {item['key']}"
+                    half_run = 0
+            assert half_run % 2 == 0
+        placed = {i["key"] for t in manifest["tabs"] for i in t["items"]}
+        assert "summary" in placed
+        assert not placed & set(manifest["folded_into_summary"])
+
+    def test_manifest_widens_orphan_half_plot(self):
+        from pyprideap.viz.qc.report import _build_split_manifest
+
+        manifest = _build_split_manifest(["summary", "lod_analysis", "distribution"], "olink_explore")
+        widths = {i["key"]: i["width"] for t in manifest["tabs"] for i in t["items"]}
+        assert widths == {"summary": "full", "lod_analysis": "full", "distribution": "full"}
+
+    def test_summary_two_columns_split_at_group(self, tmp_path):
+        out = qc_report_split(_make_olink_dataset(), tmp_path / "split")
+        summary = (out / "summary.html").read_text()
+        assert '<div class="summary-columns">' in summary
+        assert summary.count('<table class="summary-table">') == 2
+
+    def test_split_summary_columns_balances_groups(self):
+        from pyprideap.viz.qc.report import _split_summary_columns, _summary_group, _summary_row
+
+        rows = [_summary_group("A")] + [_summary_row("", "a", "1")] * 5
+        rows += [_summary_group("B")] + [_summary_row("", "b", "1")] * 2
+        rows += [_summary_group("C")] + [_summary_row("", "c", "1")] * 2
+        left, right = _split_summary_columns(rows, 2)
+        assert left[0] == _summary_group("A") and right[0] == _summary_group("B")
+        assert left + right == rows
+
+
+class TestSplitPlotTweaks:
+    def test_completeness_hides_ticks_for_many_samples(self):
+        from pyprideap.viz.qc.compute import DataCompletenessData
+        from pyprideap.viz.qc.render import render_sample_completeness
+
+        n = 60
+        data = DataCompletenessData(
+            sample_ids=[f"S{i}" for i in range(n)], above_lod_rate=[0.5] * n, below_lod_rate=[0.5] * n
+        )
+        fig = render_sample_completeness(data)
+        assert fig.layout.xaxis.showticklabels is False
+
+    def test_distribution_summary_legend_only_bands(self):
+        from pyprideap.viz.qc.compute import DistributionData
+        from pyprideap.viz.qc.render import render_distribution
+
+        n = 30
+        data = DistributionData(
+            sample_ids=[f"S{i}" for i in range(n)],
+            sample_values=[[float(j % 7) for j in range(50)] for _ in range(n)],
+            xlabel="NPX Value",
+        )
+        fig = render_distribution(data)
+        in_legend = [t.name for t in fig.data if t.showlegend is not False]
+        assert in_legend == ["5th–95th percentile", "IQR (25th–75th)", "Median"]
