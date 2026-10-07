@@ -104,6 +104,7 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
     # Build clean column names, disambiguating repeated base names
     rename: dict[str, str] = {}
     seen_counts: dict[str, int] = {}
+    factor_columns: list[str] = []
     for col in df.columns:
         # Extract short name from characteristics[X] or factor value[X]
         m = re.match(r"(characteristics|factor value)\[(.+?)\]", col)
@@ -121,8 +122,13 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
             rename[col] = base
         else:
             rename[col] = f"{base} {count}"
+        if m and m.group(1) == "factor value":
+            factor_columns.append(rename[col])
 
     renamed_df = pd.DataFrame(df.rename(columns=rename))
+    # Factor value columns are the study's declared design variables; their
+    # (shortened) names are kept so group detection can prefer them.
+    renamed_df.attrs["factor_value_columns"] = factor_columns
     logger.debug("SDRF columns renamed: %d mappings applied", len(rename))
     return cast(pd.DataFrame, renamed_df)
 
@@ -171,21 +177,33 @@ def normalize_sample_id(value: object) -> str:
     return _PAD_ID_RE.sub("", str(value).strip())
 
 
-def select_biological_group_column(frame: pd.DataFrame) -> str | None:
+def _base_column_name(name: str) -> str:
+    """Column name without the " 2", " 3" suffix added for repeated SDRF columns."""
+    return re.sub(r" \d+$", "", name.lower().strip())
+
+
+def select_biological_group_column(frame: pd.DataFrame, factor_columns: list[str] | None = None) -> str | None:
     """Pick the best case/control-like column from SDRF or sample metadata.
 
-    Uses :func:`get_grouping_columns` (2–10 groups, ≥3 samples each) and
-    prefers disease / phenotype / treatment / group over other covariates.
-    Sex, plate, and QC flags are never treated as case/control.
+    Uses :func:`get_grouping_columns` (2–10 groups, ≥3 samples each). SDRF
+    ``factor value[...]`` columns (*factor_columns*) come first, as the study's
+    declared design variables; otherwise disease / phenotype / treatment /
+    group are preferred over other covariates, matching repeated columns by
+    base name (``disease 2`` counts as ``disease``). Sex, plate, and QC flags
+    are never treated as case/control.
     """
     candidates = get_grouping_columns(frame)
     if not candidates:
         return None
 
-    by_lower = {c.lower().strip(): c for c in candidates}
+    for col in factor_columns or []:
+        if col in candidates and _base_column_name(col) not in _NOT_CASE_CONTROL:
+            return col
+
     for preferred in _BIOLOGICAL_GROUP_PRIORITY:
-        if preferred in by_lower:
-            return by_lower[preferred]
+        for col in candidates:
+            if _base_column_name(col) == preferred:
+                return col
     return None
 
 
@@ -228,7 +246,10 @@ def resolve_biological_groups(dataset: AffinityDataset) -> tuple[pd.Series, str]
         ``(labels, column_name)`` where ``labels`` has one value per sample
         (NaN if unknown). ``None`` if no usable case/control split is found.
     """
-    column = select_biological_group_column(dataset.samples)
+    factor_columns = dataset.metadata.get("sdrf_factor_columns")
+    column = select_biological_group_column(
+        dataset.samples, factor_columns if isinstance(factor_columns, list) else None
+    )
     if column is not None:
         labels = dataset.samples[column].astype("object")
         logger.debug("Biological groups from column %s", column)
@@ -351,4 +372,9 @@ def merge_sdrf(
         sdrf_join_col,
     )
 
-    return replace(dataset, samples=merged)
+    metadata = dict(dataset.metadata)
+    metadata["sdrf_merge"] = {"matched": int(matched), "total": int(len(merged))}
+    factor_columns = [c for c in sdrf.attrs.get("factor_value_columns", []) if c in new_cols]
+    if factor_columns:
+        metadata["sdrf_factor_columns"] = factor_columns
+    return replace(dataset, samples=merged, metadata=metadata)

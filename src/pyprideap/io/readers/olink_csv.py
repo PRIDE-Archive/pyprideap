@@ -10,8 +10,8 @@ from pyprideap.core import AffinityDataset, Platform
 
 logger = logging.getLogger(__name__)
 
-_SAMPLE_COLS = {"SampleID", "SampleName", "PlateID", "WellID", "SampleType", "SampleQC", "PlateQC"}
-_FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "LOD", "MissingFreq"}
+_SAMPLE_COLS = {"SampleID", "SampleName", "SampleRun", "PlateID", "WellID", "SampleType", "SampleQC", "PlateQC"}
+_FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "LOD", "MissingFreq", "Normalization"}
 _REQUIRED_COLS = {"SampleID", "OlinkID", "NPX"}
 
 # OlinkID prefix → Platform mapping
@@ -49,6 +49,27 @@ def _detect_sample_key(df: pd.DataFrame, *, source: str = "") -> str:
             )
     logger.debug("Sample key selected: %s", sample_key)
     return sample_key
+
+
+def _sample_run_key(df: pd.DataFrame, sample_key: str) -> tuple[pd.DataFrame, str]:
+    """Give each plate run of a sample its own row (bridging / replicate samples).
+
+    Multi-plate Olink studies often run the same samples on every plate to
+    bridge them. Keyed by sample ID alone, those runs would be merged and one
+    of them silently dropped. When a sample ID appears on more than one plate,
+    rows are keyed by a ``SampleRun`` column ("<sample> @ <plate>") instead;
+    ``SampleID`` keeps the original identifier.
+    """
+    if "PlateID" not in df.columns:
+        return df, sample_key
+    plates_per_sample = df.groupby(sample_key)["PlateID"].nunique()
+    n_multi = int((plates_per_sample > 1).sum())
+    if n_multi == 0:
+        return df, sample_key
+    logger.debug("%d samples measured on more than one plate; keying rows by SampleRun", n_multi)
+    df = df.copy()
+    df["SampleRun"] = df[sample_key].astype(str) + " @ " + df["PlateID"].astype(str)
+    return df, "SampleRun"
 
 
 def _warn_data_quality(dataset: AffinityDataset, *, source: str = "") -> None:
@@ -140,11 +161,12 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")
 
     sample_key = _detect_sample_key(df, source=path.name)
+    df, sample_key = _sample_run_key(df, sample_key)
 
     # Numeric columns can arrive as text when a file was re-arranged by hand and
     # some rows are shifted; unparsable values become NaN instead of breaking LOD
     # comparisons downstream.
-    for col in ("NPX", "LOD", "LODNPX"):
+    for col in ("NPX", "LOD", "LODNPX", "PlateLOD"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -175,7 +197,8 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     # Build per-sample x per-assay LOD matrix. Newer Explore HT / Reveal exports
     # carry both LODNPX (LOD on the NPX scale) and LOD (count-based); NPX must be
     # compared with LODNPX.
-    lod_col = "LODNPX" if "LODNPX" in df.columns else ("LOD" if "LOD" in df.columns else None)
+    # (NPX Signature exports for Olink Target name it PlateLOD)
+    lod_col = next((c for c in ("LODNPX", "LOD", "PlateLOD") if c in df.columns), None)
     if lod_col is not None:
         logger.debug("LOD column %s present, building LOD matrix", lod_col)
         lod_matrix = df.pivot_table(

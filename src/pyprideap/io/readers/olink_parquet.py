@@ -9,10 +9,20 @@ from pyprideap.io.readers.olink_csv import (
     _detect_olink_platform,
     _detect_sample_key,
     _qc_flag_matrices,
+    _sample_run_key,
     _warn_data_quality,
 )
 
-_SAMPLE_COLS = {"SampleID", "SampleName", "SampleType", "WellID", "PlateID", "SampleQC", "DataAnalysisRefID"}
+_SAMPLE_COLS = {
+    "SampleID",
+    "SampleName",
+    "SampleRun",
+    "SampleType",
+    "WellID",
+    "PlateID",
+    "SampleQC",
+    "DataAnalysisRefID",
+}
 _FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "Block", "Normalization"}
 _REQUIRED_COLS = {"SampleID", "OlinkID", "NPX"}
 
@@ -28,6 +38,7 @@ def read_olink_parquet(path: str | Path) -> AffinityDataset:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")
 
     sample_key = _detect_sample_key(df, source=path.name)
+    df, sample_key = _sample_run_key(df, sample_key)
 
     sample_cols = [c for c in df.columns if c in _SAMPLE_COLS]
     samples = df[sample_cols].drop_duplicates(subset=[sample_key]).reset_index(drop=True)

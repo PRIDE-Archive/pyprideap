@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Hashable
 from dataclasses import dataclass, field, replace
+from html import escape as html_escape
 from typing import cast
 
 import numpy as np
@@ -289,6 +291,9 @@ def _sample_id_col(dataset: AffinityDataset) -> str:
         if col in dataset.samples.columns:
             if dataset.samples[col].nunique() == len(dataset.samples):
                 return col
+    # Samples run on several plates (bridging) carry a unique SampleRun label
+    if "SampleRun" in dataset.samples.columns and dataset.samples["SampleRun"].nunique() == len(dataset.samples):
+        return "SampleRun"
     # SampleID exists but is not unique — try SampleName if fully populated
     if "SampleName" in dataset.samples.columns:
         non_empty = dataset.samples["SampleName"].astype(str).str.strip().replace({"": pd.NA}).dropna()
@@ -2004,6 +2009,327 @@ def compute_sex_check(dataset: AffinityDataset) -> SexCheckData | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Bridging samples and reanalysis readiness
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BridgeAgreementData:
+    """Agreement of samples measured on more than one plate (bridging / replicate runs)."""
+
+    n_samples: int
+    plates: list[str]
+    median_offset: float  # median over sample-assays of (later plate - reference plate)
+    offset_iqr: tuple[float, float]
+    assay_offsets: list[float]  # per-assay median offset
+    median_correlation: float  # per-sample correlation between its runs
+    value_label: str  # "NPX" or "log10 RFU"
+
+
+def compute_bridge_agreement(dataset: AffinityDataset) -> BridgeAgreementData | None:
+    """Plate-to-plate offset for samples measured on several plates.
+
+    Each bridging sample's values on a plate are compared with the same sample
+    on the first plate where it appears (Olink NPX, SomaScan log10 RFU). After
+    a successful bridge normalisation the offsets should be centred on 0.
+    """
+    plate_col = _plate_column(dataset.samples)
+    id_col = next((c for c in ("SampleID", "SampleId") if c in dataset.samples.columns), None)
+    if plate_col is None or id_col is None:
+        return None
+    ids = dataset.samples[id_col].astype(str)
+    plates = dataset.samples[plate_col].astype(str)
+    multi = ids.groupby(ids).transform(lambda s: plates[s.index].nunique()) > 1
+    if not multi.any():
+        return None
+
+    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    if dataset.platform == Platform.SOMASCAN:
+        numeric = np.log10(numeric.where(numeric > 0))
+        value_label = "log10 RFU"
+    else:
+        value_label = "NPX"
+
+    diffs: list[pd.Series] = []
+    correlations: list[float] = []
+    for _sid, rows in ids[multi].groupby(ids[multi]):
+        idx = list(rows.index)
+        order = sorted(idx, key=lambda i: plates[i])
+        ref = numeric.loc[order[0]]
+        for other in order[1:]:
+            d = (numeric.loc[other] - ref).dropna()
+            if len(d):
+                diffs.append(d)
+            ok = ref.notna() & numeric.loc[other].notna()
+            if ok.sum() >= 3:
+                correlations.append(float(np.corrcoef(ref[ok], numeric.loc[other][ok])[0, 1]))
+    if not diffs:
+        return None
+    all_diffs = pd.concat(diffs)
+    per_assay = pd.concat(diffs, axis=1).median(axis=1).dropna()
+    return BridgeAgreementData(
+        n_samples=int(ids[multi].nunique()),
+        plates=sorted(plates[multi].unique()),
+        median_offset=round(float(all_diffs.median()), 3),
+        offset_iqr=(round(float(all_diffs.quantile(0.25)), 3), round(float(all_diffs.quantile(0.75)), 3)),
+        assay_offsets=per_assay.round(3).tolist(),
+        median_correlation=round(float(np.median(correlations)), 3) if correlations else float("nan"),
+        value_label=value_label,
+    )
+
+
+# Median plate offset of bridging samples above which the card notes that the
+# deposited values are not bridge-normalised (Olink NPX / SomaScan log10 RFU)
+_BRIDGE_OFFSET_NOTE = 0.2
+
+
+@dataclass
+class ReadinessItem:
+    category: str
+    status: str  # "available" | "partial" | "missing" | "n/a"
+    detail: str
+    impact: str = ""  # what cannot be checked or reproduced when not available
+
+
+@dataclass
+class ReadinessData:
+    """Which metadata needed to interpret or reanalyse the data is present."""
+
+    items: list[ReadinessItem]
+    title: str = "Reanalysis Readiness"
+
+    @property
+    def n_available(self) -> int:
+        return sum(1 for i in self.items if i.status == "available")
+
+    @property
+    def n_applicable(self) -> int:
+        return sum(1 for i in self.items if i.status != "n/a")
+
+
+def _first_column(frame: pd.DataFrame, names: tuple[str, ...]) -> str | None:
+    lower = {c.lower(): c for c in frame.columns}
+    return next((lower[n] for n in names if n in lower), None)
+
+
+def _non_empty_values(series: pd.Series) -> pd.Series:
+    vals = series.astype(str).str.strip()
+    return vals[~vals.str.lower().isin({"", "nan", "none", "not available", "not applicable", "na"})]
+
+
+def compute_readiness(dataset: AffinityDataset, results: dict[str, object] | None = None) -> ReadinessData:
+    """Check the metadata needed to interpret the QC and reproduce the analyses.
+
+    Each item reports whether the information is available in the data file or
+    a merged SDRF, and what cannot be checked without it. There is no overall
+    pass/fail: the card states what is known and what is not.
+    """
+    from pyprideap.io.readers.sdrf import resolve_biological_groups
+    from pyprideap.processing.filtering import filter_controls
+
+    results = results or {}
+    samples = dataset.samples
+    items: list[ReadinessItem] = []
+
+    # 1. Sample types (controls)
+    st_col = _first_column(samples, ("sampletype", "sample type"))
+    if st_col is not None and len(_non_empty_values(samples[st_col])):
+        counts = _non_empty_values(samples[st_col]).value_counts()
+        detail = ", ".join(f"{html_escape(str(k))}: {v}" for k, v in counts.head(6).items())
+        items.append(ReadinessItem("Sample types (controls)", "available", detail))
+    else:
+        items.append(
+            ReadinessItem(
+                "Sample types (controls)",
+                "missing",
+                "No SampleType column and no SDRF sample type",
+                "Control samples cannot be separated from study samples: technical CV and "
+                "negative-control LOD are unavailable, and controls enter every plot.",
+            )
+        )
+
+    # 2. Plates / batches
+    plate_col = _plate_column(samples)
+    n_plates = int(samples[plate_col].nunique()) if plate_col else 0
+    if plate_col:
+        items.append(ReadinessItem("Plates / batches", "available", f"{n_plates} plate(s)"))
+    else:
+        items.append(
+            ReadinessItem("Plates / batches", "missing", "No plate column", "Batch (plate) effects cannot be assessed.")
+        )
+
+    # 3. Limit of detection
+    _lod, lod_source = resolve_lod_with_source(dataset)
+    if lod_source:
+        items.append(ReadinessItem("Limit of detection", "available", lod_source))
+    else:
+        items.append(
+            ReadinessItem(
+                "Limit of detection",
+                "missing",
+                "No LOD column, negative controls, buffers or reference LOD",
+                "Detectability cannot be assessed; values near the noise floor cannot be told apart.",
+            )
+        )
+
+    # 4. Vendor QC flags
+    flag_labels = {"assay_qc_matrix": "assay QC per measurement", "sample_qc_matrix": "sample QC per measurement"}
+    flags = [c for c in ("SampleQC", "QC_Warning", "RowCheck", "HybControlNormScale") if c in samples.columns] + [
+        label for key, label in flag_labels.items() if key in dataset.metadata
+    ]
+    if "ColCheck" in dataset.features.columns:
+        flags.append("ColCheck")
+    if flags:
+        items.append(ReadinessItem("Vendor QC flags", "available", ", ".join(sorted(set(flags)))))
+    else:
+        items.append(
+            ReadinessItem(
+                "Vendor QC flags",
+                "missing",
+                "No sample or assay QC flags",
+                "Measurements the vendor software flagged as failed cannot be identified.",
+            )
+        )
+
+    # 5. SDRF linkage
+    merge = dataset.metadata.get("sdrf_merge")
+    if isinstance(merge, dict):
+        matched, total = merge.get("matched", 0), merge.get("total", len(samples))
+        status = "available" if matched == total else ("partial" if matched else "missing")
+        items.append(
+            ReadinessItem(
+                "SDRF linked to samples",
+                status,
+                f"{matched} of {total} samples matched",
+                "" if status == "available" else "Unmatched samples have no annotation (groups, sex, age).",
+            )
+        )
+    else:
+        items.append(
+            ReadinessItem(
+                "SDRF linked to samples",
+                "missing",
+                "No SDRF provided or found",
+                "Sample annotation (groups, covariates, replicates) is not available to the QC.",
+            )
+        )
+
+    # 6. Study design groups
+    resolved = resolve_biological_groups(filter_controls(dataset))
+    if resolved is not None:
+        labels, column = resolved
+        counts = _non_empty_values(labels).value_counts()
+        factor_columns = dataset.metadata.get("sdrf_factor_columns")
+        is_factor = isinstance(factor_columns, list) and column in factor_columns
+        base_name = re.sub(r" \d+$", "", column)
+        label = f"factor value[{base_name}]" if is_factor else column
+        detail = f"{html_escape(label)}: " + ", ".join(f"{html_escape(str(k))} {v}" for k, v in counts.items())
+        status = "partial" if column == "sample identifier" else "available"
+        impact = "Groups inferred from sample names, not from annotation." if status == "partial" else ""
+        items.append(ReadinessItem("Study groups", status, detail, impact))
+    else:
+        items.append(
+            ReadinessItem(
+                "Study groups",
+                "missing",
+                "No grouping column (e.g. disease, factor value) with 2–10 groups",
+                "The comparisons reported in the publication cannot be related to the samples; "
+                "within-group precision and volcano plots are not computed.",
+            )
+        )
+
+    # 7. Replicates / bridging
+    bridge = results.get("bridge_agreement")
+    rep_col = _first_column(samples, ("comment[technical replicate]", "technical replicate"))
+    if isinstance(bridge, BridgeAgreementData):
+        offset_note = (
+            f"The same samples differ by {bridge.median_offset:+.2f} {bridge.value_label} between plates: "
+            "the deposited values are not bridge-normalised, so plate and any groups confined to one "
+            "plate are confounded."
+            if abs(bridge.median_offset) > _BRIDGE_OFFSET_NOTE
+            else ""
+        )
+        items.append(
+            ReadinessItem(
+                "Bridging / replicate samples",
+                "available",
+                f"{bridge.n_samples} samples measured on {len(bridge.plates)} plates; "
+                f"median plate offset {bridge.median_offset:+.2f} {bridge.value_label}, "
+                f"median correlation between runs {bridge.median_correlation:.3f}",
+                offset_note,
+            )
+        )
+    elif rep_col is not None and samples[rep_col].nunique() > 1:
+        items.append(ReadinessItem("Bridging / replicate samples", "available", f"SDRF {html_escape(rep_col)}"))
+    elif n_plates > 1:
+        items.append(
+            ReadinessItem(
+                "Bridging / replicate samples",
+                "missing",
+                f"{n_plates} plates, no sample identifiable on more than one",
+                "Whether plates were bridged, and how well, cannot be verified.",
+            )
+        )
+    else:
+        items.append(ReadinessItem("Bridging / replicate samples", "n/a", "Single plate"))
+
+    # 8. Normalisation applied to the deposited values
+    norm: list[str] = []
+    for col in samples.columns:
+        if "normalization" in col.lower() or "normalisation" in col.lower():
+            vals = _non_empty_values(samples[col]).unique()
+            norm.extend(f"{col}: {v}" for v in vals[:3])
+    if "Normalization" in dataset.features.columns:
+        norm.extend(f"Normalization: {v}" for v in _non_empty_values(dataset.features["Normalization"]).unique()[:3])
+    for key in ("ProcessSteps", "NormalizationAlgorithm"):
+        if dataset.metadata.get(key):
+            norm.append(f"{key}: {dataset.metadata[key]}")
+    if norm:
+        items.append(ReadinessItem("Normalisation recorded", "available", html_escape("; ".join(norm[:4]))))
+    else:
+        items.append(
+            ReadinessItem(
+                "Normalisation recorded",
+                "missing",
+                "No normalisation method in the file or SDRF",
+                "Which normalisation (e.g. bridging, intensity, ANML) produced the values is unknown.",
+            )
+        )
+
+    # 9. Covariates
+    have = [c for c in ("sex", "age") if _first_column(samples, (c, f"characteristics[{c}]")) is not None]
+    if len(have) == 2:
+        items.append(ReadinessItem("Sex and age", "available", "sex, age"))
+    else:
+        items.append(
+            ReadinessItem(
+                "Sex and age",
+                "partial" if have else "missing",
+                ", ".join(have) if have else "Neither annotated",
+                "Common covariates cannot be checked (e.g. protein-predicted sex vs annotation, age effects).",
+            )
+        )
+
+    # 10. Sample matrix
+    matrix_col = _first_column(samples, ("sample matrix", "samplematrix", "organism part"))
+    if matrix_col is not None and len(_non_empty_values(samples[matrix_col])):
+        matrix_counts = _non_empty_values(samples[matrix_col]).value_counts()
+        matrices = ", ".join(html_escape(str(k)) for k in matrix_counts.index[:3])
+        items.append(ReadinessItem("Sample matrix", "available", matrices))
+    else:
+        items.append(
+            ReadinessItem(
+                "Sample matrix",
+                "missing",
+                "Not annotated",
+                "Plasma, serum, CSF or other matrices cannot be distinguished when comparing datasets.",
+            )
+        )
+
+    return ReadinessData(items=items)
+
+
 def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     """Compute all applicable QC plot data for the dataset."""
     logger.debug(
@@ -2046,6 +2372,9 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
 
     # Technology-agnostic QC (MPI, dynamic range, rank concordance)
     results.update(compute_agnostic_qc(dataset))
+
+    results["bridge_agreement"] = compute_bridge_agreement(dataset)
+    results["readiness"] = compute_readiness(dataset, results)
 
     available = {k: v for k, v in results.items() if v is not None}
     logger.debug("compute_all: %d/%d plots computed successfully", len(available), len(results))

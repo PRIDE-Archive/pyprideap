@@ -12,6 +12,7 @@ from pyprideap.core import AffinityDataset
 from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
     BatchEffectData,
+    BridgeAgreementData,
     ColCheckData,
     CorrelationData,
     CvDistributionData,
@@ -28,6 +29,7 @@ from pyprideap.viz.qc.compute import (
     PreanalyticalData,
     QcFlagData,
     QcLodSummaryData,
+    ReadinessData,
     ReplicateCvData,
     SexCheckData,
     UmapData,
@@ -40,6 +42,14 @@ from pyprideap.viz.qc.compute import (
 logger = logging.getLogger(__name__)
 
 _HELP_TEXT: dict[str, str] = {
+    "readiness": (
+        "Whether the information needed to interpret this QC and to reproduce the published analyses "
+        "is present in the data file or a linked SDRF: sample types (controls), plates, limit of "
+        "detection, vendor QC flags, SDRF linkage, study groups, bridging or replicate samples, the "
+        "normalisation applied to the deposited values, sex and age, and the sample matrix. Each "
+        "missing item says what cannot be checked without it. There is no overall pass or fail; "
+        "items marked partial are present for some samples or were inferred."
+    ),
     "replicate_cv": (
         "Technical precision from replicate controls of a single material: Olink sample controls or "
         "SomaScan QC samples. Plate controls and calibrators are not used because they feed the vendor "
@@ -511,6 +521,12 @@ footer {
     width: 100%; border-collapse: collapse; font-size: 0.9em;
 }
 .summary-table td { padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.readiness-table .ready-icon { width: 28px; text-align: center; font-weight: 700; }
+.readiness-table .ready-available .ready-icon { color: #27ae60; }
+.readiness-table .ready-partial .ready-icon { color: #f39c12; }
+.readiness-table .ready-missing .ready-icon { color: #c0392b; }
+.readiness-table .ready-na { color: var(--text-muted); }
+.readiness-table .ready-impact { font-size: 0.85em; color: var(--text-muted); margin-top: 2px; }
 .summary-table .summary-group td {
     background: #e8f8f8; font-weight: 600; color: var(--heading);
     font-size: 0.88em; text-transform: uppercase; letter-spacing: 0.04em;
@@ -989,6 +1005,37 @@ def _split_summary_columns(rows: list[str], columns: int) -> list[list[str]]:
     return [[r for g in groups[:best_k] for r in g], [r for g in groups[best_k:] for r in g]]
 
 
+_READINESS_ICONS = {
+    "available": ("&#10003;", "ready-available"),
+    "partial": ("&#9680;", "ready-partial"),
+    "missing": ("&#10007;", "ready-missing"),
+    "n/a": ("&ndash;", "ready-na"),
+}
+
+
+def _render_readiness(data: ReadinessData) -> str:
+    """Reanalysis-readiness card: which interpretive metadata is present and what is blocked."""
+    rows = []
+    for item in data.items:
+        icon, cls = _READINESS_ICONS.get(item.status, ("", ""))
+        impact = f'<div class="ready-impact">{html_mod.escape(item.impact)}</div>' if item.impact else ""
+        rows.append(
+            f'<tr class="{cls}"><td class="ready-icon">{icon}</td>'
+            f'<td class="metric-name">{html_mod.escape(item.category)}</td>'
+            f'<td class="ready-detail">{item.detail}{impact}</td></tr>'
+        )
+    return (
+        '<div class="plot-card" id="reanalysis-readiness">'
+        '<div class="plot-header">'
+        f"<h3>{html_mod.escape(data.title)} &middot; {data.n_available} of {data.n_applicable} available</h3>"
+        '<button class="help-toggle" title="About reanalysis readiness" aria-label="Help">?</button>'
+        "</div>"
+        f'<div class="help-text">{_HELP_TEXT["readiness"]}</div>'
+        f'<table class="summary-table readiness-table">{"".join(rows)}</table>'
+        "</div>"
+    )
+
+
 def _render_summary_table(
     dataset: AffinityDataset,
     plot_data: dict[str, object],
@@ -1202,6 +1249,18 @@ def _render_summary_table(
         rows.append(_summary_group("Batch"))
         top = ", ".join(f"{pc} {r2:.0%}" for pc, r2 in zip(batch.pc_labels[:2], batch.plate_r2[:2]))
         rows.append(_summary_row("", "Variance explained by plate", top))
+    bridge = plot_data.get("bridge_agreement")
+    if isinstance(bridge, BridgeAgreementData):
+        if not (isinstance(batch, BatchEffectData) and batch.plate_r2):
+            rows.append(_summary_group("Batch"))
+        lo, hi = bridge.offset_iqr
+        rows.append(
+            _summary_row(
+                "",
+                f"Bridging samples ({bridge.n_samples} on {len(bridge.plates)} plates)",
+                f"plate offset {bridge.median_offset:+.2f} {bridge.value_label} (IQR {lo:+.2f} to {hi:+.2f})",
+            )
+        )
 
     pre = plot_data.get("preanalytical")
     sex = plot_data.get("sex_check")
@@ -1836,6 +1895,9 @@ def qc_report(
             group_sections.append(f'<div class="section-group"><h2>{group_title}</h2>{"".join(cards)}</div>')
     # Dataset Summary section (always first)
     summary_html = _render_summary_table(dataset, plot_data, lod_info)
+    readiness = plot_data.get("readiness")
+    if isinstance(readiness, ReadinessData):
+        summary_html += _render_readiness(readiness)
     summary_section = f'<div class="section-group"><h2>Dataset Summary</h2>{summary_html}</div>'
     group_sections.insert(0, summary_section)
     toc_html_parts.insert(0, '<ul><li><a href="#dataset-summary">Dataset Summary</a></li></ul>')
@@ -1924,7 +1986,12 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
     (
         "overview",
         "Overview",
-        [("summary", "full"), ("lod_analysis", "half"), ("missing_frequency_distribution", "half")],
+        [
+            ("summary", "full"),
+            ("readiness", "full"),
+            ("lod_analysis", "half"),
+            ("missing_frequency_distribution", "half"),
+        ],
     ),
     (
         "signal",
@@ -2283,6 +2350,17 @@ def qc_report_split(
     )
     (output_dir / "summary.html").write_text(page, encoding="utf-8")
     written.append("summary")
+
+    readiness = plot_data.get("readiness")
+    if isinstance(readiness, ReadinessData):
+        page = _wrap_standalone_html(
+            f"Reanalysis Readiness — {platform_label}",
+            _render_readiness(readiness),
+            include_plotlyjs=False,
+            no_border=no_border,
+        )
+        (output_dir / "readiness.html").write_text(page, encoding="utf-8")
+        written.append("readiness")
 
     manifest = _build_split_manifest(written, dataset.platform.value)
     (output_dir / SPLIT_MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
