@@ -1606,7 +1606,8 @@ class QcFlagData:
 
 
 def _status_counts(matrix: pd.DataFrame) -> dict[str, int]:
-    vals = matrix.stack(future_stack=True).fillna("NA").astype(str)
+    # Flatten via numpy (DataFrame.stack(future_stack=...) needs pandas >= 2.1)
+    vals = pd.Series(matrix.to_numpy().ravel(), dtype="object").fillna("NA").astype(str)
     vals = vals.where(vals.isin(_QC_STATUS_ORDER[:3]), "NA")
     counts = vals.value_counts()
     return {s: int(counts.get(s, 0)) for s in _QC_STATUS_ORDER}
@@ -1661,6 +1662,385 @@ def compute_qc_flags(dataset: AffinityDataset) -> QcFlagData | None:
     return QcFlagData(rows=rows, status_pct=status_pct, flagged_assay_pct=flagged, sample_worst=worst)
 
 
+# ---------------------------------------------------------------------------
+# Pre-analytical indicators, SomaScan dilution breakdown, sex consistency
+# ---------------------------------------------------------------------------
+
+# Marker proteins (gene symbols). Erythrocyte proteins rise with in-vitro hemolysis;
+# platelet alpha-granule / surface proteins rise with platelet activation during
+# collection or with serum vs plasma handling. These are indicators, not diagnoses.
+_PREANALYTICAL_MARKERS = {
+    "hemolysis": ("HBA1", "HBA2", "HBB", "HBD", "HBQ1", "CA1", "CA2", "PRDX2", "BLVRB"),
+    "platelet": ("PF4", "PPBP", "SELP", "GP1BA", "ITGA2B"),
+}
+# Male-specific: Y-chromosome genes and prostate-specific KLK3 (PSA). Female-higher: PZP.
+# LHB/FSHB/CGA are not used: their levels track menopause rather than sex.
+_SEX_MARKERS = {
+    "male": ("KLK3", "EIF1AY", "DDX3Y", "RPS4Y1", "KDM5D", "UTY", "NLGN4Y", "ZFY", "USP9Y"),
+    "female": ("PZP",),
+}
+_MIN_MARKERS = 2
+_ROBUST_Z_OUTLIER = 3.0
+
+
+def _gene_symbols(dataset: AffinityDataset) -> pd.Series:
+    """Gene symbol(s) per feature, aligned with expression columns (Olink Assay, SomaScan EntrezGeneSymbol)."""
+    for col in ("EntrezGeneSymbol", "Assay"):
+        if col in dataset.features.columns and len(dataset.features) == dataset.expression.shape[1]:
+            return dataset.features[col].astype("string").fillna("")
+    return pd.Series([""] * dataset.expression.shape[1], dtype="string")
+
+
+def _log_study_matrix(dataset: AffinityDataset) -> tuple[AffinityDataset, pd.DataFrame]:
+    """Study samples and their log-scale matrix (Olink NPX, SomaScan log10 RFU)."""
+    from pyprideap.processing.filtering import filter_controls
+
+    ds = filter_controls(dataset)
+    numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+    if ds.platform == Platform.SOMASCAN:
+        numeric = np.log10(numeric.where(numeric > 0))
+    return ds, numeric
+
+
+def _marker_columns(symbols: pd.Series, markers: tuple[str, ...]) -> dict[str, int]:
+    """Map each marker gene to the first feature column whose symbol list contains only that gene."""
+    found: dict[str, int] = {}
+    for idx, sym in enumerate(symbols):
+        genes = [g for g in str(sym).replace(",", "|").split("|") if g.strip()]
+        # Multi-target reagents (e.g. "HBA1|HBA2") are accepted when all their genes are markers
+        if genes and all(g.strip() in markers for g in genes):
+            for g in genes:
+                found.setdefault(g.strip(), idx)
+    return found
+
+
+def _marker_score(numeric: pd.DataFrame, columns: list[int]) -> pd.Series:
+    """Mean of per-marker z-scores across samples (NaN-tolerant)."""
+    sub = numeric.iloc[:, sorted(set(columns))]
+    z = (sub - sub.mean()) / sub.std(ddof=0).replace(0, np.nan)
+    return z.mean(axis=1)
+
+
+def _robust_z(values: pd.Series) -> pd.Series:
+    med = values.median()
+    mad = (values - med).abs().median() * _MAD_TO_SD_FACTOR
+    return (values - med) / mad if mad and mad > 0 else values * 0.0
+
+
+_MAD_TO_SD_FACTOR = 1.4826
+
+
+@dataclass
+class PreanalyticalData:
+    """Per-sample hemolysis and platelet-activation indicator scores (study samples)."""
+
+    sample_ids: list[str]
+    scores: dict[str, list[float]]  # indicator -> per-sample score (mean marker z-score)
+    markers: dict[str, list[str]]  # indicator -> marker genes used
+    outliers: dict[str, list[str]]  # indicator -> sample ids with robust z > threshold
+    threshold: float = _ROBUST_Z_OUTLIER
+    title: str = "Pre-analytical Indicators"
+
+
+def compute_preanalytical(dataset: AffinityDataset) -> PreanalyticalData | None:
+    """Hemolysis and platelet-activation indicator scores from marker proteins.
+
+    Each indicator is the mean z-score of its marker proteins present on the
+    panel (at least two required). Samples whose score is more than 3 robust
+    SDs (median/MAD) above the median are listed as outliers.
+    """
+    ds, numeric = _log_study_matrix(dataset)
+    if numeric.shape[0] < 5:
+        return None
+    symbols = _gene_symbols(ds)
+    scores: dict[str, list[float]] = {}
+    markers: dict[str, list[str]] = {}
+    outliers: dict[str, list[str]] = {}
+    sample_ids = _sample_ids(ds)
+    for name, genes in _PREANALYTICAL_MARKERS.items():
+        cols = _marker_columns(symbols, genes)
+        # Count distinct reagents: a multi-target reagent (e.g. "HBA1|HBA2") is one measurement
+        if len(set(cols.values())) < _MIN_MARKERS:
+            continue
+        score = _marker_score(numeric, list(cols.values()))
+        rz = _robust_z(score)
+        scores[name] = score.round(4).tolist()
+        markers[name] = sorted(cols)
+        outliers[name] = [sid for sid, z in zip(sample_ids, rz) if pd.notna(z) and z > _ROBUST_Z_OUTLIER]
+    if not scores:
+        return None
+    return PreanalyticalData(sample_ids=sample_ids, scores=scores, markers=markers, outliers=outliers)
+
+
+@dataclass
+class DilutionQcData:
+    """SomaScan QC broken down by dilution bin."""
+
+    dilutions: list[str]  # e.g. ["20%", "0.5%", "0.005%"]
+    n_assays: list[int]
+    study_cv: list[list[float]]  # per dilution: per-assay CV across study samples
+    technical_cv: list[list[float]]  # per dilution: per-assay CV across QC samples (may be empty)
+    above_lod_pct: list[float | None]  # per dilution: % of assays above LOD in >50% of study samples
+    norm_scale: list[list[float]]  # per dilution: per-sample NormScale_<dilution>, if present
+    title: str = "QC by Dilution"
+
+
+def _dilution_label(value: str) -> str:
+    return f"{value}%"
+
+
+def compute_dilution_qc(dataset: AffinityDataset) -> DilutionQcData | None:
+    """CV, technical CV, LOD detectability and normalization scale per SomaScan dilution bin."""
+    if dataset.platform != Platform.SOMASCAN or "Dilution" not in dataset.features.columns:
+        return None
+    if len(dataset.features) != dataset.expression.shape[1]:
+        return None
+    dil = dataset.features["Dilution"].astype(str).str.strip().to_numpy()
+    bins = sorted({d for d in dil if d not in ("", "0", "nan")}, key=lambda d: -float(d))
+    if len(bins) < 2:
+        return None
+
+    study = compute_cv_distribution(dataset)
+    study_cv = pd.Series(study.cv_values, index=study.feature_ids) if study else pd.Series(dtype=float)
+    rep = compute_replicate_cv(dataset)
+    columns = dataset.expression.columns
+    rep_cv = pd.Series(dtype=float)
+    if rep is not None:
+        # Recompute unfiltered per-assay technical CV with feature ids for grouping
+        from pyprideap.processing.filtering import normalize_sample_type
+
+        is_qc = (normalize_sample_type(dataset.samples["SampleType"]) == "qc").to_numpy()
+        qc = dataset.expression.apply(pd.to_numeric, errors="coerce").loc[is_qc]
+        rep_cv = (qc.std() / qc.mean()).replace([np.inf, -np.inf], np.nan)
+
+    # Share of study samples above LOD per assay. The LOD is resolved on the full
+    # dataset because SomaScan eLOD is estimated from buffer samples.
+    from pyprideap.processing.filtering import control_sample_mask
+    from pyprideap.processing.lod import _above_lod_matrix
+
+    above = None
+    lod = _resolve_lod(dataset)
+    if lod is not None:
+        study = ~control_sample_mask(dataset.samples).to_numpy()
+        numeric_all = dataset.expression.apply(pd.to_numeric, errors="coerce")
+        above_m, has_lod = _above_lod_matrix(numeric_all, lod)
+        valid = (numeric_all.notna() & has_lod).loc[study]
+        n_valid = valid.sum()
+        above = ((above_m & has_lod).loc[study].sum() / n_valid.where(n_valid > 0)) * 100
+        above.index = above.index.astype(str)
+
+    out = DilutionQcData([], [], [], [], [], [])
+    for b in bins:
+        cols = columns[dil == b]
+        out.dilutions.append(_dilution_label(b))
+        out.n_assays.append(len(cols))
+        out.study_cv.append(study_cv.reindex(cols).dropna().round(4).tolist())
+        out.technical_cv.append(rep_cv.reindex(cols).dropna().round(4).tolist())
+        if above is not None:
+            vals = above.reindex([str(c) for c in cols]).dropna()
+            out.above_lod_pct.append(round(float((vals > 50).mean() * 100), 1) if len(vals) else None)
+        else:
+            out.above_lod_pct.append(None)
+        ns_col = "NormScale_" + b.replace(".", "_")
+        if ns_col in dataset.samples.columns:
+            out.norm_scale.append(pd.to_numeric(dataset.samples[ns_col], errors="coerce").dropna().round(4).tolist())
+        else:
+            out.norm_scale.append([])
+    return out
+
+
+@dataclass
+class SexCheckData:
+    """Protein-based sex score per sample, optionally compared with annotated sex."""
+
+    sample_ids: list[str]
+    score: list[float]  # high = male-like
+    predicted: list[str]  # "male" / "female"
+    annotated: list[str]  # annotated sex or "" when not available
+    markers: dict[str, list[str]]  # markers used in the score ("male" / "female" direction)
+    mismatches: list[str]  # sample ids where prediction and annotation disagree
+    threshold: float
+    # Candidate markers on the panel and how well each separates the sexes:
+    # AUC in its expected direction when annotation is available, else NaN
+    marker_auc: dict[str, float] = field(default_factory=dict)
+    title: str = "Sex Consistency"
+
+
+def _annotated_sex(samples: pd.DataFrame) -> list[str]:
+    for col in ("sex", "Sex", "gender", "Gender"):
+        if col in samples.columns:
+            vals = samples[col].astype("string").str.strip().str.lower().fillna("")
+            return [v if v in ("male", "female") else "" for v in vals]
+    return [""] * len(samples)
+
+
+_SEX_MIN_ASHMAN_D = 3.0  # separation of the two mixture components
+_SEX_MIN_GROUP_FRACTION = 0.05
+_SEX_MIN_BIC_GAIN = 10.0
+
+
+def _two_group_split(values: np.ndarray) -> float | None:
+    """Threshold between two clearly separated groups, or None when the data are not bimodal.
+
+    Fits 1- and 2-component Gaussian mixtures; requires the 2-component model to
+    improve BIC by > 10, Ashman's D >= 3 and the smaller component to hold >= 5%
+    of samples. The threshold is where the two weighted components cross.
+    """
+    try:
+        from sklearn.mixture import GaussianMixture
+    except ImportError:
+        return None
+    x = values.reshape(-1, 1)
+    one = GaussianMixture(1, random_state=0).fit(x)
+    two = GaussianMixture(2, random_state=0, n_init=3).fit(x)
+    if one.bic(x) - two.bic(x) < _SEX_MIN_BIC_GAIN or two.weights_.min() < _SEX_MIN_GROUP_FRACTION:
+        return None
+    mu = two.means_.ravel()
+    sd = np.sqrt(two.covariances_.ravel())
+    ashman_d = np.sqrt(2) * abs(mu[0] - mu[1]) / np.sqrt(sd[0] ** 2 + sd[1] ** 2)
+    if ashman_d < _SEX_MIN_ASHMAN_D:
+        return None
+    grid = np.linspace(mu.min(), mu.max(), 512).reshape(-1, 1)
+    labels = two.predict(grid)
+    change = np.nonzero(np.diff(labels))[0]
+    return float(grid[change[0] + 1, 0]) if len(change) else float(mu.mean())
+
+
+# Minimum AUC (annotated groups, expected direction) for a marker to enter the score.
+# Reagent specificity differs between platforms and versions: e.g. on SomaScan v4
+# (PAD000003) KLK3 separates sexes with AUC 0.98 but the EIF1AY and NLGN4Y reagents
+# do not (0.49, 0.61), and averaging them in drowns the KLK3 signal.
+_SEX_MIN_MARKER_AUC = 0.8
+
+
+def _auc(values: pd.Series, positive: np.ndarray) -> float:
+    """Mann-Whitney AUC: probability that a positive sample has a higher value than a negative one."""
+    v = values.to_numpy(dtype=float)
+    ok = ~np.isnan(v)
+    v, pos = v[ok], positive[ok]
+    n_pos, n_neg = int(pos.sum()), int((~pos).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    ranks = pd.Series(v).rank().to_numpy()
+    return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def _youden_threshold(high: np.ndarray, low: np.ndarray) -> float:
+    """Cut that maximises sensitivity + specificity for separating *high* from *low*."""
+    candidates = np.unique(np.concatenate([high, low]))
+    return float(max(candidates, key=lambda t: (high > t).mean() + (low <= t).mean()))
+
+
+def _sex_mismatches(
+    ids: list[str], score: np.ndarray, annotated: np.ndarray, male: np.ndarray, female: np.ndarray
+) -> list[str]:
+    """Samples whose score is an outlier for their annotated sex and typical of the other sex."""
+
+    def robust_z(v: float, ref: np.ndarray) -> float:
+        med = float(np.median(ref))
+        mad = float(np.median(np.abs(ref - med))) * _MAD_TO_SD_FACTOR
+        return (v - med) / mad if mad > 0 else 0.0
+
+    m_lo, m_hi = np.percentile(male, [5, 95])
+    f_lo, f_hi = np.percentile(female, [5, 95])
+    out = []
+    for sid, a, v in zip(ids, annotated, score):
+        if np.isnan(v):
+            continue
+        if a == "female" and robust_z(v, female) > _ROBUST_Z_OUTLIER and m_lo <= v <= m_hi:
+            out.append(sid)
+        elif a == "male" and robust_z(v, male) < -_ROBUST_Z_OUTLIER and f_lo <= v <= f_hi:
+            out.append(sid)
+    return out
+
+
+def compute_sex_check(dataset: AffinityDataset) -> SexCheckData | None:
+    """Protein-based sex score, compared with annotated sex when a ``sex`` column is present.
+
+    Candidate markers are Y-linked genes and KLK3 (higher in males) and PZP
+    (higher in females). Only markers that actually separate the sexes in this
+    dataset enter the score (mean z of male markers minus mean z of female markers):
+
+    * With annotated sex (>= 3 per group): markers with AUC >= 0.8 for the
+      annotated groups. The plotted threshold maximises sensitivity +
+      specificity (Youden). A sample is reported as a mismatch only when its
+      score is an outlier for its own annotated group (robust z > 3 towards the
+      other sex) and lies within the other group's central 90%. Wide normal
+      variation (e.g. low PSA in some men) is therefore not flagged.
+    * Without annotation: male markers that are individually bimodal (see
+      :func:`_two_group_split`); samples are split only when the combined
+      score is bimodal too.
+
+    Returns None when no marker qualifies, so uninformative panels and
+    single-sex cohorts produce no plot rather than false sample swaps.
+    """
+    ds, numeric = _log_study_matrix(dataset)
+    if numeric.shape[0] < 10:
+        return None
+    symbols = _gene_symbols(ds)
+    candidates = {
+        **{g: (i, "male") for g, i in _marker_columns(symbols, _SEX_MARKERS["male"]).items()},
+        **{g: (i, "female") for g, i in _marker_columns(symbols, _SEX_MARKERS["female"]).items()},
+    }
+    if not any(direction == "male" for _, direction in candidates.values()):
+        return None
+
+    annotated = _annotated_sex(ds.samples)
+    ann = np.array(annotated)
+    has_annotation = (ann == "male").sum() >= 3 and (ann == "female").sum() >= 3
+
+    marker_auc: dict[str, float] = {}
+    used: dict[str, list[int]] = {"male": [], "female": []}
+    for gene, (idx, direction) in sorted(candidates.items()):
+        values = numeric.iloc[:, idx]
+        if has_annotation:
+            labelled = ann != ""
+            auc = _auc(values[labelled], ann[labelled] == direction)
+            marker_auc[gene] = round(auc, 3)
+            if auc >= _SEX_MIN_MARKER_AUC:
+                used[direction].append(idx)
+        else:
+            marker_auc[gene] = float("nan")
+            if direction == "male" and _two_group_split(values.dropna().to_numpy()) is not None:
+                used["male"].append(idx)
+    if not used["male"] and not used["female"]:
+        return None
+
+    score = pd.Series(0.0, index=numeric.index)
+    if used["male"]:
+        score = score + _marker_score(numeric, used["male"])
+    if used["female"]:
+        score = score - _marker_score(numeric, used["female"])
+    valid = score.notna().to_numpy()
+    if valid.sum() < 10:
+        return None
+
+    if has_annotation:
+        male_scores = score[(ann == "male") & valid].to_numpy()
+        female_scores = score[(ann == "female") & valid].to_numpy()
+        threshold = _youden_threshold(male_scores, female_scores)
+    else:
+        split = _two_group_split(score[valid].to_numpy())
+        if split is None:
+            return None
+        threshold = split
+
+    predicted = ["male" if (pd.notna(v) and v > threshold) else ("female" if pd.notna(v) else "") for v in score]
+    ids = _sample_ids(ds)
+    mismatches = _sex_mismatches(ids, score.to_numpy(), ann, male_scores, female_scores) if has_annotation else []
+    names = {idx: gene for gene, (idx, _) in candidates.items()}
+    return SexCheckData(
+        sample_ids=ids,
+        score=score.round(4).tolist(),
+        predicted=predicted,
+        annotated=annotated,
+        markers={d: sorted(names[i] for i in used[d]) for d in ("male", "female")},
+        mismatches=mismatches,
+        threshold=round(float(threshold), 4),
+        marker_auc=marker_auc,
+    )
+
+
 def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     """Compute all applicable QC plot data for the dataset."""
     logger.debug(
@@ -1682,6 +2062,9 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     results["replicate_cv"] = compute_replicate_cv(dataset)
     results["batch_effect"] = compute_batch_effect(dataset)
     results["qc_flags"] = compute_qc_flags(dataset)
+    results["preanalytical"] = compute_preanalytical(dataset)
+    results["dilution_qc"] = compute_dilution_qc(dataset)
+    results["sex_check"] = compute_sex_check(dataset)
 
     # SomaScan-specific QC
     if dataset.platform == Platform.SOMASCAN:

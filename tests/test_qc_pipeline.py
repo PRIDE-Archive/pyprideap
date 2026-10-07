@@ -684,3 +684,208 @@ class TestTechnicalQc:
         ds = read_olink_csv(path)
         assert ds.metadata["assay_qc_matrix"].values.tolist() == [["WARN", "PASS"], ["WARN", "PASS"]]
         assert ds.metadata["sample_qc_matrix"].values.tolist() == [["PASS", "PASS"], ["PASS", "FAIL"]]
+
+
+# ---------------------------------------------------------------------------
+# Pre-analytical indicators, dilution QC, sex consistency
+# ---------------------------------------------------------------------------
+
+
+def _make_marker_dataset(n=40, sexes=None, swap=None, hemolysed=None):
+    """Olink-like dataset with hemolysis, platelet and sex marker assays plus filler assays."""
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    genes = ["HBB", "CA1", "PRDX2", "PF4", "PPBP", "KDM5D", "KLK3", "PZP"] + [f"G{i}" for i in range(6)]
+    expr = rng.normal(0, 0.3, (n, len(genes)))
+    sexes = sexes or (["male"] * (n // 2) + ["female"] * (n - n // 2))
+    is_male = np.array([s == "male" for s in sexes])
+    if swap is not None:
+        is_male[swap] = ~is_male[swap]  # protein profile of the other sex
+    expr[:, genes.index("KDM5D")] += np.where(is_male, 4, 0)
+    expr[:, genes.index("KLK3")] += np.where(is_male, 4, 0)
+    expr[:, genes.index("PZP")] += np.where(is_male, 0, 3)
+    for i in hemolysed or []:
+        expr[i, :3] += 5
+    return AffinityDataset(
+        platform=Platform.OLINK_EXPLORE,
+        samples=pd.DataFrame({"SampleID": [f"S{i}" for i in range(n)], "SampleType": "SAMPLE", "sex": sexes}),
+        features=pd.DataFrame({"OlinkID": [f"O{j}" for j in range(len(genes))], "Assay": genes, "UniProt": genes}),
+        expression=pd.DataFrame(expr, columns=[f"O{j}" for j in range(len(genes))]),
+        metadata={},
+    )
+
+
+class TestPreanalyticalDilutionSex:
+    def test_hemolysis_outlier_flagged(self):
+        from pyprideap.viz.qc.compute import compute_preanalytical
+
+        pa = compute_preanalytical(_make_marker_dataset(hemolysed=[3]))
+        assert pa.markers["hemolysis"] == ["CA1", "HBB", "PRDX2"]
+        assert pa.outliers["hemolysis"] == ["S3"]
+        assert pa.outliers["platelet"] == []
+
+    def test_sex_mismatch_against_annotation(self):
+        from pyprideap.viz.qc.compute import compute_sex_check
+
+        sc = compute_sex_check(_make_marker_dataset(swap=[5]))
+        assert sc.mismatches == ["S5"]
+        assert sc.markers == {"male": ["KDM5D", "KLK3"], "female": ["PZP"]}
+
+    def test_sex_prediction_without_annotation_needs_bimodality(self):
+        from pyprideap.viz.qc.compute import compute_sex_check
+
+        bimodal = _make_marker_dataset()
+        bimodal.samples["sex"] = "not available"
+        sc = compute_sex_check(bimodal)
+        assert sc is not None and sc.predicted.count("male") == 20 and not sc.mismatches
+        single = _make_marker_dataset(sexes=["female"] * 40)
+        single.samples["sex"] = "not available"
+        assert compute_sex_check(single) is None
+
+    def test_two_group_split_rejects_unimodal(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import _two_group_split
+
+        rng = np.random.default_rng(0)
+        assert _two_group_split(rng.normal(0, 1, 300)) is None
+        assert _two_group_split(rng.lognormal(0, 0.8, 300)) is None
+        assert _two_group_split(np.r_[rng.normal(-2, 0.4, 60), rng.normal(2, 0.4, 40)]) == pytest.approx(0, abs=0.5)
+
+    def test_dilution_qc_groups_somascan_bins(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_dilution_qc
+
+        rng = np.random.default_rng(1)
+        n_s, n_qc = 12, 4
+        dil = ["20", "20", "0.5", "0.5", "0.005", "0"]
+        expr = np.abs(rng.normal(1000, 200, (n_s + n_qc, len(dil))))
+        ds = AffinityDataset(
+            platform=Platform.SOMASCAN,
+            samples=pd.DataFrame(
+                {
+                    "SampleId": [f"S{i}" for i in range(n_s + n_qc)],
+                    "SampleType": ["Sample"] * n_s + ["QC"] * n_qc,
+                    "NormScale_20": 1.0,
+                    "NormScale_0_5": 1.1,
+                    "NormScale_0_005": 0.9,
+                }
+            ),
+            features=pd.DataFrame({"SeqId": [f"{i}-1" for i in range(len(dil))], "Dilution": dil}),
+            expression=pd.DataFrame(expr, columns=[f"SL{i}" for i in range(len(dil))]),
+            metadata={},
+        )
+        dq = compute_dilution_qc(ds)
+        assert dq.dilutions == ["20%", "0.5%", "0.005%"]  # "0" (non-human / controls) excluded
+        assert dq.n_assays == [2, 2, 1]
+        assert [len(v) for v in dq.technical_cv] == [2, 2, 1]
+        assert [len(v) for v in dq.norm_scale] == [16, 16, 16]
+
+    def test_report_places_new_plots_in_technical_tab(self, tmp_path):
+        out = qc_report_split(_make_marker_dataset(swap=[5], hemolysed=[3]), tmp_path / "split")
+        manifest = json.loads((out / "manifest.json").read_text())
+        technical = next(t for t in manifest["tabs"] if t["id"] == "technical")
+        keys = [i["key"] for i in technical["items"]]
+        assert "preanalytical" in keys and "sex_check" in keys
+        summary = (out / "summary.html").read_text()
+        assert "Sex mismatches vs annotation" in summary and "Possible hemolysis" in summary
+
+    def test_sex_check_drops_uninformative_markers_and_ignores_wide_male_range(self):
+        """Mirrors PAD000003 (SomaScan): KLK3 informative, EIF1AY reagent not; PSA varies widely in men."""
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_sex_check
+
+        rng = np.random.default_rng(11)
+        n_m, n_f = 60, 40
+        sexes = ["male"] * n_m + ["female"] * n_f
+        klk3 = np.r_[rng.normal(1.5, 1.2, n_m), rng.normal(-1.0, 0.15, n_f)]  # wide in men, tight in women
+        klk3[n_m + 3] = 1.5  # one annotated female with male-range KLK3
+        eif1ay = rng.normal(0, 1, n_m + n_f)  # reagent that does not separate the sexes
+        filler = rng.normal(0, 0.3, (n_m + n_f, 4))
+        genes = ["KLK3", "EIF1AY", "G1", "G2", "G3", "G4"]
+        ds = AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame(
+                {"SampleID": [f"S{i}" for i in range(n_m + n_f)], "SampleType": "SAMPLE", "sex": sexes}
+            ),
+            features=pd.DataFrame({"OlinkID": [f"O{j}" for j in range(6)], "Assay": genes, "UniProt": genes}),
+            expression=pd.DataFrame(np.c_[klk3, eif1ay, filler], columns=[f"O{j}" for j in range(6)]),
+            metadata={},
+        )
+        sc = compute_sex_check(ds)
+        assert sc.markers == {"male": ["KLK3"], "female": []}
+        assert sc.marker_auc["EIF1AY"] < 0.8 <= sc.marker_auc["KLK3"]
+        # Low-KLK3 men are normal variation; only the female in the male range is flagged
+        assert sc.mismatches == [f"S{n_m + 3}"]
+
+
+class TestReviewFixes:
+    def test_status_counts_without_future_stack(self):
+        from pyprideap.viz.qc.compute import _status_counts
+
+        m = pd.DataFrame({"a": ["PASS", "WARN", None], "b": ["FAIL", "odd", "PASS"]})
+        assert _status_counts(m) == {"PASS": 2, "WARN": 1, "FAIL": 1, "NA": 2}
+
+    def test_single_multitarget_reagent_is_not_two_markers(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_preanalytical
+
+        rng = np.random.default_rng(2)
+        genes = ["HBA1|HBA2", "PF4", "PPBP", "G1", "G2"]
+        ds = AffinityDataset(
+            platform=Platform.SOMASCAN,
+            samples=pd.DataFrame({"SampleId": [f"S{i}" for i in range(20)], "SampleType": "Sample"}),
+            features=pd.DataFrame({"SeqId": [f"{i}-1" for i in range(5)], "EntrezGeneSymbol": genes}),
+            expression=pd.DataFrame(np.abs(rng.normal(1000, 100, (20, 5))), columns=[f"SL{i}" for i in range(5)]),
+            metadata={},
+        )
+        pa = compute_preanalytical(ds)
+        assert "hemolysis" not in pa.scores  # one reagent, even if it lists two genes
+        assert pa.markers["platelet"] == ["PF4", "PPBP"]
+
+    def test_dilution_above_lod_counts_study_samples_only(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_dilution_qc
+
+        rng = np.random.default_rng(4)
+        n_s, n_qc, n_buf = 12, 4, 20  # buffers outnumber study samples
+        n = n_s + n_qc + n_buf
+        expr = np.abs(rng.normal(5000, 300, (n, 4)))
+        expr[n_s + n_qc :] = np.abs(rng.normal(50, 5, (n_buf, 4)))  # blanks, below eLOD
+        ds = AffinityDataset(
+            platform=Platform.SOMASCAN,
+            samples=pd.DataFrame(
+                {
+                    "SampleId": [f"S{i}" for i in range(n)],
+                    "SampleType": ["Sample"] * n_s + ["QC"] * n_qc + ["Buffer"] * n_buf,
+                }
+            ),
+            features=pd.DataFrame({"SeqId": [f"{i}-1" for i in range(4)], "Dilution": ["20", "20", "0.5", "0.5"]}),
+            expression=pd.DataFrame(expr, columns=[f"SL{i}" for i in range(4)]),
+            metadata={},
+        )
+        assert compute_dilution_qc(ds).above_lod_pct == [100.0, 100.0]
+
+    def test_reader_maps_warning_to_warn(self, tmp_path):
+        rows = [
+            {
+                "SampleID": s,
+                "OlinkID": "OID1",
+                "NPX": 1.0,
+                "UniProt": "P1",
+                "Assay": "A",
+                "Panel": "X",
+                "QC_Warning": "Warning" if s == "B" else "Pass",
+            }
+            for s in ("A", "B")
+        ]
+        path = tmp_path / "warning.npx.csv"
+        pd.DataFrame(rows).to_csv(path, index=False)
+        from pyprideap.io.readers.olink_csv import read_olink_csv
+
+        assert read_olink_csv(path).metadata["sample_qc_matrix"].values.ravel().tolist() == ["PASS", "WARN"]
