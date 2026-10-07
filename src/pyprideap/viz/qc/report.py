@@ -84,12 +84,15 @@ _HELP_TEXT: dict[str, str] = {
         "dilution-specific problem."
     ),
     "sex_check": (
-        "Sex score from sex-linked proteins on the panel: Y-chromosome genes and KLK3 (male-specific) "
-        "minus PZP (higher in females). With an annotated <code>sex</code> column, samples whose "
-        "protein score falls on the other group's side of the threshold are shown in red as possible "
-        "sample swaps or annotation errors. Without annotation, a prediction is shown only when the "
-        "scores form two clearly separated groups. Pregnancy, hormone therapy and some cancers "
-        "(e.g. prostate, for KLK3) can shift the score."
+        "Sex score from sex-linked proteins on the panel. Candidates are Y-chromosome genes and KLK3 "
+        "(higher in males) and PZP (higher in females); only markers that separate the sexes in this "
+        "dataset are used (listed on the axis), because reagent specificity differs between platforms. "
+        "With an annotated <code>sex</code> column, a sample is shown in red when its score is an "
+        "outlier for its annotated sex and typical of the other sex: a possible sample swap or "
+        "annotation error to review. Ordinary variation, such as low PSA in some men, is not flagged. "
+        "Without annotation, a prediction is shown only when the scores form two clearly separated "
+        "groups. Pregnancy, hormone therapy and some conditions (e.g. prostate disease for KLK3) can "
+        "shift the score."
     ),
     "qc_flags": (
         "Vendor quality flags for each measurement in study samples, per panel. Assay QC is Olink's "

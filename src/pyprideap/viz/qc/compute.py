@@ -1842,9 +1842,12 @@ class SexCheckData:
     score: list[float]  # high = male-like
     predicted: list[str]  # "male" / "female"
     annotated: list[str]  # annotated sex or "" when not available
-    markers: dict[str, list[str]]
+    markers: dict[str, list[str]]  # markers used in the score ("male" / "female" direction)
     mismatches: list[str]  # sample ids where prediction and annotation disagree
     threshold: float
+    # Candidate markers on the panel and how well each separates the sexes:
+    # AUC in its expected direction when annotation is available, else NaN
+    marker_auc: dict[str, float] = field(default_factory=dict)
     title: str = "Sex Consistency"
 
 
@@ -1888,42 +1891,119 @@ def _two_group_split(values: np.ndarray) -> float | None:
     return float(grid[change[0] + 1, 0]) if len(change) else float(mu.mean())
 
 
+# Minimum AUC (annotated groups, expected direction) for a marker to enter the score.
+# Reagent specificity differs between platforms and versions: e.g. on SomaScan v4
+# (PAD000003) KLK3 separates sexes with AUC 0.98 but the EIF1AY and NLGN4Y reagents
+# do not (0.49, 0.61), and averaging them in drowns the KLK3 signal.
+_SEX_MIN_MARKER_AUC = 0.8
+
+
+def _auc(values: pd.Series, positive: np.ndarray) -> float:
+    """Mann-Whitney AUC: probability that a positive sample has a higher value than a negative one."""
+    v = values.to_numpy(dtype=float)
+    ok = ~np.isnan(v)
+    v, pos = v[ok], positive[ok]
+    n_pos, n_neg = int(pos.sum()), int((~pos).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    ranks = pd.Series(v).rank().to_numpy()
+    return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def _youden_threshold(high: np.ndarray, low: np.ndarray) -> float:
+    """Cut that maximises sensitivity + specificity for separating *high* from *low*."""
+    candidates = np.unique(np.concatenate([high, low]))
+    return float(max(candidates, key=lambda t: (high > t).mean() + (low <= t).mean()))
+
+
+def _sex_mismatches(
+    ids: list[str], score: np.ndarray, annotated: np.ndarray, male: np.ndarray, female: np.ndarray
+) -> list[str]:
+    """Samples whose score is an outlier for their annotated sex and typical of the other sex."""
+
+    def robust_z(v: float, ref: np.ndarray) -> float:
+        med = float(np.median(ref))
+        mad = float(np.median(np.abs(ref - med))) * _MAD_TO_SD_FACTOR
+        return (v - med) / mad if mad > 0 else 0.0
+
+    m_lo, m_hi = np.percentile(male, [5, 95])
+    f_lo, f_hi = np.percentile(female, [5, 95])
+    out = []
+    for sid, a, v in zip(ids, annotated, score):
+        if np.isnan(v):
+            continue
+        if a == "female" and robust_z(v, female) > _ROBUST_Z_OUTLIER and m_lo <= v <= m_hi:
+            out.append(sid)
+        elif a == "male" and robust_z(v, male) < -_ROBUST_Z_OUTLIER and f_lo <= v <= f_hi:
+            out.append(sid)
+    return out
+
+
 def compute_sex_check(dataset: AffinityDataset) -> SexCheckData | None:
     """Protein-based sex score, compared with annotated sex when a ``sex`` column is present.
 
-    score = mean z(male markers) - mean z(female markers); at least one
-    male-specific marker (Y-linked genes or KLK3) is required.
+    Candidate markers are Y-linked genes and KLK3 (higher in males) and PZP
+    (higher in females). Only markers that actually separate the sexes in this
+    dataset enter the score (mean z of male markers minus mean z of female markers):
 
-    * With annotated sex, the threshold is the midpoint between the annotated
-      groups' medians, and samples on the opposite side are mismatches.
-    * Without annotation, samples are split into two groups only when the
-      scores are clearly bimodal (see :func:`_two_group_split`);
-      single-sex cohorts or uninformative markers give no result.
+    * With annotated sex (>= 3 per group): markers with AUC >= 0.8 for the
+      annotated groups. The plotted threshold maximises sensitivity +
+      specificity (Youden). A sample is reported as a mismatch only when its
+      score is an outlier for its own annotated group (robust z > 3 towards the
+      other sex) and lies within the other group's central 90%. Wide normal
+      variation (e.g. low PSA in some men) is therefore not flagged.
+    * Without annotation: male markers that are individually bimodal (see
+      :func:`_two_group_split`); samples are split only when the combined
+      score is bimodal too.
+
+    Returns None when no marker qualifies, so uninformative panels and
+    single-sex cohorts produce no plot rather than false sample swaps.
     """
     ds, numeric = _log_study_matrix(dataset)
     if numeric.shape[0] < 10:
         return None
     symbols = _gene_symbols(ds)
-    male = _marker_columns(symbols, _SEX_MARKERS["male"])
-    female = _marker_columns(symbols, _SEX_MARKERS["female"])
-    if not male:
+    candidates = {
+        **{g: (i, "male") for g, i in _marker_columns(symbols, _SEX_MARKERS["male"]).items()},
+        **{g: (i, "female") for g, i in _marker_columns(symbols, _SEX_MARKERS["female"]).items()},
+    }
+    if not any(direction == "male" for _, direction in candidates.values()):
         return None
-    score = _marker_score(numeric, list(male.values()))
-    if female:
-        score = score - _marker_score(numeric, list(female.values())).fillna(0)
+
     annotated = _annotated_sex(ds.samples)
+    ann = np.array(annotated)
+    has_annotation = (ann == "male").sum() >= 3 and (ann == "female").sum() >= 3
+
+    marker_auc: dict[str, float] = {}
+    used: dict[str, list[int]] = {"male": [], "female": []}
+    for gene, (idx, direction) in sorted(candidates.items()):
+        values = numeric.iloc[:, idx]
+        if has_annotation:
+            labelled = ann != ""
+            auc = _auc(values[labelled], ann[labelled] == direction)
+            marker_auc[gene] = round(auc, 3)
+            if auc >= _SEX_MIN_MARKER_AUC:
+                used[direction].append(idx)
+        else:
+            marker_auc[gene] = float("nan")
+            if direction == "male" and _two_group_split(values.dropna().to_numpy()) is not None:
+                used["male"].append(idx)
+    if not used["male"] and not used["female"]:
+        return None
+
+    score = pd.Series(0.0, index=numeric.index)
+    if used["male"]:
+        score = score + _marker_score(numeric, used["male"])
+    if used["female"]:
+        score = score - _marker_score(numeric, used["female"])
     valid = score.notna().to_numpy()
     if valid.sum() < 10:
         return None
 
-    ann = np.array(annotated)
-    has_annotation = (ann[valid] == "male").sum() >= 3 and (ann[valid] == "female").sum() >= 3
     if has_annotation:
-        m_med = float(score[(ann == "male") & valid].median())
-        f_med = float(score[(ann == "female") & valid].median())
-        if m_med <= f_med:
-            return None  # markers do not separate the annotated groups
-        threshold = (m_med + f_med) / 2
+        male_scores = score[(ann == "male") & valid].to_numpy()
+        female_scores = score[(ann == "female") & valid].to_numpy()
+        threshold = _youden_threshold(male_scores, female_scores)
     else:
         split = _two_group_split(score[valid].to_numpy())
         if split is None:
@@ -1932,15 +2012,17 @@ def compute_sex_check(dataset: AffinityDataset) -> SexCheckData | None:
 
     predicted = ["male" if (pd.notna(v) and v > threshold) else ("female" if pd.notna(v) else "") for v in score]
     ids = _sample_ids(ds)
-    mismatches = [i for i, p, a in zip(ids, predicted, annotated) if p and a and p != a]
+    mismatches = _sex_mismatches(ids, score.to_numpy(), ann, male_scores, female_scores) if has_annotation else []
+    names = {idx: gene for gene, (idx, _) in candidates.items()}
     return SexCheckData(
         sample_ids=ids,
         score=score.round(4).tolist(),
         predicted=predicted,
         annotated=annotated,
-        markers={"male": sorted(male), "female": sorted(female)},
+        markers={d: sorted(names[i] for i in used[d]) for d in ("male", "female")},
         mismatches=mismatches,
         threshold=round(float(threshold), 4),
+        marker_auc=marker_auc,
     )
 
 

@@ -791,3 +791,32 @@ class TestPreanalyticalDilutionSex:
         assert "preanalytical" in keys and "sex_check" in keys
         summary = (out / "summary.html").read_text()
         assert "Sex mismatches vs annotation" in summary and "Possible hemolysis" in summary
+
+    def test_sex_check_drops_uninformative_markers_and_ignores_wide_male_range(self):
+        """Mirrors PAD000003 (SomaScan): KLK3 informative, EIF1AY reagent not; PSA varies widely in men."""
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_sex_check
+
+        rng = np.random.default_rng(11)
+        n_m, n_f = 60, 40
+        sexes = ["male"] * n_m + ["female"] * n_f
+        klk3 = np.r_[rng.normal(1.5, 1.2, n_m), rng.normal(-1.0, 0.15, n_f)]  # wide in men, tight in women
+        klk3[n_m + 3] = 1.5  # one annotated female with male-range KLK3
+        eif1ay = rng.normal(0, 1, n_m + n_f)  # reagent that does not separate the sexes
+        filler = rng.normal(0, 0.3, (n_m + n_f, 4))
+        genes = ["KLK3", "EIF1AY", "G1", "G2", "G3", "G4"]
+        ds = AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame(
+                {"SampleID": [f"S{i}" for i in range(n_m + n_f)], "SampleType": "SAMPLE", "sex": sexes}
+            ),
+            features=pd.DataFrame({"OlinkID": [f"O{j}" for j in range(6)], "Assay": genes, "UniProt": genes}),
+            expression=pd.DataFrame(np.c_[klk3, eif1ay, filler], columns=[f"O{j}" for j in range(6)]),
+            metadata={},
+        )
+        sc = compute_sex_check(ds)
+        assert sc.markers == {"male": ["KLK3"], "female": []}
+        assert sc.marker_auc["EIF1AY"] < 0.8 <= sc.marker_auc["KLK3"]
+        # Low-KLK3 men are normal variation; only the female in the male range is flagged
+        assert sc.mismatches == [f"S{n_m + 3}"]
