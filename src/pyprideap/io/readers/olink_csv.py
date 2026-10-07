@@ -4,6 +4,7 @@ import logging
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
@@ -156,15 +157,60 @@ def _qc_flag_matrices(df: pd.DataFrame, sample_key: str, sample_order: object, a
     columns present; when two columns map to the same key the first listed wins.
     """
     matrices: dict[str, object] = {}
-    for col, key in _QC_FLAG_COLUMNS.items():
-        if col not in df.columns or key in matrices:
+    present = [(col, key) for col, key in _QC_FLAG_COLUMNS.items() if col in df.columns]
+    if not present:
+        return matrices
+    # Row and column position of every measurement, computed once. Placing values by
+    # position is much faster than pivot_table on multi-million-row Explore HT exports.
+    rows = pd.Index(pd.Series(sample_order)).get_indexer(df[sample_key])
+    cols = pd.Index(assays).get_indexer(df["OlinkID"])
+    placed = (rows >= 0) & (cols >= 0)
+    for col, key in present:
+        if key in matrices:
             continue
-        flags = df[[sample_key, "OlinkID", col]].copy()
-        # Olink writes WARN in current exports; accept the long form too, as filter_qc does
-        flags[col] = flags[col].astype("string").str.strip().str.upper().replace({"WARNING": "WARN"})
-        matrix = flags.pivot_table(index=sample_key, columns="OlinkID", values=col, aggfunc="first")
-        matrices[key] = matrix.reindex(index=sample_order, columns=assays).reset_index(drop=True)
+        # Flags take a handful of distinct values: normalise each once. Olink writes
+        # WARN in current exports; accept the long form too, as filter_qc does.
+        codes, uniques = pd.factorize(df[col])
+        labels = pd.Series(uniques).astype("string").str.strip().str.upper().replace({"WARNING": "WARN"})
+        values = np.where(codes >= 0, labels.reindex(codes).to_numpy(dtype=object), None)
+        ok = placed & (codes >= 0)
+        matrix = np.full((len(pd.Series(sample_order)), len(assays)), None, dtype=object)
+        # First non-missing measurement wins (as pivot_table's "first"); dropping
+        # later repeats leaves each position written exactly once
+        r, c, v = rows[ok], cols[ok], values[ok]
+        first = ~pd.Series(r * len(assays) + c).duplicated(keep="first").to_numpy()
+        matrix[r[first], c[first]] = v[first]
+        matrices[key] = pd.DataFrame(matrix, columns=assays).astype("string")
     return matrices
+
+
+_DELIMITERS = (",", ";", "\t", "|")
+
+
+def _sniff_delimiter(path: Path) -> str | None:
+    """Delimiter of a delimited text file, from its header line (None if unclear)."""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        header = f.readline()
+    counts = {d: header.count(d) for d in _DELIMITERS}
+    best = max(counts, key=lambda d: counts[d])
+    return best if counts[best] > 0 else None
+
+
+def _read_delimited(path: Path) -> pd.DataFrame:
+    """Read a delimited Olink export.
+
+    The delimiter is taken from the header line and the file is parsed with
+    pandas' C engine, which is about 10x faster than delimiter sniffing with the
+    Python engine on large exports (e.g. a 1.7 GB Explore HT CSV). Files the C
+    engine cannot parse (e.g. ragged rows) fall back to the Python engine.
+    """
+    sep = _sniff_delimiter(path)
+    if sep is not None:
+        try:
+            return pd.read_csv(path, sep=sep, low_memory=False)
+        except (pd.errors.ParserError, UnicodeDecodeError) as exc:
+            logger.debug("C engine could not parse %s (%s); using the Python engine", path.name, exc)
+    return pd.read_csv(path, sep=None, engine="python")
 
 
 def read_olink_csv(path: str | Path) -> AffinityDataset:
@@ -172,7 +218,7 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    df = _apply_olink_aliases(pd.read_csv(path, sep=None, engine="python"))
+    df = _apply_olink_aliases(_read_delimited(path))
     missing = _REQUIRED_COLS - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")

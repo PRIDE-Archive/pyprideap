@@ -1234,3 +1234,33 @@ class TestSweepFixes:
             {"source name": ["PAD000014-5530_P", "PAD000014-5531_P", "PAD000014-5532_P"], "sex": list("fmf")}
         )
         assert merge_sdrf(ds, sdrf).samples["sex"].tolist() == ["f", "m", "f"]
+
+    def test_csv_delimiter_detection(self, tmp_path):
+        from pyprideap.io.readers.olink_csv import _read_delimited, _sniff_delimiter
+
+        for sep in (",", ";", "\t"):
+            path = tmp_path / "x.npx.csv"
+            path.write_text(sep.join(["SampleID", "OlinkID", "NPX"]) + "\n" + sep.join(["S1", "O1", "1.5"]) + "\n")
+            assert _sniff_delimiter(path) == sep
+            assert _read_delimited(path).columns.tolist() == ["SampleID", "OlinkID", "NPX"]
+
+    def test_qc_flags_first_value_wins_and_missing_stay_empty(self, tmp_path):
+        from pyprideap.io.readers.olink_csv import read_olink_csv
+
+        rows = [
+            ("S1", "O1", "Pass"),
+            ("S1", "O1", "FAIL"),  # duplicate measurement: first wins
+            ("S1", "O2", "Warning"),
+            ("S2", "O1", None),  # long form normalised; missing flag stays empty
+        ]
+        df = pd.DataFrame(
+            [
+                {"SampleID": s, "OlinkID": o, "UniProt": "P", "Assay": "A", "Panel": "X", "NPX": 1.0, "QC_Warning": f}
+                for s, o, f in rows
+            ]
+        )
+        path = tmp_path / "flags.npx.csv"
+        df.to_csv(path, index=False)
+        m = read_olink_csv(path).metadata["sample_qc_matrix"]
+        assert m.loc[0, "O1"] == "PASS" and m.loc[0, "O2"] == "WARN"
+        assert pd.isna(m.loc[1, "O1"]) and pd.isna(m.loc[1, "O2"])
