@@ -2197,11 +2197,16 @@ def compute_readiness(dataset: AffinityDataset, results: dict[str, object] | Non
     if isinstance(merge, dict):
         matched, total = merge.get("matched", 0), merge.get("total", len(samples))
         status = "available" if matched == total else ("partial" if matched else "missing")
+        detail = f"SDRF provided; {matched} of {total} samples matched"
+        if merge.get("error"):
+            detail += f" (merge failed: {html_escape(str(merge['error']))})"
+        elif not matched:
+            detail += " (sample names in the SDRF and the data file differ)"
         items.append(
             ReadinessItem(
                 "SDRF linked to samples",
                 status,
-                f"{matched} of {total} samples matched",
+                detail,
                 "" if status == "available" else "Unmatched samples have no annotation (groups, sex, age).",
             )
         )
@@ -2229,11 +2234,14 @@ def compute_readiness(dataset: AffinityDataset, results: dict[str, object] | Non
         impact = "Groups inferred from sample names, not from annotation." if status == "partial" else ""
         items.append(ReadinessItem("Study groups", status, detail, impact))
     else:
+        no_factor = bool(dataset.metadata.get("sdrf_without_factor_values"))
         items.append(
             ReadinessItem(
                 "Study groups",
                 "missing",
-                "No grouping column (e.g. disease, factor value) with 2–10 groups",
+                "The SDRF has no factor value[...] column, so the study design is not declared"
+                if no_factor
+                else "No grouping column (e.g. disease, factor value) with 2–10 groups",
                 "The comparisons reported in the publication cannot be related to the samples; "
                 "within-group precision and volcano plots are not computed.",
             )

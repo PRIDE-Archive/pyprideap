@@ -16,7 +16,10 @@ def read_somascan_adat(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    header, col_data, row_data = _parse_adat_sections(path)
+    if path.suffix.lower() == ".csv":
+        header, col_data, row_data = _parse_table_csv(path)
+    else:
+        header, col_data, row_data = _parse_adat_sections(path)
     logger.debug("ADAT parsed: %d header keys", len(header))
 
     features = col_data.reset_index(drop=True)
@@ -33,10 +36,43 @@ def read_somascan_adat(path: str | Path) -> AffinityDataset:
         samples=samples,
         features=features,
         expression=expression,
-        metadata=header,
+        metadata={**header, "source_file": str(path)},
     )
     _warn_data_quality(dataset, source=path.name)
     return dataset
+
+
+def is_somascan_table_csv(path: Path) -> bool:
+    """True for a CSV export of the ADAT table: first row "SeqId" followed by empty
+    sample-metadata cells and the analyte SeqIds (e.g. SomaLogic "rawdata" CSVs)."""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        first = f.readline().rstrip("\r\n").split(",")
+    return len(first) > 3 and first[0].strip() == "SeqId" and first[1] == "" and any(v.strip() for v in first[2:])
+
+
+def _parse_table_csv(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    """Parse a CSV export of the ADAT table.
+
+    Layout: feature-metadata rows ("SeqId", "UniProt", ... in the first column,
+    empty cells under the sample-metadata columns, then one value per analyte),
+    a sample header row starting with "PlateId" or "SampleId", then one row per
+    sample. Converted to the table-only ADAT layout and parsed the same way.
+    """
+    import csv
+
+    with open(path, encoding="utf-8-sig", errors="replace", newline="") as f:
+        rows = [r for r in csv.reader(f) if any(cell.strip() for cell in r)]
+    first = rows[0]
+    n_meta = next(i for i, v in enumerate(first[1:], start=1) if v.strip())
+    header_idx = next(i for i, r in enumerate(rows) if r[0].strip() in ("PlateId", "SampleId"))
+    lines = []
+    for r in rows[:header_idx]:
+        lines.append("\t" * n_meta + r[0].strip() + "\t" + "\t".join(r[n_meta:]))
+    n_analytes = len(first) - n_meta
+    lines.append("\t".join(rows[header_idx][:n_meta]) + "\t" + "\t" * n_analytes)
+    for r in rows[header_idx + 1 :]:
+        lines.append("\t".join(r[:n_meta]) + "\t\t" + "\t".join(r[n_meta:]))
+    return _parse_table_begin({}, [], [], lines)
 
 
 def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:

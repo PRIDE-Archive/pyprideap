@@ -3,6 +3,7 @@ from __future__ import annotations
 import html as html_mod
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1602,11 +1603,19 @@ def _prepare_qc_dataset(
 
         sdrf = read_sdrf(sdrf_path)
         merged = merge_sdrf(dataset, sdrf)
+        if "sdrf_merge" not in merged.metadata:
+            # nothing new to merge, or the merge was refused: record that an SDRF was given
+            merged = replace(
+                merged, metadata={**merged.metadata, "sdrf_merge": {"matched": 0, "total": len(dataset.samples)}}
+            )
+        if not sdrf.attrs.get("factor_value_columns"):
+            merged = replace(merged, metadata={**merged.metadata, "sdrf_without_factor_values": True})
         logger.debug("qc_report: merged SDRF %s into sample metadata", sdrf_path)
         return merged
-    except Exception:
+    except Exception as exc:
         logger.warning("qc_report: could not merge SDRF %s; continuing without it", sdrf_path, exc_info=True)
-        return dataset
+        failure = {"matched": 0, "total": len(dataset.samples), "error": f"{type(exc).__name__}: {exc}"[:200]}
+        return replace(dataset, metadata={**dataset.metadata, "sdrf_merge": failure})
 
 
 def qc_report(

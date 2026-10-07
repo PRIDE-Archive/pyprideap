@@ -6,6 +6,7 @@ import pandas as pd
 
 from pyprideap.core import AffinityDataset
 from pyprideap.io.readers.olink_csv import (
+    _apply_olink_aliases,
     _detect_olink_platform,
     _detect_sample_key,
     _qc_flag_matrices,
@@ -32,7 +33,7 @@ def read_olink_parquet(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    df = pd.read_parquet(path)
+    df = _apply_olink_aliases(pd.read_parquet(path))
     missing = _REQUIRED_COLS - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")

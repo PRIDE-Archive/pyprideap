@@ -1093,3 +1093,133 @@ class TestBridgingAndReadiness:
         assert (out / "readiness.html").exists()
         manifest = json.loads((out / "manifest.json").read_text())
         assert [i["key"] for i in manifest["tabs"][0]["items"]][:2] == ["summary", "readiness"]
+
+
+# ---------------------------------------------------------------------------
+# Fixes from the sweep over all public PAD datasets
+# ---------------------------------------------------------------------------
+
+
+class TestSweepFixes:
+    @staticmethod
+    def _olink(ids, extra=None):
+        import numpy as np
+
+        samples = pd.DataFrame({"SampleID": ids, **(extra or {})})
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=samples,
+            features=pd.DataFrame({"OlinkID": ["O1"], "UniProt": ["P1"]}),
+            expression=pd.DataFrame({"O1": np.arange(len(ids), dtype=float)}),
+            metadata={},
+        )
+
+    def test_merge_with_integer_sample_ids(self):
+        from pyprideap.io.readers.sdrf import merge_sdrf
+
+        ds = self._olink([1, 2, 3])  # PAD000035: numeric SampleID crashed the merge
+        sdrf = pd.DataFrame({"source name": ["PAD000035-1", "PAD000035-2", "PAD000035-3"], "sex": ["f", "m", "f"]})
+        merged = merge_sdrf(ds, sdrf)
+        assert merged.samples["sex"].tolist() == ["f", "m", "f"]
+
+    def test_merge_ignores_separators_case_and_leading_zeros(self):
+        from pyprideap.io.readers.sdrf import merge_sdrf
+
+        ds = self._olink(["L14_NIST N4", "CE002303 201", "0670628553"])
+        sdrf = pd.DataFrame(
+            {
+                "source name": ["PAD000009-L14_NIST_N4", "PAD000050-CE002303-201", "670628553"],
+                "disease": ["a", "b", "c"],
+            }
+        )
+        assert merge_sdrf(ds, sdrf).metadata["sdrf_merge"] == {"matched": 3, "total": 3}
+
+    def test_merge_uses_rows_for_this_data_file(self):
+        from pyprideap.io.readers.sdrf import merge_sdrf
+
+        ds = self._olink(["S1", "S2"])
+        ds.metadata["source_file"] = "/data/plate1.npx.csv"
+        sdrf = pd.DataFrame(
+            {
+                "source name": ["S1", "S2", "S1", "S2"],
+                "comment[data file]": ["plate2.npx.csv", "plate2.npx.csv", "plate1.npx.csv", "plate1.npx.csv"],
+                "group": ["wrong", "wrong", "right", "right"],
+            }
+        )
+        assert merge_sdrf(ds, sdrf).samples["group"].tolist() == ["right", "right"]
+
+    def test_merge_prefers_the_most_specific_sample_column(self):
+        from pyprideap.io.readers.sdrf import merge_sdrf
+
+        # PAD000030: SampleID is constant, the names are in SampleName
+        ds = self._olink(["X", "X"], {"SampleName": ["A", "B"]})
+        sdrf = pd.DataFrame({"source name": ["A", "B"], "sex": ["f", "m"]})
+        assert merge_sdrf(ds, sdrf).samples["sex"].tolist() == ["f", "m"]
+
+    def test_repeated_individual_column_is_not_a_group(self):
+        from pyprideap.io.readers.sdrf import get_grouping_columns
+
+        sdrf = pd.DataFrame({"individual": ["a"] * 9, "individual 2": ["p1"] * 3 + ["p2"] * 3 + ["p3"] * 3})
+        assert get_grouping_columns(sdrf) == []
+
+    def test_deidentified_olink_parquet_columns(self, tmp_path):
+        from pyprideap.io.readers.registry import read
+
+        rows = [
+            {
+                "DeidentifiedSampleID": s,
+                "Sample_Type": "SAMPLE",
+                "DeidentifiedPlateID": "P1",
+                "OlinkID": "O1",
+                "UniProt": "P1",
+                "Assay": "A",
+                "Panel": "X",
+                "NPX": 1.0,
+            }
+            for s in ("S1", "S2")
+        ]
+        path = tmp_path / "deid.parquet"
+        pd.DataFrame(rows).to_parquet(path)
+        ds = read(path)
+        assert ds.samples["SampleID"].tolist() == ["S1", "S2"] and "SampleType" in ds.samples
+
+    def test_olink_ct_export_gives_clear_error(self, tmp_path):
+        from pyprideap.io.readers.registry import read
+
+        path = tmp_path / "run_Ct.raw.csv"
+        path.write_text("Run,Olink NPX Signature 1.17.0\nCt data\nPanel,X,X\nAssay,IL8,TNF\n")
+        with pytest.raises(ValueError, match="Ct values"):
+            read(path)
+
+    def test_somascan_table_exported_as_csv(self, tmp_path):
+        from pyprideap.io.readers.registry import read
+
+        lines = [
+            "SeqId,,,10000-28,10001-7",
+            "UniProt,,,P43320,P04049",
+            "Type,,,Protein,Protein",
+            "Dilution,,,20,0.5",
+            "PlateId,SampleId,SampleType,,",
+            "P1,S1,Sample,1000.5,200.1",
+            "P1,B1,Buffer,50.2,20.3",
+        ]
+        path = tmp_path / "SomaLogic_rawdata.csv"
+        path.write_text("\n".join(lines) + "\n")
+        ds = read(path)
+        assert ds.platform == Platform.SOMASCAN
+        assert ds.features["UniProt"].tolist() == ["P43320", "P04049"]
+        assert ds.samples["SampleType"].tolist() == ["Sample", "Buffer"]
+        assert ds.expression.iloc[1].tolist() == [50.2, 20.3]
+
+    def test_readiness_names_sdrf_without_factor_values(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_all
+        from pyprideap.viz.qc.report import _prepare_qc_dataset
+
+        ds = _make_olink_dataset()
+        path = tmp_path / "x.sdrf.tsv"
+        pd.DataFrame({"source name": ds.samples["SampleID"], "characteristics[disease]": ["not available"] * 5}).to_csv(
+            path, sep="\t", index=False
+        )
+        items = {i.category: i for i in compute_all(_prepare_qc_dataset(ds, path))["readiness"].items}
+        assert "no factor value" in items["Study groups"].detail
+        assert items["SDRF linked to samples"].detail.startswith("SDRF provided; 5 of 5")

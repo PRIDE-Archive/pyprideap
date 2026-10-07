@@ -25,6 +25,23 @@ _OLINK_ID_PREFIX_MAP = {
 }
 
 
+# Alternative column names seen in deposited Olink long tables (e.g. de-identified
+# exports); renamed to the standard names when the standard column is absent.
+_OLINK_COLUMN_ALIASES = {
+    "DeidentifiedSampleID": "SampleID",
+    "Sample_Type": "SampleType",
+    "DeidentifiedPlateID": "PlateID",
+}
+
+
+def _apply_olink_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    rename = {old: new for old, new in _OLINK_COLUMN_ALIASES.items() if old in df.columns and new not in df.columns}
+    if rename:
+        logger.debug("Renaming Olink columns: %s", rename)
+        df = df.rename(columns=rename)
+    return df
+
+
 def _detect_sample_key(df: pd.DataFrame, *, source: str = "") -> str:
     """Choose the best column to identify samples in a long-format Olink file.
 
@@ -155,7 +172,7 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    df = pd.read_csv(path, sep=None, engine="python")
+    df = _apply_olink_aliases(pd.read_csv(path, sep=None, engine="python"))
     missing = _REQUIRED_COLS - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")
