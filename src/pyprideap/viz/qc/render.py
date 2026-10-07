@@ -907,7 +907,7 @@ def render_norm_scale(data: NormScaleData) -> Figure:
                     marker=dict(size=7, color=plate_colors[plate]),
                     name=plate,
                     text=sub["Sample"],
-                    hovertemplate="%{text}<br>NormScale: %{y:.4f}<extra></extra>",
+                    hovertemplate=f"%{{text}}<br>Plate: {plate}<br>NormScale: %{{y:.4f}}<extra></extra>",
                 )
             )
     else:
@@ -931,23 +931,31 @@ def render_norm_scale(data: NormScaleData) -> Figure:
         (1.2, "orange", "dot", "1.2 (warn)"),
         (2.5, "red", "dash", "2.5 (fail)"),
     ]
+    import math
+
     for val, color, dash, label in thresholds:
-        fig.add_hline(
-            y=val, line_dash=dash, line_color=color, line_width=1.5, annotation_text=label, annotation_position="right"
+        fig.add_hline(y=val, line_dash=dash, line_color=color, line_width=1.5)
+        if "warn" in label:
+            continue  # warn lines sit next to 1.0; labelling them makes the labels overlap
+        # Annotations on a log axis take log10 coordinates (add_hline's own label would not)
+        fig.add_annotation(
+            x=1,
+            xref="paper",
+            xanchor="left",
+            y=math.log10(val),
+            yref="y",
+            text=label,
+            showarrow=False,
+            font=dict(size=10, color=color),
         )
 
     n_legend_items = df["Plate"].nunique()
-    if n_legend_items > 15:
-        # Too many plates for horizontal legend — use scrollable vertical legend on the right
-        legend_cfg = dict(
-            orientation="v",
-            yanchor="top",
-            y=1,
-            xanchor="left",
-            x=1.02,
-            font=dict(size=9),
-        )
-        margin_cfg = dict(r=140)
+    show_legend = n_legend_items <= 15
+    if not show_legend:
+        # A legend of many plate colours is unreadable and crowds the threshold labels;
+        # the plate is shown on hover instead
+        legend_cfg = dict()
+        margin_cfg = dict(r=90)
     else:
         legend_cfg = dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
         margin_cfg = dict(b=100)
@@ -957,6 +965,7 @@ def render_norm_scale(data: NormScaleData) -> Figure:
         xaxis_title="Sample Rank (sorted by NormScale)",
         # Scale factors are ratios: a log axis keeps 0.4-2.5 readable when one sample is far out
         yaxis=dict(title="HybControlNormScale (log scale)", type="log"),
+        showlegend=show_legend,
         legend=legend_cfg,
         margin=margin_cfg,
     )
@@ -2047,7 +2056,7 @@ def render_dilution_cv(data: DilutionQcData) -> Figure:
         ys = [c for v in values for c in v]
         fig.add_trace(go.Box(x=xs, y=ys, name=name, marker_color=color, boxpoints=False))
     labels = [
-        f"{d}<br>{n} assays" + (f", {pct:.0f}% &gt; LOD" if pct is not None else "")
+        f"<b>{d}</b><br>{n} assays" + (f"<br>{pct:.0f}% &gt; LOD" if pct is not None else "")
         for d, n, pct in zip(data.dilutions, data.n_assays, data.above_lod_pct)
     ]
     fig.update_layout(
@@ -2055,8 +2064,8 @@ def render_dilution_cv(data: DilutionQcData) -> Figure:
         boxmode="group",
         xaxis=dict(title="Dilution bin", tickvals=data.dilutions, ticktext=labels, tickangle=0),
         yaxis=dict(title="CV (RFU, linear scale)", type="log"),
-        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-        margin=dict(b=100),
+        legend=dict(orientation="h", yanchor="top", y=-0.32, xanchor="center", x=0.5),
+        margin=dict(b=120),
     )
     return fig
 
