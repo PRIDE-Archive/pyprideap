@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Hashable
 from dataclasses import dataclass, field, replace
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -288,7 +290,7 @@ def _sample_id_col(dataset: AffinityDataset) -> str:
                 return col
     # SampleID exists but is not unique — try SampleName if fully populated
     if "SampleName" in dataset.samples.columns:
-        non_empty = dataset.samples["SampleName"].astype(str).str.strip().replace("", pd.NA).dropna()
+        non_empty = dataset.samples["SampleName"].astype(str).str.strip().replace({"": pd.NA}).dropna()
         if len(non_empty) == len(dataset.samples):
             return "SampleName"
     # Fall back to whichever ID column exists (even if not fully unique)
@@ -1657,7 +1659,7 @@ def compute_qc_flags(dataset: AffinityDataset) -> QcFlagData | None:
         per_sample = matrices["Sample QC"].apply(
             lambda r: max((rank.get(str(v), -1) for v in r.dropna()), default=-1), axis=1
         )
-        names = {0: "PASS", 1: "WARN", 2: "FAIL", -1: "NA"}
+        names: dict[Hashable, str] = {0: "PASS", 1: "WARN", 2: "FAIL", -1: "NA"}
         worst = {names[k]: int(v) for k, v in per_sample.value_counts().sort_index().items()}
 
     return QcFlagData(rows=rows, status_pct=status_pct, flagged_assay_pct=flagged, sample_worst=worst)
@@ -1719,7 +1721,7 @@ def _marker_score(numeric: pd.DataFrame, columns: list[int]) -> pd.Series:
     """Mean of per-marker z-scores across samples (NaN-tolerant)."""
     sub = numeric.iloc[:, sorted(set(columns))]
     z = (sub - sub.mean()) / sub.std(ddof=0).replace(0, np.nan)
-    return z.mean(axis=1)
+    return cast(pd.Series, z.mean(axis=1))
 
 
 def _robust_z(values: pd.Series) -> pd.Series:
@@ -1822,12 +1824,12 @@ def compute_dilution_qc(dataset: AffinityDataset) -> DilutionQcData | None:
     above = None
     lod = _resolve_lod(dataset)
     if lod is not None:
-        study = ~control_sample_mask(dataset.samples).to_numpy()
+        is_study = ~control_sample_mask(dataset.samples).to_numpy()
         numeric_all = dataset.expression.apply(pd.to_numeric, errors="coerce")
         above_m, has_lod = _above_lod_matrix(numeric_all, lod)
-        valid = (numeric_all.notna() & has_lod).loc[study]
+        valid = (numeric_all.notna() & has_lod).loc[is_study]
         n_valid = valid.sum()
-        above = ((above_m & has_lod).loc[study].sum() / n_valid.where(n_valid > 0)) * 100
+        above = ((above_m & has_lod).loc[is_study].sum() / n_valid.where(n_valid > 0)) * 100
         above.index = above.index.astype(str)
 
     out = DilutionQcData([], [], [], [], [], [])

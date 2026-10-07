@@ -765,7 +765,7 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
         reported = get_reported_lod(dataset)
         if reported is not None:
             if hasattr(reported, "shape") and reported.ndim == 2:
-                n_assays = int(reported.notna().any(axis=0).sum())
+                n_assays = int(np.count_nonzero(reported.notna().to_numpy().any(axis=0)))
             else:
                 n_assays = int(reported.notna().sum())
             sources.append(
@@ -1338,11 +1338,11 @@ def _render_summary_table(
                 )
             )
 
-    parts = _split_summary_columns(rows, columns)
-    if len(parts) == 1:
+    column_rows = _split_summary_columns(rows, columns)
+    if len(column_rows) == 1:
         table_html = f'<table class="summary-table">{"".join(rows)}</table>'
     else:
-        tables = "".join(f'<table class="summary-table">{"".join(part)}</table>' for part in parts)
+        tables = "".join(f'<table class="summary-table">{"".join(part)}</table>' for part in column_rows)
         table_html = f'<div class="summary-columns">{tables}</div>'
 
     return (
@@ -2004,7 +2004,7 @@ def _build_split_manifest(written: list[str], platform: str) -> dict[str, Any]:
     import pyprideap
 
     available = set(written)
-    tabs = []
+    tabs: list[dict[str, Any]] = []
     for tab_id, title, plots in _SPLIT_LAYOUT:
         items: list[dict[str, Any]] = []
         pending: dict[str, Any] | None = None

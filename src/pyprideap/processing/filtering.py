@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import pandas as pd
 
@@ -57,7 +58,7 @@ def control_sample_mask(samples: pd.DataFrame) -> pd.Series:
     for col in ("SampleType", _SDRF_SAMPLE_TYPE_COLUMN):
         if col in samples.columns:
             mask |= normalize_sample_type(samples[col]).isin(_CONTROL_SAMPLE_TYPES)
-    return mask
+    return cast(pd.Series, mask)
 
 
 def filter_controls(dataset: AffinityDataset) -> AffinityDataset:

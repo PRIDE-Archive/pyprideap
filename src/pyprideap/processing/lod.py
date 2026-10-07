@@ -246,7 +246,7 @@ def compute_nc_lod_detailed(
         nc_counts = count_matrix[control_mask].apply(pd.to_numeric, errors="coerce")
         max_counts = nc_counts.max()
         lod_count = np.maximum(_LOD_COUNT_FLOOR, _LOD_COUNT_MULTIPLIER * max_counts)
-        lod_method = pd.Series(
+        lod_method: pd.Series = pd.Series(
             np.where(max_counts > _LOD_COUNT_FLOOR, "lod_npx", "lod_count"),
             index=lod_npx.index,
         )
@@ -348,7 +348,7 @@ def compute_pc_normalized_lod(
                 plate_idx = plates[plates == plate_id].index
                 lod_matrix.loc[plate_idx] = lod_matrix.loc[plate_idx].subtract(plate_median, axis=1)
 
-    return lod_matrix
+    return cast(pd.DataFrame, lod_matrix)
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +448,7 @@ def _intensity_adjustment(
         # Adjustment = plate_median - global_median
         adjustments.loc[grp_idx] = plate_median - global_median
 
-    return adjustments
+    return cast(pd.Series | None, adjustments)
 
 
 def compute_nclod(
@@ -525,9 +525,15 @@ def get_reported_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | Non
 
     if "OlinkID" in dataset.features.columns:
         lod_map = dict(zip(dataset.features["OlinkID"], lod_series))
-        return pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns})
+        return cast(
+            pd.Series,
+            pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns}),
+        )
 
-    return pd.Series(lod_series.values, index=dataset.expression.columns[: len(lod_series)])
+    return cast(
+        pd.Series,
+        pd.Series(lod_series.values, index=dataset.expression.columns[: len(lod_series)]),
+    )
 
 
 _CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
@@ -623,7 +629,7 @@ def load_fixed_lod(
         lod_map = dict(zip(lod_dedup["OlinkID"], lod_dedup["LODNPX"]))
 
     lod_series = pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns})
-    return lod_series
+    return cast(pd.Series, lod_series)
 
 
 # Backwards-compat alias

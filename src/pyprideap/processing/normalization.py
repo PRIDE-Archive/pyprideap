@@ -229,7 +229,7 @@ def reference_median_normalize(
         A copy of *dataset* with adjusted expression values.
     """
     if isinstance(reference_medians, dict):
-        reference_medians = pd.Series(reference_medians)
+        reference_medians = cast(pd.Series, pd.Series(reference_medians))
 
     proteins_to_adjust = dataset.expression.columns.intersection(reference_medians.index)
     if proteins_to_adjust.empty:
@@ -468,7 +468,7 @@ def assess_bridgeability(
             }
         )
 
-    return pd.DataFrame(records)
+    return cast(pd.DataFrame, pd.DataFrame(records))
 
 
 def assess_cross_product_bridgeability(
@@ -623,7 +623,7 @@ def assess_cross_product_bridgeability(
             }
         )
 
-    return pd.DataFrame(records)
+    return cast(pd.DataFrame, pd.DataFrame(records))
 
 
 _QS_KNOT_PROBS = (0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
@@ -827,7 +827,7 @@ def scale_analytes(
         If none of the scalar keys match expression columns.
     """
     if isinstance(scalars, dict):
-        scalars = pd.Series(scalars)
+        scalars = cast(pd.Series, pd.Series(scalars))
 
     matched = dataset.expression.columns.intersection(scalars.index)
     if matched.empty:
@@ -1011,7 +1011,7 @@ def lift_somascan(
         If validation fails when ``bridge`` is provided and ``validate=True``.
     """
     if isinstance(scalars, dict):
-        scalars = pd.Series(scalars)
+        scalars = cast(pd.Series, pd.Series(scalars))
 
     # Validate if bridge is provided
     if bridge is not None and validate:
@@ -1162,7 +1162,7 @@ def assess_lift_quality(
             }
         )
 
-    return pd.DataFrame(records)
+    return cast(pd.DataFrame, pd.DataFrame(records))
 
 
 # ---------------------------------------------------------------------------

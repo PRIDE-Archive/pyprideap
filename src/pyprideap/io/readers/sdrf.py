@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 
@@ -123,7 +124,7 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
 
     renamed_df = pd.DataFrame(df.rename(columns=rename))
     logger.debug("SDRF columns renamed: %d mappings applied", len(rename))
-    return renamed_df
+    return cast(pd.DataFrame, renamed_df)
 
 
 def get_grouping_columns(sdrf: pd.DataFrame) -> list[str]:
