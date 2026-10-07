@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -229,13 +231,12 @@ class TestComputeAllAndReport:
         qc_report(ds, output, sdrf_path=sdrf_path)
         html = output.read_text()
         assert "Measurement Precision Index" in html
-        assert "Dynamic Range" in html
+        assert "Relative Spread" in html
         assert "Rank Concordance" in html
         assert "Case/control: yes" in html or r"Case\u002fcontrol: yes" in html
-        assert "What this shows:" in html
-        assert "How to interpret:" in html
-        assert "What to look for:" in html
-        assert "Technology-Agnostic QC" in html
+        assert "computed within each group" in html  # MPI help text
+        assert "Precision &amp; Concordance" in html  # summary group
+        assert "Median MPI (within groups)" in html
 
     def test_qc_report_without_groups_tags_no(self, tmp_path):
         expr, _ = _grouped_expression()
@@ -256,4 +257,70 @@ class TestComputeAllAndReport:
         assert (out_dir / "rank_concordance.html").exists()
         mpi_html = (out_dir / "mpi.html").read_text()
         assert "Case/control: yes" in mpi_html or r"Case\u002fcontrol: yes" in mpi_html
-        assert "How to interpret:" in mpi_html
+        assert "linear scale" in mpi_html
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        signal = next(t for t in manifest["tabs"] if t["id"] == "signal")
+        structure = next(t for t in manifest["tabs"] if t["id"] == "structure")
+        assert {"mpi", "dynamic_range"} <= {i["key"] for i in signal["items"]}
+        assert "rank_concordance" in {i["key"] for i in structure["items"]}
+        assert not manifest["unplaced"]
+
+
+class TestReviewFixes:
+    def test_mpi_and_spread_do_not_depend_on_npx_reference(self):
+        """NPX is relative: shifting all values by a constant must not change precision or spread."""
+        expr, _ = _grouped_expression()
+        base = compute_mpi(_dataset(expr))
+        shifted = compute_mpi(_dataset(expr + 5.0))
+        assert shifted.median == pytest.approx(base.median, rel=1e-6)
+        assert compute_dynamic_range(_dataset(expr + 5.0)).median == pytest.approx(
+            compute_dynamic_range(_dataset(expr)).median, rel=1e-6
+        )
+
+    def test_control_samples_are_excluded(self):
+        expr, _ = _grouped_expression()
+        study = _dataset(expr, extra_sample_cols={"SampleType": ["SAMPLE"] * len(expr)})
+        controls = pd.DataFrame(np.full((6, expr.shape[1]), -3.0), columns=expr.columns)
+        with_controls = _dataset(
+            pd.concat([expr, controls], ignore_index=True),
+            extra_sample_cols={"SampleType": ["SAMPLE"] * len(expr) + ["NEGATIVE_CONTROL"] * 6},
+        )
+        assert compute_mpi(with_controls).median == pytest.approx(compute_mpi(study).median)
+        assert compute_rank_concordance(with_controls).median == pytest.approx(compute_rank_concordance(study).median)
+
+    def test_control_sample_names_do_not_create_groups(self):
+        expr, _ = _grouped_expression()
+        ids = [f"S{i:03d}" for i in range(len(expr))]
+        controls = pd.DataFrame(np.full((6, expr.shape[1]), 2.0), columns=expr.columns)
+        ds = _dataset(
+            pd.concat([expr, controls], ignore_index=True),
+            sample_ids=ids + [f"case_{i}" for i in range(3)] + [f"control_{i}" for i in range(3)],
+            extra_sample_cols={"SampleType": ["SAMPLE"] * len(expr) + ["PLATE_CONTROL"] * 6},
+        )
+        assert compute_agnostic_qc(ds)["mpi"].has_case_control is False
+
+    def test_sdrf_discovery_requires_same_accession(self, tmp_path):
+        from pyprideap.cli import _discover_sdrf
+
+        data = tmp_path / "PAD000002_npx.parquet"
+        data.write_text("")
+        (tmp_path / "PAD000001.sdrf.tsv").write_text("source name\n")
+        assert _discover_sdrf(data) is None
+        own = tmp_path / "PAD000002.sdrf.tsv"
+        own.write_text("source name\n")
+        assert _discover_sdrf(data) == own
+        assert _discover_sdrf(tmp_path / "no_accession.npx.csv") is None
+
+    def test_duplicate_sdrf_rows_do_not_add_samples(self):
+        expr, groups = _grouped_expression()
+        ids = [f"S{i:03d}" for i in range(len(groups))]
+        ds = _dataset(expr, sample_ids=ids)
+        sdrf = pd.DataFrame({"source name": ids + ids[:5], "disease": groups + groups[:5]})
+        merged = merge_sdrf(ds, sdrf)
+        assert len(merged.samples) == len(ds.samples)
+        assert merged.samples["disease"].tolist() == groups
+
+    def test_histograms_have_no_quality_bands(self):
+        expr, _ = _grouped_expression()
+        fig = render_mpi(compute_mpi(_dataset(expr)))
+        assert all(shape.type == "line" for shape in fig.layout.shapes)  # only the median line

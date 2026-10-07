@@ -25,6 +25,7 @@ Examples:
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -51,15 +52,23 @@ def _is_sdrf_filename(name: str) -> bool:
     return "sdrf" in lower and lower.endswith((".tsv", ".txt"))
 
 
-def _discover_sdrf(*search_dirs: Path) -> Path | None:
-    """Find an SDRF file next to the data, preferring community-annotated files."""
+_PAD_ACCESSION_RE = re.compile(r"PAD\d{6}", re.IGNORECASE)
+
+
+def _discover_sdrf(data_path: Path) -> Path | None:
+    """Find the SDRF of the same PAD accession next to the data file.
+
+    Only files whose name carries the data file's accession are considered, so
+    a folder holding several datasets never pairs data with another dataset's
+    SDRF. Community-annotated files are preferred.
+    """
+    accession = _PAD_ACCESSION_RE.search(data_path.name)
+    if accession is None or not data_path.parent.exists():
+        return None
+    acc = accession.group(0).upper()
     matches: list[Path] = []
-    for directory in search_dirs:
-        if directory is None or not directory.exists():
-            continue
-        matches.extend(directory.glob("*sdrf*.tsv"))
-        matches.extend(directory.glob("*sdrf*.txt"))
-        matches.extend(directory.glob("*.sdrf.tsv"))
+    for pattern in ("*sdrf*.tsv", "*sdrf*.txt"):
+        matches.extend(p for p in data_path.parent.glob(pattern) if acc in p.name.upper())
     unique: list[Path] = []
     seen: set[Path] = set()
     for path in matches:
@@ -143,7 +152,7 @@ def _generate_report(
     logger.debug("Features columns: %s", list(ds.features.columns))
 
     if sdrf_path is None:
-        nearby = _discover_sdrf(input_path.parent)
+        nearby = _discover_sdrf(input_path)
         if nearby is not None:
             sdrf_path = nearby
             click.echo(f"  SDRF (auto): {sdrf_path.name}")

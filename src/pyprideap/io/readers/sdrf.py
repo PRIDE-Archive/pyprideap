@@ -42,9 +42,6 @@ _BIOLOGICAL_GROUP_PRIORITY = (
     "case control",
     "case/control",
     "status",
-    "covid",
-    "covid_status",
-    "covid status",
 )
 
 # Grouping columns that are real covariates but are not case/control for MPI.
@@ -305,7 +302,12 @@ def merge_sdrf(
 
     sdrf_subset = sdrf[[sdrf_join_col] + new_cols].copy()
     left = dataset.samples.copy()
-    right = sdrf_subset.copy()
+    # SDRF allows several rows per source name (e.g. one per assay); keep one so
+    # the merge stays 1:1 and samples stay aligned with the expression matrix.
+    n_dup = int(sdrf_subset[sdrf_join_col].duplicated().sum())
+    if n_dup:
+        logger.debug("SDRF merge: %d duplicate %s rows ignored", n_dup, sdrf_join_col)
+    right = sdrf_subset.drop_duplicates(subset=[sdrf_join_col], keep="first")
 
     merged = left.merge(right, left_on=sample_col, right_on=sdrf_join_col, how="left")
     matched = int(merged[new_cols[0]].notna().sum()) if new_cols else 0
@@ -334,6 +336,10 @@ def merge_sdrf(
 
     if sdrf_join_col != sample_col and sdrf_join_col in merged.columns:
         merged = merged.drop(columns=[sdrf_join_col])
+
+    if len(merged) != len(left):
+        logger.warning("SDRF merge would change the number of samples; SDRF not merged")
+        return dataset
 
     unmatched = len(merged) - matched
     logger.debug(

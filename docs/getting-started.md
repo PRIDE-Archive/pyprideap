@@ -125,7 +125,7 @@ MPI is calculated **within groups** when a biological grouping column is found (
 pp.qc_report(dataset, "my_report.html", sdrf_path="samples.sdrf.tsv")
 ```
 
-The CLI looks for `*sdrf*.tsv` next to the data file, or downloads SDRF with `pyprideap report -a PAD000001`.
+The CLI uses an SDRF next to the data file when both names contain the same PAD accession, or downloads the SDRF with `pyprideap report -a PAD000001`.
 
 ## Validation
 
@@ -230,7 +230,7 @@ The report includes:
 - Clustered expression heatmap
 - Data completeness (above/below LOD)
 - CV distributions
-- Technology-agnostic QC: Measurement Precision Index, Dynamic Range, Rank Concordance
+- Technology-agnostic QC (study samples): Measurement Precision Index and relative spread on a linear scale, rank concordance
 - Platform-specific QC (normalization scales, RowCheck/ColCheck, etc.)
 
 ### Individual plot files
@@ -395,7 +395,7 @@ pyprideap/
     ├── plots.py         # Standalone plots (boxplot)
     └── qc/
         ├── compute.py   # QC metric computation
-        ├── agnostic.py  # MPI, dynamic range, rank concordance
+        ├── agnostic.py  # MPI, relative spread, rank concordance
         ├── render.py    # Plotly figure rendering
         └── report.py    # HTML report assembly
 ```

@@ -276,43 +276,31 @@ _HELP_TEXT: dict[str, str] = {
         "may inflate counts unless handled (e.g. by averaging or selecting the best-performing assay)."
     ),
     "mpi": (
-        "<strong>What this shows:</strong> How consistently each protein was measured across samples. "
-        "Higher values mean more precise measurements.<br><br>"
-        "<strong>How to interpret:</strong> The colored zones show quality ranges "
-        "(red=poor, orange=moderate, yellow=good, green=excellent). The dataset median is marked "
-        "with a vertical line. If biological groups were detected in the sample metadata, precision "
-        "was calculated separately within each group so disease or treatment differences are not "
-        "treated as measurement noise.<br><br>"
-        "<strong>What to look for:</strong> Most proteins should fall in yellow or green zones. "
-        "A few proteins in red/orange zones is normal and may reflect genuine biological variation "
-        "rather than poor quality."
+        "Measurement Precision Index (MPI) per protein: median divided by a robust SD "
+        "(1.4826 &times; MAD), i.e. the inverse of a robust CV, across study samples (controls "
+        "excluded). Values are on a linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), "
+        "as for the CV plots, because a ratio to the median is meaningless on log2 NPX. When the "
+        "SDRF or sample metadata defines biological groups (e.g. disease), MPI is computed within "
+        "each group and averaged, so group differences are not counted as imprecision; the label "
+        "on the plot says whether this was possible. Higher is more consistent. It reflects "
+        "biological as well as technical variation and depends on the deposited normalisation, so "
+        "it is a within-dataset view, not an acceptance threshold; see the technical CV for "
+        "replicate precision."
     ),
     "dynamic_range": (
-        "<strong>What this shows:</strong> How much each protein varies across samples. Higher values "
-        "indicate proteins that respond to biological differences, while low values suggest stable "
-        '"housekeeping" proteins.<br><br>'
-        "<strong>How to interpret:</strong> The colored zones indicate signal variation levels "
-        "(red=compressed, yellow=moderate, green=wide). Proteins in the red zone (&lt;0.5) have "
-        "limited variation and may be less useful for comparing groups. This matters for affinity "
-        "proteomics because assays and vendor normalisation can shrink real differences, so a protein "
-        "with a compressed range contributes little to QC or downstream comparison even though a "
-        "signal is reported for every sample.<br><br>"
-        "<strong>What to look for:</strong> A mix of proteins across all zones is typical. Many "
-        "proteins in the red zone is not necessarily bad—some proteins are naturally stable. For "
-        "biomarker-oriented studies, some proteins with wide dynamic range (green zone) are expected."
+        "Relative spread per protein: interquartile range divided by the median across study "
+        "samples, on a linear scale. It shows how much each protein varies between samples; it is "
+        "not the assay's concentration dynamic range, which NPX or RFU distributions cannot show. "
+        "Low values mean a protein varies little in this cohort (naturally stable, or close to "
+        "the detection limit); high values mean it differs strongly between samples."
     ),
     "rank_concordance": (
-        "<strong>What this shows:</strong> How similar samples are to each other based on protein "
-        "rankings (not absolute levels). This is a scale-independent measure that works for both "
-        "Olink (NPX) and SomaScan (RFU) data.<br><br>"
-        "<strong>How to interpret:</strong> The colored zones show correlation strength "
-        "(red=negative/unusual, orange=weak, yellow=moderate, green=strong). Values in the green "
-        "zone (&gt;0.5) indicate high sample-to-sample similarity. Lower values are expected when "
-        "mixing different biological groups (e.g., cases and controls).<br><br>"
-        "<strong>What to look for:</strong> For technical replicates, expect green zone (&gt;0.9). "
-        "For biological samples from the same group, expect yellow-green (0.3-0.7). For mixed "
-        "case/control studies, orange-yellow (0.2-0.4) is normal and reflects biological differences, "
-        "not poor quality."
+        "Spearman correlation of protein ranks between pairs of study samples (up to 500 random "
+        "pairs). Ranks do not depend on the measurement scale, so the value is comparable between "
+        "NPX and RFU within a dataset. Biological replicates of similar samples correlate highly; "
+        "mixed cohorts (e.g. cases and controls, or different tissues) correlate less, which "
+        "reflects biology rather than quality. A tail of low values points to individual samples "
+        "that differ from the rest; see the sample correlation heatmap to identify them."
     ),
     "differential_expression": (
         "Volcano plots showing differentially expressed proteins between sample groups defined "
@@ -337,10 +325,9 @@ _SECTION_ORDER = [
     ("Signal & Distribution", ["distribution", "lod_analysis"]),
     ("Sample Completeness", ["sample_completeness"]),
     ("Missing Frequency Distribution", ["missing_frequency_distribution"]),
-    ("Sample Relationships", ["dimreduction", "correlation", "heatmap"]),
-    ("Technology-Agnostic QC", ["mpi", "dynamic_range", "rank_concordance"]),
+    ("Sample Relationships", ["dimreduction", "correlation", "rank_concordance", "heatmap"]),
     ("Normalization QC", ["norm_scale"]),
-    ("Variability", ["cv_distribution", "replicate_cv", "plate_cv"]),
+    ("Variability", ["cv_distribution", "replicate_cv", "mpi", "dynamic_range", "plate_cv"]),
     ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags"]),
     ("Pre-analytical & Sample Identity", ["preanalytical", "sex_check"]),
     ("Dilution QC", ["dilution_cv", "dilution_norm_scale"]),
@@ -1239,18 +1226,22 @@ def _render_summary_table(
         from pyprideap.viz.qc.agnostic import MpiData as _MPI
         from pyprideap.viz.qc.agnostic import RankConcordanceData as _RC
 
-        rows.append(_summary_group("Technology-Agnostic QC"))
+        rows.append(_summary_group("Precision &amp; Concordance"))
         if isinstance(mpi_data, _MPI):
-            cc_label = "yes" if mpi_data.has_case_control else "no"
-            rows.append(_summary_row("", "Case/control groups", cc_label))
-            if mpi_data.group_counts:
+            if mpi_data.has_case_control:
                 parts = [f"{html_mod.escape(str(k))}: {v}" for k, v in mpi_data.group_counts.items()]
-                rows.append(_summary_row("", "Group sizes", ", ".join(parts)))
-            rows.append(_summary_row("", "Median MPI", f"{mpi_data.median:.2f}"))
+                source = html_mod.escape(mpi_data.group_column or "metadata")
+                rows.append(_summary_row("", f"Biological groups ({source})", ", ".join(parts)))
+                mpi_label = "Median MPI (within groups)"
+            else:
+                mpi_label = "Median MPI (no biological groups found)"
+            rows.append(_summary_row("", mpi_label, f"{mpi_data.median:.2f}"))
         if isinstance(dr_data, _DR):
-            rows.append(_summary_row("", "Median relative IQR", f"{dr_data.median:.2f}"))
+            rows.append(_summary_row("", "Median relative spread (IQR / median)", f"{dr_data.median:.2f}"))
         if isinstance(rc_data, _RC):
-            rows.append(_summary_row("", "Median rank concordance", f"{rc_data.median:.2f}"))
+            rows.append(
+                _summary_row("", "Median rank concordance", f"{rc_data.median:.2f} ({rc_data.n_pairs} sample pairs)")
+            )
 
     # --- QC Status (Olink only) ---
     qc_flags = plot_data.get("qc_flags")
@@ -1943,6 +1934,8 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("sample_completeness", "half"),
             ("cv_distribution", "half"),
             ("replicate_cv", "half"),
+            ("mpi", "half"),
+            ("dynamic_range", "half"),
             ("plate_cv", "full"),
             ("lod_comparison", "full"),
         ],
@@ -1950,7 +1943,7 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
     (
         "structure",
         "Sample structure",
-        [("correlation", "half"), ("dimreduction", "half"), ("heatmap", "full")],
+        [("correlation", "half"), ("dimreduction", "half"), ("rank_concordance", "full"), ("heatmap", "full")],
     ),
     (
         "technical",
@@ -1981,6 +1974,9 @@ _SPLIT_PLOT_HEIGHTS = {
     "distribution": 380,
     "cv_distribution": 380,
     "replicate_cv": 380,
+    "mpi": 380,
+    "dynamic_range": 380,
+    "rank_concordance": 360,
     "batch_effect": 360,
     "plate_signal": 360,
     "preanalytical": 380,

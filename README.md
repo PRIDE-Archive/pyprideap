@@ -59,7 +59,7 @@ dataset = pp.read("olink_npx.csv")
 pp.qc_report(dataset, "my_report.html")
 ```
 
-The report includes a dataset summary table with traffic-light quality indicators and interactive plots: expression distributions, PCA/t-SNE, LOD analysis, sample correlation, completeness, CV distributions, and three technology-agnostic QC plots (Measurement Precision Index, Dynamic Range, Rank Concordance). All plots are rendered with Plotly and include help tooltips explaining how to interpret each visualization.
+The report includes a dataset summary table with traffic-light quality indicators and interactive plots: expression distributions, PCA/t-SNE, LOD analysis, sample correlation, completeness, CV distributions, and technology-agnostic QC plots (Measurement Precision Index, relative spread, rank concordance) computed on study samples, with MPI and relative spread on a linear scale (2^NPX for Olink). All plots are rendered with Plotly and include help tooltips explaining how to interpret each visualization.
 
 Generate individual plot files for embedding:
 
@@ -158,7 +158,7 @@ The HTML report is a self-contained, interactive document with a sidebar table o
 | **Sample Completeness** | Per-sample above/below LOD stacked bars |
 | **Missing Frequency Distribution** | Per-protein missing rate histogram with 30% threshold |
 | **Sample Relationships** | PCA / t-SNE (toggle switch), sample correlation heatmap, clustered expression heatmap |
-| **Technology-Agnostic QC** | Measurement Precision Index (MPI), Dynamic Range, Rank Concordance |
+| **Precision & Concordance** | Measurement Precision Index (MPI) and relative spread (in Variability), rank concordance (in Sample Relationships) |
 | **Normalization QC** | Hybridization control scale (SomaScan) |
 | **Variability** | CV distribution, intra/inter-plate CV |
 | **Assay QC** | IQR/Median outlier detection, UniProt duplicate mapping (Olink) |
@@ -230,17 +230,17 @@ Sample IDs in PAD files often omit the accession prefix used in SDRF (`XB6` vs `
 QC reports use SDRF to decide whether MPI should be calculated **within biological groups**:
 
 1. Pass `--sdrf path/to/file.sdrf.tsv`, **or**
-2. Place a `*sdrf*.tsv` file next to the expression matrix (auto-detected), **or**
+2. Place the dataset's SDRF next to the expression matrix; it is picked up automatically when both file names contain the same PAD accession (e.g. `PAD000001_olink_npx.csv` and `PAD000001.sdrf.tsv`), **or**
 3. Run `pyprideap report -a PAD000001` — SDRF files are downloaded with the data when present.
 
 The column used for grouping is the first of `disease`, `phenotype`, `condition`, `treatment`, or `group` that has 2–10 levels and at least 3 samples per level (`not available` is ignored). Sex, plate, and QC flags are not treated as case/control.
 
-If those columns are empty in an auto-annotated SDRF, pyprideap falls back to tokens in the sample ID (`positive`/`negative`, `case`/`control`, `patient`/`healthy`). A `Group` column already in the expression file (common in SomaScan tables) is used the same way.
+If those columns are empty in an auto-annotated SDRF, pyprideap falls back to tokens in the IDs of study samples (`positive`/`negative`, `case`/`control`, `patient`/`healthy`); control samples are excluded first, and the report states which source defined the groups. A `Group` column already in the expression file (common in SomaScan tables) is used the same way.
 
 Generate the three plots for any PAD dataset:
 
 ```bash
-# Local files (SDRF picked up automatically if it sits next to the CSV)
+# Local files (an SDRF with the same PAD accession next to the CSV is picked up automatically)
 pyprideap report olink_npx.csv --sdrf PAD000001_community_annotated.sdrf.tsv -o report.html
 
 # Or from the archive, including SDRF when PRIDE lists one

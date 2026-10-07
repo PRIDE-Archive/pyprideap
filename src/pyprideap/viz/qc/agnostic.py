@@ -1,8 +1,15 @@
 """Technology-agnostic QC metrics for affinity proteomics.
 
-These summaries are computed from the submitted expression matrix. They do not
-use LOD, vendor CV tables, or platform-specific acceptance rules, and they do
-not re-normalise vendor outputs.
+These summaries are computed from the submitted expression matrix, on study
+samples only (control samples removed). They do not use LOD, vendor CV tables,
+or platform-specific acceptance rules, and they do not re-normalise vendor
+outputs.
+
+MPI and relative spread divide by the median, so they are computed on a linear
+scale (Olink 2^NPX, SomaScan RFU as deposited), the same convention as the CV
+plots: on log2 NPX, which is centred near 0 and often negative, a ratio to the
+median depends on the arbitrary NPX reference rather than on precision.
+Rank concordance uses ranks, which do not depend on the scale.
 
 When SDRF (or sample metadata) distinguishes biological groups such as cases
 and controls, MPI is calculated within each group so disease or treatment
@@ -48,7 +55,7 @@ class MpiData:
 
 @dataclass
 class DynamicRangeData:
-    """Per-protein relative IQR (IQR / |median|)."""
+    """Per-protein relative spread: IQR / median on a linear scale (study samples)."""
 
     values: list[float]
     feature_ids: list[str]
@@ -57,8 +64,8 @@ class DynamicRangeData:
     group_column: str = ""
     group_counts: dict[str, int] = field(default_factory=dict)
     n_proteins: int = 0
-    title: str = "Dynamic Range"
-    xlabel: str = "Relative IQR (IQR / median)"
+    title: str = "Relative Spread"
+    xlabel: str = "Relative IQR (IQR / median, linear scale)"
     ylabel: str = "Number of proteins"
 
 
@@ -79,6 +86,29 @@ class RankConcordanceData:
 
 def _numeric_expression(dataset: AffinityDataset) -> pd.DataFrame:
     return dataset.expression.apply(pd.to_numeric, errors="coerce")
+
+
+def _study_mask(dataset: AffinityDataset) -> np.ndarray:
+    from pyprideap.processing.filtering import control_sample_mask
+
+    return ~control_sample_mask(dataset.samples).to_numpy()
+
+
+def _linear_study_values(dataset: AffinityDataset) -> pd.DataFrame:
+    """Study-sample matrix on a linear scale (Olink 2^NPX, SomaScan RFU as deposited)."""
+    from pyprideap.viz.qc.compute import _linear_study_samples
+
+    return _linear_study_samples(dataset).expression
+
+
+def _study_groups(dataset: AffinityDataset, groups: pd.Series | None) -> pd.Series | None:
+    """Subset *groups* (aligned with all samples) to the study samples, re-indexed 0..n-1."""
+    if groups is None:
+        return None
+    mask = _study_mask(dataset)
+    if len(groups) == len(mask):
+        groups = groups[mask]
+    return groups.reset_index(drop=True)
 
 
 def _clean_group_labels(labels: pd.Series) -> pd.Series:
@@ -104,12 +134,15 @@ def compute_mpi(
     dataset: AffinityDataset,
     groups: pd.Series | None = None,
 ) -> MpiData | None:
-    """Measurement Precision Index per protein.
+    """Measurement Precision Index per protein (study samples, linear scale).
 
-    When *groups* has at least two levels with ≥3 samples, MPI is the mean of
-    within-group MPI values so biological differences are not treated as noise.
+    MPI = |median| / (1.4826 x MAD), i.e. the inverse of a robust CV. When
+    *groups* (aligned with ``dataset.samples``) has at least two levels with
+    >=3 study samples, MPI is the mean of within-group MPI values so biological
+    differences are not treated as noise.
     """
-    numeric = _numeric_expression(dataset)
+    numeric = _linear_study_values(dataset)
+    groups = _study_groups(dataset, groups)
     if numeric.shape[0] < _MIN_SAMPLES_MPI or numeric.shape[1] < 1:
         return None
 
@@ -161,8 +194,8 @@ def compute_dynamic_range(
     group_column: str = "",
     group_counts: dict[str, int] | None = None,
 ) -> DynamicRangeData | None:
-    """Relative IQR per protein: IQR / |median|."""
-    numeric = _numeric_expression(dataset)
+    """Relative spread per protein: IQR / median of study samples on a linear scale."""
+    numeric = _linear_study_values(dataset)
     if numeric.shape[0] < _MIN_SAMPLES_DYNAMIC_RANGE or numeric.shape[1] < 1:
         return None
 
@@ -195,8 +228,8 @@ def compute_rank_concordance(
     group_column: str = "",
     group_counts: dict[str, int] | None = None,
 ) -> RankConcordanceData | None:
-    """Spearman correlation of protein ranks between sample pairs."""
-    numeric = _numeric_expression(dataset)
+    """Spearman correlation of protein ranks between study-sample pairs."""
+    numeric = _numeric_expression(dataset).loc[_study_mask(dataset)].reset_index(drop=True)
     n_samples = numeric.shape[0]
     if n_samples < 2 or numeric.shape[1] < _MIN_OVERLAP_RANK:
         return None
@@ -240,8 +273,14 @@ def compute_rank_concordance(
 
 
 def compute_agnostic_qc(dataset: AffinityDataset) -> dict[str, object]:
-    """Compute MPI, dynamic range, and rank concordance for a dataset."""
-    resolved = resolve_biological_groups(dataset)
+    """Compute MPI, relative spread and rank concordance for a dataset (study samples).
+
+    Biological groups are resolved on study samples only, so control samples
+    (whose IDs often contain words such as "control") cannot create groups.
+    """
+    from pyprideap.processing.filtering import filter_controls
+
+    resolved = resolve_biological_groups(filter_controls(dataset))
     groups: pd.Series | None = None
     group_column = ""
     group_counts: dict[str, int] = {}
