@@ -1223,3 +1223,14 @@ class TestSweepFixes:
         items = {i.category: i for i in compute_all(_prepare_qc_dataset(ds, path))["readiness"].items}
         assert "no factor value" in items["Study groups"].detail
         assert items["SDRF linked to samples"].detail.startswith("SDRF provided; 5 of 5")
+
+    def test_merge_picks_the_sample_column_that_matches(self):
+        from pyprideap.io.readers.sdrf import merge_sdrf
+
+        # PAD000014: SampleName is more varied, but the SDRF uses SampleId
+        ds = self._olink(["X", "X", "X"], {"SampleId": ["5530 P", "5531 P", "5532 P"], "SampleName": ["a", "b", "c"]})
+        ds.samples = ds.samples.drop(columns=["SampleID"])
+        sdrf = pd.DataFrame(
+            {"source name": ["PAD000014-5530_P", "PAD000014-5531_P", "PAD000014-5532_P"], "sex": list("fmf")}
+        )
+        assert merge_sdrf(ds, sdrf).samples["sex"].tolist() == ["f", "m", "f"]
