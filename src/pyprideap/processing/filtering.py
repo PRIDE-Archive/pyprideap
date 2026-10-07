@@ -124,8 +124,10 @@ def get_unique_samples(
     """
     samples = dataset.samples
 
-    if exclude_controls and "SampleType" in samples.columns:
-        is_control = samples["SampleType"].astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+    if exclude_controls:
+        # Same matching as filter_controls (vendor spellings such as NEGATIVE_CONTROL,
+        # and an SDRF "sample type" column when merged)
+        is_control = control_sample_mask(samples)
         samples = samples[~is_control]
         logger.debug(
             "get_unique_samples: excluded %d control samples",
