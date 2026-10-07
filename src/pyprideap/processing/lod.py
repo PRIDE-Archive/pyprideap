@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
-from pyprideap.processing.filtering import _CONTROL_SAMPLE_TYPES
+from pyprideap.processing.filtering import _CONTROL_SAMPLE_TYPES, normalize_sample_type
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +60,11 @@ _NEGATIVE_CONTROL_TYPES = frozenset(
     {
         "negative",
         "negative control",
-        "negative_control",
         "neg",
     }
 )
+# Fallback when no explicit negative controls exist: labels that denote blanks.
+_BLANK_CONTROL_TYPES = frozenset({"control", "blank", "buffer", "buffer control"})
 
 
 class LodMethod(Enum):
@@ -110,7 +111,8 @@ class LodStats:
 def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
     """Return a boolean mask over ``dataset.samples`` for negative controls.
 
-    For Olink: matches NEGATIVE_CONTROL types, falls back to generic controls.
+    For Olink: matches NEGATIVE_CONTROL types, falls back to generic blank-like
+    controls (never plate/sample/positive controls or calibrators, which contain protein).
     For SomaScan: matches NEGATIVE_CONTROL types, falls back to Buffer samples
     only (Calibrator/QC samples contain protein at known concentrations and
     must NOT be used as negative controls).
@@ -120,7 +122,7 @@ def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
     if "SampleType" not in dataset.samples.columns:
         raise ValueError("SampleType column required to identify negative controls")
 
-    st = dataset.samples["SampleType"].astype(str).str.lower().str.strip()
+    st = normalize_sample_type(dataset.samples["SampleType"])
 
     is_negative = st.isin(_NEGATIVE_CONTROL_TYPES)
     if is_negative.any():
@@ -134,8 +136,8 @@ def _find_negative_controls(dataset: AffinityDataset) -> pd.Series:
         if is_buffer.any():
             return is_buffer
     else:
-        # Olink: fall back to generic control-like samples
-        is_control = st.isin(_CONTROL_SAMPLE_TYPES)
+        # Olink: fall back to generic blank-like controls
+        is_control = st.isin(_BLANK_CONTROL_TYPES)
         if is_control.any():
             return is_control
 
@@ -244,7 +246,7 @@ def compute_nc_lod_detailed(
         nc_counts = count_matrix[control_mask].apply(pd.to_numeric, errors="coerce")
         max_counts = nc_counts.max()
         lod_count = np.maximum(_LOD_COUNT_FLOOR, _LOD_COUNT_MULTIPLIER * max_counts)
-        lod_method = pd.Series(
+        lod_method: pd.Series = pd.Series(
             np.where(max_counts > _LOD_COUNT_FLOOR, "lod_npx", "lod_count"),
             index=lod_npx.index,
         )
@@ -346,7 +348,7 @@ def compute_pc_normalized_lod(
                 plate_idx = plates[plates == plate_id].index
                 lod_matrix.loc[plate_idx] = lod_matrix.loc[plate_idx].subtract(plate_median, axis=1)
 
-    return lod_matrix
+    return cast(pd.DataFrame, lod_matrix)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +371,7 @@ def _find_buffer_samples(dataset: AffinityDataset) -> pd.Series:
     if "SampleType" not in dataset.samples.columns:
         raise ValueError("SampleType column required to identify buffer samples")
 
-    st = dataset.samples["SampleType"].astype(str).str.lower().str.strip()
+    st = normalize_sample_type(dataset.samples["SampleType"])
     is_buffer = st.isin(_BUFFER_SAMPLE_TYPES)
     if not is_buffer.any():
         raise ValueError(
@@ -426,7 +428,7 @@ def _intensity_adjustment(
 
     st = dataset.samples.get("SampleType")
     if st is not None:
-        is_ext_ctrl = st.astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+        is_ext_ctrl = normalize_sample_type(st).isin(_CONTROL_SAMPLE_TYPES)
     else:
         is_ext_ctrl = pd.Series(False, index=dataset.samples.index)
 
@@ -446,7 +448,7 @@ def _intensity_adjustment(
         # Adjustment = plate_median - global_median
         adjustments.loc[grp_idx] = plate_median - global_median
 
-    return adjustments
+    return cast(pd.Series | None, adjustments)
 
 
 def compute_nclod(
@@ -523,9 +525,15 @@ def get_reported_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | Non
 
     if "OlinkID" in dataset.features.columns:
         lod_map = dict(zip(dataset.features["OlinkID"], lod_series))
-        return pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns})
+        return cast(
+            pd.Series,
+            pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns}),
+        )
 
-    return pd.Series(lod_series.values, index=dataset.expression.columns[: len(lod_series)])
+    return cast(
+        pd.Series,
+        pd.Series(lod_series.values, index=dataset.expression.columns[: len(lod_series)]),
+    )
 
 
 _CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
@@ -621,7 +629,7 @@ def load_fixed_lod(
         lod_map = dict(zip(lod_dedup["OlinkID"], lod_dedup["LODNPX"]))
 
     lod_series = pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns})
-    return lod_series
+    return cast(pd.Series, lod_series)
 
 
 # Backwards-compat alias

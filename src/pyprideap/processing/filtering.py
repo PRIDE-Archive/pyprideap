@@ -3,50 +3,84 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
+
+import pandas as pd
 
 from pyprideap.core import AffinityDataset
 
 logger = logging.getLogger(__name__)
 
-# Known control sample type values (case-insensitive matching)
-_CONTROL_SAMPLE_TYPES = {
-    "control",
-    "sample control",
-    "negative",
-    "negative control",
-    "negative_control",
-    "neg",
-    "pos",
-    "positive control",
-    "positive_control",
-    "calibrator",
-    "reference",
-    "standard",
-    "qc",
-    "buffer",
-    "plate control",
-}
+# Known control sample type values, in normalized form (see normalize_sample_type):
+# lower case, with "_" / "-" folded to spaces, so vendor spellings such as
+# Olink "PLATE_CONTROL" / "SAMPLE_CONTROL" and SDRF "plate control" all match.
+_CONTROL_SAMPLE_TYPES = frozenset(
+    {
+        "control",
+        "sample control",
+        "plate control",
+        "negative",
+        "negative control",
+        "neg",
+        "pos",
+        "positive",
+        "positive control",
+        "calibrator",
+        "calibrator control",
+        "reference",
+        "standard",
+        "qc",
+        "buffer",
+        "buffer control",
+        "blank",
+    }
+)
+
+# Sample x assay matrices in metadata that must be subset together with samples
+_PER_SAMPLE_METADATA = ("lod_matrix", "count_matrix", "ext_count", "assay_qc_matrix", "sample_qc_matrix")
+
+# SDRF characteristics[sample type] after read_sdrf() shortens the column name
+_SDRF_SAMPLE_TYPE_COLUMN = "sample type"
+
+
+def normalize_sample_type(values: pd.Series) -> pd.Series:
+    """Normalize sample type labels for matching: lower case, ``_``/``-`` → space, single spaces."""
+    return values.astype(str).str.lower().str.replace(r"[_\-\s]+", " ", regex=True).str.strip()
+
+
+def control_sample_mask(samples: pd.DataFrame) -> pd.Series:
+    """Boolean mask of control (non-biological) samples.
+
+    Uses the vendor ``SampleType`` column and, when an SDRF has been merged,
+    its ``sample type`` column; a sample is a control if either says so.
+    """
+    mask = pd.Series(False, index=samples.index)
+    for col in ("SampleType", _SDRF_SAMPLE_TYPE_COLUMN):
+        if col in samples.columns:
+            mask |= normalize_sample_type(samples[col]).isin(_CONTROL_SAMPLE_TYPES)
+    return cast(pd.Series, mask)
 
 
 def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
-    """Remove control samples based on the SampleType column.
+    """Remove control samples based on the SampleType (or SDRF sample type) column.
 
     Returns a new AffinityDataset with control samples removed from
     samples, expression, and metadata preserved.
 
-    If SampleType column is not present, returns the dataset unchanged.
+    If neither column is present, returns the dataset unchanged.
     """
-    if "SampleType" not in dataset.samples.columns:
+    if "SampleType" not in dataset.samples.columns and _SDRF_SAMPLE_TYPE_COLUMN not in dataset.samples.columns:
         logger.debug("filter_controls: no SampleType column, returning unchanged")
         return dataset
 
-    is_control = dataset.samples["SampleType"].astype(str).str.lower().str.strip().isin(_CONTROL_SAMPLE_TYPES)
+    is_control = control_sample_mask(dataset.samples)
 
     if not is_control.any():
         logger.debug("filter_controls: no control samples found in %d samples", len(dataset.samples))
         return dataset
 
-    control_types = dataset.samples.loc[is_control, "SampleType"].astype(str).str.lower().str.strip().value_counts()
+    type_col = "SampleType" if "SampleType" in dataset.samples.columns else _SDRF_SAMPLE_TYPE_COLUMN
+    control_types = normalize_sample_type(dataset.samples.loc[is_control, type_col]).value_counts()
     logger.debug(
         "filter_controls: removing %d control samples from %d total: %s",
         is_control.sum(),
@@ -59,9 +93,7 @@ def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
     expression = dataset.expression[keep_mask].reset_index(drop=True)
 
     metadata = dict(dataset.metadata)
-    import pandas as pd
-
-    for key in ("lod_matrix", "count_matrix", "ext_count"):
+    for key in _PER_SAMPLE_METADATA:
         df = metadata.get(key)
         if isinstance(df, pd.DataFrame):
             metadata[key] = df[keep_mask].reset_index(drop=True)
@@ -166,9 +198,7 @@ def filter_qc(
     expression = dataset.expression[keep_mask].reset_index(drop=True)
 
     metadata = dict(dataset.metadata)
-    import pandas as pd
-
-    for key in ("lod_matrix", "count_matrix", "ext_count"):
+    for key in _PER_SAMPLE_METADATA:
         df = metadata.get(key)
         if isinstance(df, pd.DataFrame):
             metadata[key] = df[keep_mask].reset_index(drop=True)

@@ -19,6 +19,7 @@ Two complementary methods:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -236,4 +237,4 @@ def is_iqr_outlier(
     med = values.median()
     iqr = values.quantile(0.75) - values.quantile(0.25)
     threshold = iqr * iqr_multiplier
-    return (values < (med - threshold)) | (values > (med + threshold))
+    return cast(pd.Series, (values < (med - threshold)) | (values > (med + threshold)))

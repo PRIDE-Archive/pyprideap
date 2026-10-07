@@ -100,6 +100,35 @@ def _detect_olink_platform(olink_ids: pd.Series) -> Platform:
     return Platform(counts.index[0])
 
 
+# Per-measurement QC flag columns in Olink exports, mapped to metadata matrix keys.
+# Assay-level: AssayQC (Explore HT / Reveal parquet), Assay_Warning (Explore 3072 CSV).
+# Sample-level, per measurement (it varies by panel/block): SampleQC, QC_Warning.
+_QC_FLAG_COLUMNS = {
+    "AssayQC": "assay_qc_matrix",
+    "Assay_Warning": "assay_qc_matrix",
+    "SampleQC": "sample_qc_matrix",
+    "QC_Warning": "sample_qc_matrix",
+}
+
+
+def _qc_flag_matrices(df: pd.DataFrame, sample_key: str, sample_order: object, assays: pd.Index) -> dict[str, object]:
+    """Pivot per-measurement Olink QC flags into sample x assay matrices of upper-case strings.
+
+    Returns metadata entries ``assay_qc_matrix`` / ``sample_qc_matrix`` for the
+    columns present; when two columns map to the same key the first listed wins.
+    """
+    matrices: dict[str, object] = {}
+    for col, key in _QC_FLAG_COLUMNS.items():
+        if col not in df.columns or key in matrices:
+            continue
+        flags = df[[sample_key, "OlinkID", col]].copy()
+        # Olink writes WARN in current exports; accept the long form too, as filter_qc does
+        flags[col] = flags[col].astype("string").str.strip().str.upper().replace({"WARNING": "WARN"})
+        matrix = flags.pivot_table(index=sample_key, columns="OlinkID", values=col, aggfunc="first")
+        matrices[key] = matrix.reindex(index=sample_order, columns=assays).reset_index(drop=True)
+    return matrices
+
+
 def read_olink_csv(path: str | Path) -> AffinityDataset:
     path = Path(path)
     if not path.exists():
@@ -149,6 +178,8 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
         metadata["lod_matrix"] = lod_matrix
     else:
         logger.debug("No LOD column in input")
+
+    metadata.update(_qc_flag_matrices(df, sample_key, sample_order, expression.columns))
 
     platform = _detect_olink_platform(features["OlinkID"])
 

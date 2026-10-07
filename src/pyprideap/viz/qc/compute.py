@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Hashable
+from dataclasses import dataclass, field, replace
+from typing import cast
 
 import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
+from pyprideap.viz.qc.agnostic import compute_agnostic_qc
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +290,7 @@ def _sample_id_col(dataset: AffinityDataset) -> str:
                 return col
     # SampleID exists but is not unique — try SampleName if fully populated
     if "SampleName" in dataset.samples.columns:
-        non_empty = dataset.samples["SampleName"].astype(str).str.strip().replace("", pd.NA).dropna()
+        non_empty = dataset.samples["SampleName"].astype(str).str.strip().replace({"": pd.NA}).dropna()
         if len(non_empty) == len(dataset.samples):
             return "SampleName"
     # Fall back to whichever ID column exists (even if not fully unique)
@@ -347,9 +350,10 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     # but we can't stratify by PASS/WARN/FAIL.
     has_sample_qc = "SampleQC" in dataset.samples.columns
 
-    from pyprideap.processing.lod import _above_lod_matrix, get_lod_values
+    from pyprideap.processing.lod import _above_lod_matrix
 
-    lod = get_lod_values(dataset)
+    # Same LOD source as the completeness / LOD analysis plots
+    lod = _resolve_lod(dataset)
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
 
     if lod is not None and (isinstance(lod, pd.DataFrame) or len(lod) > 0):
@@ -663,11 +667,16 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
     )
 
 
-def _resolve_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:
-    """Try all LOD sources in priority order.
+def resolve_lod_with_source(dataset: AffinityDataset) -> tuple[pd.DataFrame | pd.Series | None, str | None]:
+    """Resolve the LOD used throughout the QC report, and name its source.
 
-    Olink:    Reported → NCLOD → FixedLOD
-    SomaScan: Reported → NCLOD → eLOD (buffer-based, MAD formula)
+    Olink:    Reported LOD → NCLOD (≥10 negative controls) → FixedLOD
+    SomaScan: Reported LOD → eLOD (buffer-based, MAD formula)
+
+    NCLOD (median + max(0.2, 3·SD)) is defined on log2 NPX by OlinkAnalyze and
+    is never applied to SomaScan RFU, even when there are ≥10 buffer samples.
+
+    Returns ``(lod, source_name)``, or ``(None, None)`` when no source applies.
     """
     from pyprideap.processing.lod import (
         compute_nclod,
@@ -676,32 +685,32 @@ def _resolve_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:
         load_fixed_lod,
     )
 
-    # 1. Reported LOD (from data file)
     lod = get_reported_lod(dataset)
     if lod is not None:
-        return lod
+        return lod, "Reported LOD"
 
-    # 2. NCLOD (from negative controls)
+    if dataset.platform == Platform.SOMASCAN:
+        try:
+            return compute_soma_elod(dataset), "eLOD"
+        except (ValueError, KeyError):
+            return None, None
+
     try:
-        return compute_nclod(dataset, plate_adjusted=True)
+        return compute_nclod(dataset, plate_adjusted=True), "NCLOD"
     except (ValueError, KeyError):
         pass
 
-    # 3. Platform-specific fallback
-    if dataset.platform == Platform.SOMASCAN:
-        # SomaScan eLOD from buffer samples
-        try:
-            return compute_soma_elod(dataset)
-        except (ValueError, KeyError):
-            pass
-    else:
-        # Olink FixedLOD from bundled config
-        try:
-            return load_fixed_lod(dataset)
-        except (ValueError, FileNotFoundError):
-            pass
+    try:
+        return load_fixed_lod(dataset), "FixedLOD"
+    except (ValueError, FileNotFoundError):
+        pass
 
-    return None
+    return None, None
+
+
+def _resolve_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:
+    """LOD from :func:`resolve_lod_with_source`, without the source name."""
+    return resolve_lod_with_source(dataset)[0]
 
 
 def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData | None:
@@ -722,19 +731,6 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
 
     # Filter out control samples — only show biological samples
     ds = filter_controls(dataset)
-    # For SomaScan, also exclude Buffer/Calibrator/QC (not in _CONTROL_SAMPLE_TYPES)
-    if "SampleType" in ds.samples.columns:
-        st = ds.samples["SampleType"].astype(str).str.strip()
-        non_bio = st.str.lower().isin({"buffer", "calibrator", "qc"})
-        if non_bio.any():
-            keep = ~non_bio
-            ds = AffinityDataset(
-                platform=ds.platform,
-                samples=ds.samples.loc[keep].reset_index(drop=True),
-                features=ds.features,
-                expression=ds.expression.loc[keep].reset_index(drop=True),
-                metadata=ds.metadata,
-            )
 
     numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
     sample_ids = _sample_ids(ds)
@@ -807,14 +803,29 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
     )
 
 
-def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | None:
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+def _linear_study_samples(dataset: AffinityDataset) -> AffinityDataset:
+    """Study samples only, with values on a linear scale for CV = SD / mean.
 
-    # Olink NPX values are log2-scale — CV = SD/mean is meaningless on log data.
-    # Convert to linear scale (2^NPX) before computing CV.
-    # SomaScan RFU values are already linear.
-    if dataset.platform != Platform.SOMASCAN:
+    Control samples are dropped. Olink NPX is log2, so it is converted to
+    2^NPX (SD / mean is meaningless on log data); SomaScan RFU is already
+    linear and is used as deposited.
+    """
+    from pyprideap.processing.filtering import filter_controls
+
+    ds = filter_controls(dataset)
+    numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+    if ds.platform != Platform.SOMASCAN:
         numeric = np.power(2, numeric)
+    return replace(ds, expression=numeric)
+
+
+def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | None:
+    """Per-analyte CV (SD / mean) across study samples, on a linear scale.
+
+    See :func:`_linear_study_samples` for the transformation; the same
+    definition is used by :func:`compute_plate_cv`.
+    """
+    numeric = _linear_study_samples(dataset).expression
 
     means = numeric.mean()
     stds = numeric.std()
@@ -841,23 +852,29 @@ def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | No
 def compute_plate_cv(dataset: AffinityDataset) -> PlateCvData | None:
     """Compute intra-plate and inter-plate CV.
 
+    Uses the same definition as :func:`compute_cv_distribution`: study samples
+    only, Olink NPX converted to linear scale (2^NPX), SomaScan RFU as deposited.
+
     Intra-plate CV: for each plate, CV = SD / mean per analyte across samples.
     Returned in long format (one entry per analyte per plate).
 
     Inter-plate CV: for each analyte, CV of plate medians across plates.
     One value per analyte.
 
-    Only applicable when PlateId column exists with >= 2 plates.
+    Only applicable when a plate column (SomaScan ``PlateId``, Olink
+    ``PlateID``) exists with >= 2 plates.
     """
-    if "PlateId" not in dataset.samples.columns:
+    plate_col = next((c for c in ("PlateId", "PlateID") if c in dataset.samples.columns), None)
+    if plate_col is None:
         return None
 
-    plates = dataset.samples["PlateId"]
-    unique_plates = sorted(plates.unique(), key=str)
+    ds = _linear_study_samples(dataset)
+    plates = ds.samples[plate_col]
+    unique_plates = sorted(plates.dropna().unique(), key=str)
     if len(unique_plates) < 2:
         return None
 
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = ds.expression
 
     # --- Intra-plate CV (long format) ---
     intra_cv: list[float] = []
@@ -1415,6 +1432,618 @@ def compute_bridgeability(
     )
 
 
+# ---------------------------------------------------------------------------
+# Technical QC: replicate-control CV, plate/batch effect, vendor QC flags
+# ---------------------------------------------------------------------------
+
+# Replicate controls of one material that are not used for normalization or
+# calibration, so their CV is an independent estimate of technical precision.
+# Olink PLATE_CONTROLs feed plate normalization and SomaScan Calibrators feed
+# calibration; both would understate the CV and are not used.
+_TECHNICAL_REPLICATE_TYPES = {
+    "olink": ("sample control", "Sample controls"),
+    "somascan": ("qc", "QC samples"),
+}
+_MIN_REPLICATES = 3
+
+
+@dataclass
+class ReplicateCvData:
+    """Technical CV across replicate controls next to the CV across study samples."""
+
+    control_label: str
+    n_replicates: int
+    technical_cv: list[float]
+    study_cv: list[float]
+    n_assays_total: int
+    lod_filtered: bool  # technical_cv excludes assays below LOD in the controls (where LOD is known)
+    title: str = "Technical vs Study-Sample CV"
+
+
+def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
+    """CV of each assay across replicate control samples (Olink sample controls, SomaScan QC samples).
+
+    Values are linearized the same way as :func:`compute_cv_distribution`
+    (Olink 2^NPX, SomaScan RFU as deposited). When an LOD is available only
+    assays whose median control value is above LOD are kept, because CVs of
+    assays at noise level are not meaningful.
+    """
+    from pyprideap.processing.filtering import normalize_sample_type
+
+    if "SampleType" not in dataset.samples.columns:
+        return None
+    family = "somascan" if dataset.platform == Platform.SOMASCAN else "olink"
+    control_type, label = _TECHNICAL_REPLICATE_TYPES[family]
+    is_rep = (normalize_sample_type(dataset.samples["SampleType"]) == control_type).to_numpy()
+    n_rep = int(is_rep.sum())
+    if n_rep < _MIN_REPLICATES:
+        return None
+
+    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    controls = numeric.loc[is_rep]
+    linear = np.power(2, controls) if family == "olink" else controls
+    cv = (linear.std() / linear.mean()).replace([np.inf, -np.inf], np.nan)
+
+    lod = _resolve_lod(dataset)
+    lod_filtered = lod is not None
+    if lod is not None:
+        if isinstance(lod, pd.DataFrame):
+            lod_ctrl = lod.reindex(columns=numeric.columns).loc[is_rep].median()
+        else:
+            lod_ctrl = pd.Series(lod).reindex(numeric.columns)
+        # Assays without a known LOD (e.g. missing from the FixedLOD reference) are kept
+        lod_filtered = bool(lod_ctrl.notna().any())
+        detected = (controls.median() > lod_ctrl) | lod_ctrl.isna()
+        cv = cv[detected]
+    cv = cv.dropna()
+    if cv.empty:
+        return None
+
+    study = compute_cv_distribution(dataset)
+    return ReplicateCvData(
+        control_label=label,
+        n_replicates=n_rep,
+        technical_cv=cv.round(4).tolist(),
+        study_cv=study.cv_values if study is not None else [],
+        n_assays_total=int(numeric.shape[1]),
+        lod_filtered=lod_filtered,
+    )
+
+
+@dataclass
+class BatchEffectData:
+    """Association of the main expression structure with plate, and per-plate signal."""
+
+    pc_labels: list[str]
+    variance_explained: list[float]  # fraction of total variance per PC
+    plate_r2: list[float]  # fraction of each PC's variance explained by plate (eta squared)
+    plate_ids: list[str]
+    plate_sample_medians: list[list[float]]  # per plate: per-sample median signal
+    value_label: str
+    title: str = "Plate Effect on Principal Components"
+
+
+def _plate_column(samples: pd.DataFrame) -> str | None:
+    return next((c for c in ("PlateId", "PlateID") if c in samples.columns), None)
+
+
+def compute_batch_effect(dataset: AffinityDataset, n_components: int = 5) -> BatchEffectData | None:
+    """How much of each top principal component is explained by plate (study samples only).
+
+    PCA uses Olink NPX or SomaScan log10 RFU, assays with at most 50% missing
+    values (median-imputed). For each PC, eta squared = between-plate sum of
+    squares / total sum of squares of the PC scores.
+    """
+    from pyprideap.processing.filtering import filter_controls
+
+    plate_col = _plate_column(dataset.samples)
+    if plate_col is None:
+        return None
+    ds = filter_controls(dataset)
+    plates = ds.samples[plate_col].astype("string")
+    counts = plates.value_counts()
+    keep_plates = counts[counts >= 3].index
+    mask = plates.isin(keep_plates).to_numpy()
+    if len(keep_plates) < 2 or mask.sum() < 6:
+        return None
+
+    numeric = ds.expression.apply(pd.to_numeric, errors="coerce").loc[mask]
+    plates = plates[mask].reset_index(drop=True)
+    if dataset.platform == Platform.SOMASCAN:
+        numeric = np.log10(numeric.where(numeric > 0))
+        value_label = "Median log10 RFU"
+    else:
+        value_label = "Median NPX"
+    numeric = numeric.loc[:, numeric.isna().mean() <= 0.5].reset_index(drop=True)
+    if numeric.shape[1] < 2:
+        return None
+
+    filled = numeric.fillna(numeric.median())
+    centered = filled.to_numpy(dtype=float) - filled.to_numpy(dtype=float).mean(axis=0)
+    n_comp = min(n_components, centered.shape[0] - 1, centered.shape[1])
+    try:
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=n_comp, svd_solver="randomized", random_state=0)
+        scores = pca.fit_transform(centered)
+        var_ratio = pca.explained_variance_ratio_
+    except ImportError:
+        u, sv, _ = np.linalg.svd(centered, full_matrices=False)
+        scores = u[:, :n_comp] * sv[:n_comp]
+        var_ratio = (sv**2 / np.sum(sv**2))[:n_comp]
+
+    codes = pd.Categorical(plates).codes
+    r2 = []
+    for k in range(n_comp):
+        pc = scores[:, k]
+        total = float(np.sum((pc - pc.mean()) ** 2))
+        between = sum(
+            float((codes == g).sum()) * float(pc[codes == g].mean() - pc.mean()) ** 2 for g in np.unique(codes)
+        )
+        r2.append(round(between / total, 4) if total > 0 else 0.0)
+
+    sample_medians = numeric.median(axis=1)
+    plate_ids = sorted(plates.unique(), key=str)
+    return BatchEffectData(
+        pc_labels=[f"PC{k + 1}" for k in range(n_comp)],
+        variance_explained=[round(float(v), 4) for v in var_ratio],
+        plate_r2=r2,
+        plate_ids=[str(p) for p in plate_ids],
+        plate_sample_medians=[sample_medians[plates == p].round(4).tolist() for p in plate_ids],
+        value_label=value_label,
+    )
+
+
+_QC_STATUS_ORDER = ("PASS", "WARN", "FAIL", "NA")
+
+
+@dataclass
+class QcFlagData:
+    """Vendor per-measurement QC flags summarised per panel (Olink AssayQC / SampleQC)."""
+
+    rows: list[str]  # e.g. "Explore_HT · Assay QC"
+    status_pct: dict[str, list[float]]  # status -> % of measurements per row
+    flagged_assay_pct: float | None  # % of measurements with assay QC WARN/FAIL (study samples)
+    sample_worst: dict[str, int]  # per-sample worst sample-QC status across blocks
+    title: str = "Vendor QC Flags"
+
+
+def _status_counts(matrix: pd.DataFrame) -> dict[str, int]:
+    # Flatten via numpy (DataFrame.stack(future_stack=...) needs pandas >= 2.1)
+    vals = pd.Series(matrix.to_numpy().ravel(), dtype="object").fillna("NA").astype(str)
+    vals = vals.where(vals.isin(_QC_STATUS_ORDER[:3]), "NA")
+    counts = vals.value_counts()
+    return {s: int(counts.get(s, 0)) for s in _QC_STATUS_ORDER}
+
+
+def compute_qc_flags(dataset: AffinityDataset) -> QcFlagData | None:
+    """Summarise Olink per-measurement assay and sample QC flags per panel (study samples only)."""
+    from pyprideap.processing.filtering import filter_controls
+
+    ds = filter_controls(dataset)
+    matrices = {
+        name: m
+        for name, key in (("Assay QC", "assay_qc_matrix"), ("Sample QC", "sample_qc_matrix"))
+        if isinstance(m := ds.metadata.get(key), pd.DataFrame) and m.shape == ds.expression.shape
+    }
+    if not matrices:
+        return None
+
+    panels = (
+        ds.features["Panel"].astype(str).to_numpy()
+        if "Panel" in ds.features.columns and len(ds.features) == ds.expression.shape[1]
+        else np.array(["All assays"] * ds.expression.shape[1])
+    )
+    rows: list[str] = []
+    status_pct: dict[str, list[float]] = {s: [] for s in _QC_STATUS_ORDER}
+    for panel in sorted(set(panels)):
+        cols = panels == panel
+        for name, m in matrices.items():
+            counts = _status_counts(m.loc[:, cols])
+            total = sum(counts.values())
+            if total == 0:
+                continue
+            rows.append(f"{panel} · {name}")
+            for st in _QC_STATUS_ORDER:
+                status_pct[st].append(round(100 * counts[st] / total, 2))
+
+    flagged = None
+    if "Assay QC" in matrices:
+        c = _status_counts(matrices["Assay QC"])
+        assessed = c["PASS"] + c["WARN"] + c["FAIL"]
+        flagged = round(100 * (c["WARN"] + c["FAIL"]) / assessed, 2) if assessed else None
+
+    worst: dict[str, int] = {}
+    if "Sample QC" in matrices:
+        rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
+        per_sample = matrices["Sample QC"].apply(
+            lambda r: max((rank.get(str(v), -1) for v in r.dropna()), default=-1), axis=1
+        )
+        names: dict[Hashable, str] = {0: "PASS", 1: "WARN", 2: "FAIL", -1: "NA"}
+        worst = {names[k]: int(v) for k, v in per_sample.value_counts().sort_index().items()}
+
+    return QcFlagData(rows=rows, status_pct=status_pct, flagged_assay_pct=flagged, sample_worst=worst)
+
+
+# ---------------------------------------------------------------------------
+# Pre-analytical indicators, SomaScan dilution breakdown, sex consistency
+# ---------------------------------------------------------------------------
+
+# Marker proteins (gene symbols). Erythrocyte proteins rise with in-vitro hemolysis;
+# platelet alpha-granule / surface proteins rise with platelet activation during
+# collection or with serum vs plasma handling. These are indicators, not diagnoses.
+_PREANALYTICAL_MARKERS = {
+    "hemolysis": ("HBA1", "HBA2", "HBB", "HBD", "HBQ1", "CA1", "CA2", "PRDX2", "BLVRB"),
+    "platelet": ("PF4", "PPBP", "SELP", "GP1BA", "ITGA2B"),
+}
+# Male-specific: Y-chromosome genes and prostate-specific KLK3 (PSA). Female-higher: PZP.
+# LHB/FSHB/CGA are not used: their levels track menopause rather than sex.
+_SEX_MARKERS = {
+    "male": ("KLK3", "EIF1AY", "DDX3Y", "RPS4Y1", "KDM5D", "UTY", "NLGN4Y", "ZFY", "USP9Y"),
+    "female": ("PZP",),
+}
+_MIN_MARKERS = 2
+_ROBUST_Z_OUTLIER = 3.0
+
+
+def _gene_symbols(dataset: AffinityDataset) -> pd.Series:
+    """Gene symbol(s) per feature, aligned with expression columns (Olink Assay, SomaScan EntrezGeneSymbol)."""
+    for col in ("EntrezGeneSymbol", "Assay"):
+        if col in dataset.features.columns and len(dataset.features) == dataset.expression.shape[1]:
+            return dataset.features[col].astype("string").fillna("")
+    return pd.Series([""] * dataset.expression.shape[1], dtype="string")
+
+
+def _log_study_matrix(dataset: AffinityDataset) -> tuple[AffinityDataset, pd.DataFrame]:
+    """Study samples and their log-scale matrix (Olink NPX, SomaScan log10 RFU)."""
+    from pyprideap.processing.filtering import filter_controls
+
+    ds = filter_controls(dataset)
+    numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+    if ds.platform == Platform.SOMASCAN:
+        numeric = np.log10(numeric.where(numeric > 0))
+    return ds, numeric
+
+
+def _marker_columns(symbols: pd.Series, markers: tuple[str, ...]) -> dict[str, int]:
+    """Map each marker gene to the first feature column whose symbol list contains only that gene."""
+    found: dict[str, int] = {}
+    for idx, sym in enumerate(symbols):
+        genes = [g for g in str(sym).replace(",", "|").split("|") if g.strip()]
+        # Multi-target reagents (e.g. "HBA1|HBA2") are accepted when all their genes are markers
+        if genes and all(g.strip() in markers for g in genes):
+            for g in genes:
+                found.setdefault(g.strip(), idx)
+    return found
+
+
+def _marker_score(numeric: pd.DataFrame, columns: list[int]) -> pd.Series:
+    """Mean of per-marker z-scores across samples (NaN-tolerant)."""
+    sub = numeric.iloc[:, sorted(set(columns))]
+    z = (sub - sub.mean()) / sub.std(ddof=0).replace(0, np.nan)
+    return cast(pd.Series, z.mean(axis=1))
+
+
+def _robust_z(values: pd.Series) -> pd.Series:
+    med = values.median()
+    mad = (values - med).abs().median() * _MAD_TO_SD_FACTOR
+    return (values - med) / mad if mad and mad > 0 else values * 0.0
+
+
+_MAD_TO_SD_FACTOR = 1.4826
+
+
+@dataclass
+class PreanalyticalData:
+    """Per-sample hemolysis and platelet-activation indicator scores (study samples)."""
+
+    sample_ids: list[str]
+    scores: dict[str, list[float]]  # indicator -> per-sample score (mean marker z-score)
+    markers: dict[str, list[str]]  # indicator -> marker genes used
+    outliers: dict[str, list[str]]  # indicator -> sample ids with robust z > threshold
+    threshold: float = _ROBUST_Z_OUTLIER
+    title: str = "Pre-analytical Indicators"
+
+
+def compute_preanalytical(dataset: AffinityDataset) -> PreanalyticalData | None:
+    """Hemolysis and platelet-activation indicator scores from marker proteins.
+
+    Each indicator is the mean z-score of its marker proteins present on the
+    panel (at least two required). Samples whose score is more than 3 robust
+    SDs (median/MAD) above the median are listed as outliers.
+    """
+    ds, numeric = _log_study_matrix(dataset)
+    if numeric.shape[0] < 5:
+        return None
+    symbols = _gene_symbols(ds)
+    scores: dict[str, list[float]] = {}
+    markers: dict[str, list[str]] = {}
+    outliers: dict[str, list[str]] = {}
+    sample_ids = _sample_ids(ds)
+    for name, genes in _PREANALYTICAL_MARKERS.items():
+        cols = _marker_columns(symbols, genes)
+        # Count distinct reagents: a multi-target reagent (e.g. "HBA1|HBA2") is one measurement
+        if len(set(cols.values())) < _MIN_MARKERS:
+            continue
+        score = _marker_score(numeric, list(cols.values()))
+        rz = _robust_z(score)
+        scores[name] = score.round(4).tolist()
+        markers[name] = sorted(cols)
+        outliers[name] = [sid for sid, z in zip(sample_ids, rz) if pd.notna(z) and z > _ROBUST_Z_OUTLIER]
+    if not scores:
+        return None
+    return PreanalyticalData(sample_ids=sample_ids, scores=scores, markers=markers, outliers=outliers)
+
+
+@dataclass
+class DilutionQcData:
+    """SomaScan QC broken down by dilution bin."""
+
+    dilutions: list[str]  # e.g. ["20%", "0.5%", "0.005%"]
+    n_assays: list[int]
+    study_cv: list[list[float]]  # per dilution: per-assay CV across study samples
+    technical_cv: list[list[float]]  # per dilution: per-assay CV across QC samples (may be empty)
+    above_lod_pct: list[float | None]  # per dilution: % of assays above LOD in >50% of study samples
+    norm_scale: list[list[float]]  # per dilution: per-sample NormScale_<dilution>, if present
+    title: str = "QC by Dilution"
+
+
+def _dilution_label(value: str) -> str:
+    return f"{value}%"
+
+
+def compute_dilution_qc(dataset: AffinityDataset) -> DilutionQcData | None:
+    """CV, technical CV, LOD detectability and normalization scale per SomaScan dilution bin."""
+    if dataset.platform != Platform.SOMASCAN or "Dilution" not in dataset.features.columns:
+        return None
+    if len(dataset.features) != dataset.expression.shape[1]:
+        return None
+    dil = dataset.features["Dilution"].astype(str).str.strip().to_numpy()
+    bins = sorted({d for d in dil if d not in ("", "0", "nan")}, key=lambda d: -float(d))
+    if len(bins) < 2:
+        return None
+
+    study = compute_cv_distribution(dataset)
+    study_cv = pd.Series(study.cv_values, index=study.feature_ids) if study else pd.Series(dtype=float)
+    rep = compute_replicate_cv(dataset)
+    columns = dataset.expression.columns
+    rep_cv = pd.Series(dtype=float)
+    if rep is not None:
+        # Recompute unfiltered per-assay technical CV with feature ids for grouping
+        from pyprideap.processing.filtering import normalize_sample_type
+
+        is_qc = (normalize_sample_type(dataset.samples["SampleType"]) == "qc").to_numpy()
+        qc = dataset.expression.apply(pd.to_numeric, errors="coerce").loc[is_qc]
+        rep_cv = (qc.std() / qc.mean()).replace([np.inf, -np.inf], np.nan)
+
+    # Share of study samples above LOD per assay. The LOD is resolved on the full
+    # dataset because SomaScan eLOD is estimated from buffer samples.
+    from pyprideap.processing.filtering import control_sample_mask
+    from pyprideap.processing.lod import _above_lod_matrix
+
+    above = None
+    lod = _resolve_lod(dataset)
+    if lod is not None:
+        is_study = ~control_sample_mask(dataset.samples).to_numpy()
+        numeric_all = dataset.expression.apply(pd.to_numeric, errors="coerce")
+        above_m, has_lod = _above_lod_matrix(numeric_all, lod)
+        valid = (numeric_all.notna() & has_lod).loc[is_study]
+        n_valid = valid.sum()
+        above = ((above_m & has_lod).loc[is_study].sum() / n_valid.where(n_valid > 0)) * 100
+        above.index = above.index.astype(str)
+
+    out = DilutionQcData([], [], [], [], [], [])
+    for b in bins:
+        cols = columns[dil == b]
+        out.dilutions.append(_dilution_label(b))
+        out.n_assays.append(len(cols))
+        out.study_cv.append(study_cv.reindex(cols).dropna().round(4).tolist())
+        out.technical_cv.append(rep_cv.reindex(cols).dropna().round(4).tolist())
+        if above is not None:
+            vals = above.reindex([str(c) for c in cols]).dropna()
+            out.above_lod_pct.append(round(float((vals > 50).mean() * 100), 1) if len(vals) else None)
+        else:
+            out.above_lod_pct.append(None)
+        ns_col = "NormScale_" + b.replace(".", "_")
+        if ns_col in dataset.samples.columns:
+            out.norm_scale.append(pd.to_numeric(dataset.samples[ns_col], errors="coerce").dropna().round(4).tolist())
+        else:
+            out.norm_scale.append([])
+    return out
+
+
+@dataclass
+class SexCheckData:
+    """Protein-based sex score per sample, optionally compared with annotated sex."""
+
+    sample_ids: list[str]
+    score: list[float]  # high = male-like
+    predicted: list[str]  # "male" / "female"
+    annotated: list[str]  # annotated sex or "" when not available
+    markers: dict[str, list[str]]  # markers used in the score ("male" / "female" direction)
+    mismatches: list[str]  # sample ids where prediction and annotation disagree
+    threshold: float
+    # Candidate markers on the panel and how well each separates the sexes:
+    # AUC in its expected direction when annotation is available, else NaN
+    marker_auc: dict[str, float] = field(default_factory=dict)
+    title: str = "Sex Consistency"
+
+
+def _annotated_sex(samples: pd.DataFrame) -> list[str]:
+    for col in ("sex", "Sex", "gender", "Gender"):
+        if col in samples.columns:
+            vals = samples[col].astype("string").str.strip().str.lower().fillna("")
+            return [v if v in ("male", "female") else "" for v in vals]
+    return [""] * len(samples)
+
+
+_SEX_MIN_ASHMAN_D = 3.0  # separation of the two mixture components
+_SEX_MIN_GROUP_FRACTION = 0.05
+_SEX_MIN_BIC_GAIN = 10.0
+
+
+def _two_group_split(values: np.ndarray) -> float | None:
+    """Threshold between two clearly separated groups, or None when the data are not bimodal.
+
+    Fits 1- and 2-component Gaussian mixtures; requires the 2-component model to
+    improve BIC by > 10, Ashman's D >= 3 and the smaller component to hold >= 5%
+    of samples. The threshold is where the two weighted components cross.
+    """
+    try:
+        from sklearn.mixture import GaussianMixture
+    except ImportError:
+        return None
+    x = values.reshape(-1, 1)
+    one = GaussianMixture(1, random_state=0).fit(x)
+    two = GaussianMixture(2, random_state=0, n_init=3).fit(x)
+    if one.bic(x) - two.bic(x) < _SEX_MIN_BIC_GAIN or two.weights_.min() < _SEX_MIN_GROUP_FRACTION:
+        return None
+    mu = two.means_.ravel()
+    sd = np.sqrt(two.covariances_.ravel())
+    ashman_d = np.sqrt(2) * abs(mu[0] - mu[1]) / np.sqrt(sd[0] ** 2 + sd[1] ** 2)
+    if ashman_d < _SEX_MIN_ASHMAN_D:
+        return None
+    grid = np.linspace(mu.min(), mu.max(), 512).reshape(-1, 1)
+    labels = two.predict(grid)
+    change = np.nonzero(np.diff(labels))[0]
+    return float(grid[change[0] + 1, 0]) if len(change) else float(mu.mean())
+
+
+# Minimum AUC (annotated groups, expected direction) for a marker to enter the score.
+# Reagent specificity differs between platforms and versions: e.g. on SomaScan v4
+# (PAD000003) KLK3 separates sexes with AUC 0.98 but the EIF1AY and NLGN4Y reagents
+# do not (0.49, 0.61), and averaging them in drowns the KLK3 signal.
+_SEX_MIN_MARKER_AUC = 0.8
+
+
+def _auc(values: pd.Series, positive: np.ndarray) -> float:
+    """Mann-Whitney AUC: probability that a positive sample has a higher value than a negative one."""
+    v = values.to_numpy(dtype=float)
+    ok = ~np.isnan(v)
+    v, pos = v[ok], positive[ok]
+    n_pos, n_neg = int(pos.sum()), int((~pos).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    ranks = pd.Series(v).rank().to_numpy()
+    return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def _youden_threshold(high: np.ndarray, low: np.ndarray) -> float:
+    """Cut that maximises sensitivity + specificity for separating *high* from *low*."""
+    candidates = np.unique(np.concatenate([high, low]))
+    return float(max(candidates, key=lambda t: (high > t).mean() + (low <= t).mean()))
+
+
+def _sex_mismatches(
+    ids: list[str], score: np.ndarray, annotated: np.ndarray, male: np.ndarray, female: np.ndarray
+) -> list[str]:
+    """Samples whose score is an outlier for their annotated sex and typical of the other sex."""
+
+    def robust_z(v: float, ref: np.ndarray) -> float:
+        med = float(np.median(ref))
+        mad = float(np.median(np.abs(ref - med))) * _MAD_TO_SD_FACTOR
+        return (v - med) / mad if mad > 0 else 0.0
+
+    m_lo, m_hi = np.percentile(male, [5, 95])
+    f_lo, f_hi = np.percentile(female, [5, 95])
+    out = []
+    for sid, a, v in zip(ids, annotated, score):
+        if np.isnan(v):
+            continue
+        if a == "female" and robust_z(v, female) > _ROBUST_Z_OUTLIER and m_lo <= v <= m_hi:
+            out.append(sid)
+        elif a == "male" and robust_z(v, male) < -_ROBUST_Z_OUTLIER and f_lo <= v <= f_hi:
+            out.append(sid)
+    return out
+
+
+def compute_sex_check(dataset: AffinityDataset) -> SexCheckData | None:
+    """Protein-based sex score, compared with annotated sex when a ``sex`` column is present.
+
+    Candidate markers are Y-linked genes and KLK3 (higher in males) and PZP
+    (higher in females). Only markers that actually separate the sexes in this
+    dataset enter the score (mean z of male markers minus mean z of female markers):
+
+    * With annotated sex (>= 3 per group): markers with AUC >= 0.8 for the
+      annotated groups. The plotted threshold maximises sensitivity +
+      specificity (Youden). A sample is reported as a mismatch only when its
+      score is an outlier for its own annotated group (robust z > 3 towards the
+      other sex) and lies within the other group's central 90%. Wide normal
+      variation (e.g. low PSA in some men) is therefore not flagged.
+    * Without annotation: male markers that are individually bimodal (see
+      :func:`_two_group_split`); samples are split only when the combined
+      score is bimodal too.
+
+    Returns None when no marker qualifies, so uninformative panels and
+    single-sex cohorts produce no plot rather than false sample swaps.
+    """
+    ds, numeric = _log_study_matrix(dataset)
+    if numeric.shape[0] < 10:
+        return None
+    symbols = _gene_symbols(ds)
+    candidates = {
+        **{g: (i, "male") for g, i in _marker_columns(symbols, _SEX_MARKERS["male"]).items()},
+        **{g: (i, "female") for g, i in _marker_columns(symbols, _SEX_MARKERS["female"]).items()},
+    }
+    if not any(direction == "male" for _, direction in candidates.values()):
+        return None
+
+    annotated = _annotated_sex(ds.samples)
+    ann = np.array(annotated)
+    has_annotation = (ann == "male").sum() >= 3 and (ann == "female").sum() >= 3
+
+    marker_auc: dict[str, float] = {}
+    used: dict[str, list[int]] = {"male": [], "female": []}
+    for gene, (idx, direction) in sorted(candidates.items()):
+        values = numeric.iloc[:, idx]
+        if has_annotation:
+            labelled = ann != ""
+            auc = _auc(values[labelled], ann[labelled] == direction)
+            marker_auc[gene] = round(auc, 3)
+            if auc >= _SEX_MIN_MARKER_AUC:
+                used[direction].append(idx)
+        else:
+            marker_auc[gene] = float("nan")
+            if direction == "male" and _two_group_split(values.dropna().to_numpy()) is not None:
+                used["male"].append(idx)
+    if not used["male"] and not used["female"]:
+        return None
+
+    score = pd.Series(0.0, index=numeric.index)
+    if used["male"]:
+        score = score + _marker_score(numeric, used["male"])
+    if used["female"]:
+        score = score - _marker_score(numeric, used["female"])
+    valid = score.notna().to_numpy()
+    if valid.sum() < 10:
+        return None
+
+    if has_annotation:
+        male_scores = score[(ann == "male") & valid].to_numpy()
+        female_scores = score[(ann == "female") & valid].to_numpy()
+        threshold = _youden_threshold(male_scores, female_scores)
+    else:
+        split = _two_group_split(score[valid].to_numpy())
+        if split is None:
+            return None
+        threshold = split
+
+    predicted = ["male" if (pd.notna(v) and v > threshold) else ("female" if pd.notna(v) else "") for v in score]
+    ids = _sample_ids(ds)
+    mismatches = _sex_mismatches(ids, score.to_numpy(), ann, male_scores, female_scores) if has_annotation else []
+    names = {idx: gene for gene, (idx, _) in candidates.items()}
+    return SexCheckData(
+        sample_ids=ids,
+        score=score.round(4).tolist(),
+        predicted=predicted,
+        annotated=annotated,
+        markers={d: sorted(names[i] for i in used[d]) for d in ("male", "female")},
+        mismatches=mismatches,
+        threshold=round(float(threshold), 4),
+        marker_auc=marker_auc,
+    )
+
+
 def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     """Compute all applicable QC plot data for the dataset."""
     logger.debug(
@@ -1433,6 +2062,12 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     results["plate_cv"] = compute_plate_cv(dataset)
     results["norm_scale"] = compute_norm_scale(dataset)
     results["lod_comparison"] = compute_lod_comparison(dataset)
+    results["replicate_cv"] = compute_replicate_cv(dataset)
+    results["batch_effect"] = compute_batch_effect(dataset)
+    results["qc_flags"] = compute_qc_flags(dataset)
+    results["preanalytical"] = compute_preanalytical(dataset)
+    results["dilution_qc"] = compute_dilution_qc(dataset)
+    results["sex_check"] = compute_sex_check(dataset)
 
     # SomaScan-specific QC
     if dataset.platform == Platform.SOMASCAN:
@@ -1448,6 +2083,9 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
 
     # UniProt duplicate detection (Olink and SomaScan when feature table has UniProt)
     results["uniprot_duplicates"] = compute_uniprot_duplicates(dataset)
+
+    # Technology-agnostic QC (MPI, dynamic range, rank concordance)
+    results.update(compute_agnostic_qc(dataset))
 
     available = {k: v for k, v in results.items() if v is not None}
     logger.debug("compute_all: %d/%d plots computed successfully", len(available), len(results))

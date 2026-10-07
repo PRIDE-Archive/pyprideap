@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
+    BatchEffectData,
     BridgeabilityData,
     ColCheckData,
     ControlAnalyteData,
     CorrelationData,
     CvDistributionData,
     DataCompletenessData,
+    DilutionQcData,
     DistributionData,
     HeatmapData,
     IqrMedianQcData,
@@ -19,8 +22,12 @@ from pyprideap.viz.qc.compute import (
     OutlierMapData,
     PcaData,
     PlateCvData,
+    PreanalyticalData,
+    QcFlagData,
     QcLodSummaryData,
+    ReplicateCvData,
     RowCheckData,
+    SexCheckData,
     UmapData,
     UniProtDuplicateData,
     VolcanoData,
@@ -210,6 +217,8 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
                 line=dict(width=0.8),
                 opacity=0.4,
                 name=data.sample_ids[idx],
+                # Context traces: hover only; the legend shows the summary bands
+                showlegend=False,
                 hovertemplate=f"{data.sample_ids[idx]}<br>{data.xlabel}: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>",
             )
         )
@@ -219,8 +228,8 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
         title=f"{data.title} (summary of {n_samples} samples)",
         xaxis_title=data.xlabel,
         yaxis_title=data.ylabel,
-        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
-        margin=dict(b=120),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+        margin=dict(b=80),
     )
     return fig
 
@@ -670,6 +679,10 @@ def render_data_completeness(data: DataCompletenessData) -> Figure:
     return fig
 
 
+# Above this many samples, per-sample tick labels are hidden (hover still shows them)
+_MAX_SAMPLE_TICKS = 40
+
+
 def render_sample_completeness(data: DataCompletenessData) -> Figure:
     """Per-sample stacked bar showing above/below LOD as standalone plot."""
     go, _ = _import_plotly()
@@ -698,14 +711,19 @@ def render_sample_completeness(data: DataCompletenessData) -> Figure:
             hovertemplate="%{customdata}<br>Below LOD: %{y:.1f}%<extra></extra>",
         ),
     )
-    fig.update_xaxes(title_text="", tickangle=-45)
+    many = len(short_ids) > _MAX_SAMPLE_TICKS
+    if many:
+        # Sample names would overlap; they remain available on hover
+        fig.update_xaxes(showticklabels=False, title_text=f"Samples (n = {len(short_ids)})")
+    else:
+        fig.update_xaxes(title_text="", tickangle=-45)
     fig.update_yaxes(title_text="% of Proteins", range=[0, 100], ticksuffix="%")
     fig.update_layout(
         title="Sample Completeness",
         barmode="stack",
         height=500,
-        legend=dict(orientation="h", yanchor="top", y=-0.18),
-        margin=dict(b=100),
+        legend=dict(orientation="h", yanchor="top", y=-0.12 if many else -0.18),
+        margin=dict(b=60 if many else 100),
     )
     return fig
 
@@ -766,7 +784,7 @@ def render_cv_distribution(data: CvDistributionData) -> Figure:
         line_dash="dash",
         line_color="#27ae60",
         line_width=2,
-        annotation_text="CV = 0.2",
+        annotation_text="guide: CV = 0.2",
         annotation_position="top right",
         annotation_font_color="#27ae60",
     )
@@ -890,7 +908,7 @@ def render_norm_scale(data: NormScaleData) -> Figure:
                     marker=dict(size=7, color=plate_colors[plate]),
                     name=plate,
                     text=sub["Sample"],
-                    hovertemplate="%{text}<br>NormScale: %{y:.4f}<extra></extra>",
+                    hovertemplate=f"%{{text}}<br>Plate: {plate}<br>NormScale: %{{y:.4f}}<extra></extra>",
                 )
             )
     else:
@@ -914,23 +932,31 @@ def render_norm_scale(data: NormScaleData) -> Figure:
         (1.2, "orange", "dot", "1.2 (warn)"),
         (2.5, "red", "dash", "2.5 (fail)"),
     ]
+    import math
+
     for val, color, dash, label in thresholds:
-        fig.add_hline(
-            y=val, line_dash=dash, line_color=color, line_width=1.5, annotation_text=label, annotation_position="right"
+        fig.add_hline(y=val, line_dash=dash, line_color=color, line_width=1.5)
+        if "warn" in label:
+            continue  # warn lines sit next to 1.0; labelling them makes the labels overlap
+        # Annotations on a log axis take log10 coordinates (add_hline's own label would not)
+        fig.add_annotation(
+            x=1,
+            xref="paper",
+            xanchor="left",
+            y=math.log10(val),
+            yref="y",
+            text=label,
+            showarrow=False,
+            font=dict(size=10, color=color),
         )
 
     n_legend_items = df["Plate"].nunique()
-    if n_legend_items > 15:
-        # Too many plates for horizontal legend — use scrollable vertical legend on the right
-        legend_cfg = dict(
-            orientation="v",
-            yanchor="top",
-            y=1,
-            xanchor="left",
-            x=1.02,
-            font=dict(size=9),
-        )
-        margin_cfg = dict(r=140)
+    show_legend = n_legend_items <= 15
+    if not show_legend:
+        # A legend of many plate colours is unreadable and crowds the threshold labels;
+        # the plate is shown on hover instead
+        legend_cfg = dict()
+        margin_cfg = dict(r=90)
     else:
         legend_cfg = dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
         margin_cfg = dict(b=100)
@@ -938,7 +964,9 @@ def render_norm_scale(data: NormScaleData) -> Figure:
     fig.update_layout(
         title=data.title,
         xaxis_title="Sample Rank (sorted by NormScale)",
-        yaxis_title="HybControlNormScale",
+        # Scale factors are ratios: a log axis keeps 0.4-2.5 readable when one sample is far out
+        yaxis=dict(title="HybControlNormScale (log scale)", type="log"),
+        showlegend=show_legend,
         legend=legend_cfg,
         margin=margin_cfg,
     )
@@ -1666,6 +1694,136 @@ def render_volcano(data: VolcanoData) -> Figure:
     return fig
 
 
+def _case_control_annotation(has_case_control: bool) -> dict:
+    if has_case_control:
+        return dict(
+            x=0.02,
+            y=0.03,
+            xref="paper",
+            yref="paper",
+            text="Case/control: yes",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+            font=dict(size=12, color="#1b5e20"),
+            bgcolor="#c8e6c9",
+            bordercolor="#2e7d32",
+            borderwidth=1.2,
+            borderpad=6,
+        )
+    return dict(
+        x=0.02,
+        y=0.03,
+        xref="paper",
+        yref="paper",
+        text="Case/control: no",
+        showarrow=False,
+        xanchor="left",
+        yanchor="bottom",
+        font=dict(size=12, color="#424242"),
+        bgcolor="#eeeeee",
+        bordercolor="#616161",
+        borderwidth=1.2,
+        borderpad=6,
+    )
+
+
+def _render_median_histogram(
+    values: list[float],
+    *,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    bar_color: str,
+    median_value: float,
+    has_case_control: bool,
+    xmin: float | None = None,
+    xmax: float | None = None,
+) -> Figure:
+    """Histogram with the dataset median marked.
+
+    No quality bands: these metrics depend on the platform, the deposited
+    normalisation and the study design, so fixed cut-offs would read as
+    cross-platform acceptance thresholds.
+    """
+    go, _ = _import_plotly()
+    import numpy as np
+
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    lo = float(np.nanpercentile(arr, 0.5)) if xmin is None and arr.size else (xmin if xmin is not None else 0.0)
+    hi = float(np.nanpercentile(arr, 99.5)) if xmax is None and arr.size else (xmax if xmax is not None else 1.0)
+    shown = arr[(arr >= lo) & (arr <= hi)]
+    fig = go.Figure(
+        go.Histogram(
+            x=shown.tolist(),
+            nbinsx=50,
+            marker=dict(color=bar_color),
+            opacity=0.85,
+            showlegend=False,
+            hovertemplate="%{x}<br>%{y}<extra></extra>",
+        )
+    )
+    fig.add_vline(
+        x=median_value,
+        line_dash="dash",
+        line_color="#2c3e50",
+        line_width=2,
+        annotation_text=f"median {median_value:.2f}",
+        annotation_position="top right",
+    )
+    n_hidden = int(arr.size - shown.size)
+    note = f" ({n_hidden} beyond the 0.5–99.5th percentile not shown)" if n_hidden else ""
+    fig.update_layout(
+        title=title,
+        xaxis_title=xlabel + note,
+        yaxis_title=ylabel,
+        bargap=0.05,
+    )
+    fig.add_annotation(_case_control_annotation(has_case_control))
+    return fig
+
+
+def render_mpi(data: MpiData) -> Figure:
+    return _render_median_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel + " (median / robust SD, linear scale)",
+        ylabel=data.ylabel,
+        bar_color="#3498db",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmin=0.0,
+    )
+
+
+def render_dynamic_range(data: DynamicRangeData) -> Figure:
+    return _render_median_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel,
+        ylabel=data.ylabel,
+        bar_color="#16a085",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmin=0.0,
+    )
+
+
+def render_rank_concordance(data: RankConcordanceData) -> Figure:
+    return _render_median_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel,
+        ylabel=data.ylabel,
+        bar_color="#e67e22",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmin=-1.0,
+        xmax=1.0,
+    )
+
+
 def render_bridgeability(data: BridgeabilityData) -> Figure:
     """Render a 4-panel bridgeability diagnostic plot.
 
@@ -1806,5 +1964,296 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
         height=800,
         legend=dict(orientation="h", yanchor="top", y=-0.18),
         margin=dict(b=100),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Technical QC
+# ---------------------------------------------------------------------------
+
+_STUDY_COLOR = "#3498db"
+_TECH_COLOR = "#e67e22"
+_MAX_PLATE_LABEL = 18
+_QC_STATUS_COLORS = {"PASS": "#2ecc71", "WARN": "#f39c12", "FAIL": "#e74c3c", "NA": "#bdc3c7"}
+
+
+def render_replicate_cv(data: ReplicateCvData) -> Figure:
+    """Overlaid CV distributions: replicate controls (technical) vs study samples."""
+    go, _ = _import_plotly()
+    import numpy as np
+
+    upper = float(np.nanpercentile(data.study_cv + data.technical_cv, 98)) if data.study_cv else 2.0
+    bins = dict(start=0, end=upper, size=upper / 60)
+    fig = go.Figure()
+    if data.study_cv:
+        fig.add_trace(
+            go.Histogram(
+                x=data.study_cv,
+                xbins=bins,
+                histnorm="percent",
+                name=f"Study samples (median {np.median(data.study_cv):.0%})",
+                marker_color=_STUDY_COLOR,
+                opacity=0.55,
+            )
+        )
+    fig.add_trace(
+        go.Histogram(
+            x=data.technical_cv,
+            xbins=bins,
+            histnorm="percent",
+            name=f"{data.control_label}, n={data.n_replicates} (median {np.median(data.technical_cv):.0%})",
+            marker_color=_TECH_COLOR,
+            opacity=0.75,
+        )
+    )
+    fig.update_layout(
+        title=data.title,
+        barmode="overlay",
+        xaxis_title="Coefficient of Variation (linear scale)",
+        yaxis_title="% of Assays",
+        xaxis=dict(range=[0, upper], tickformat=".0%"),
+        legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+        margin=dict(b=90),
+    )
+    return fig
+
+
+def render_batch_effect(data: BatchEffectData) -> Figure:
+    """Share of each principal component's variance explained by plate."""
+    go, _ = _import_plotly()
+    labels = [f"{pc}<br>({v:.0%} of variance)" for pc, v in zip(data.pc_labels, data.variance_explained)]
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=data.plate_r2,
+            marker_color="#9b59b6",
+            text=[f"{r:.0%}" for r in data.plate_r2],
+            textposition="outside",
+            hovertemplate="%{x}<br>Explained by plate: %{y:.1%}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=data.title,
+        yaxis=dict(title="Variance explained by plate (η²)", range=[0, 1.08], tickformat=".0%"),
+        xaxis_title=f"Principal component (study samples, {len(data.plate_ids)} plates)",
+        showlegend=False,
+    )
+    return fig
+
+
+def render_plate_signal(data: BatchEffectData) -> Figure:
+    """Per-sample median signal by plate (study samples)."""
+    go, _ = _import_plotly()
+    from pyprideap.viz.theme import pride_color_discrete
+
+    colors = pride_color_discrete(len(data.plate_ids))
+    many = len(data.plate_ids) > 12
+    # Vendor plate IDs can be long file-like names; use short labels and keep the name on hover
+    short = any(len(p) > _MAX_PLATE_LABEL for p in data.plate_ids)
+    fig = go.Figure()
+    for i, (plate, values, color) in enumerate(zip(data.plate_ids, data.plate_sample_medians, colors), start=1):
+        fig.add_trace(
+            go.Box(
+                y=values,
+                name=f"Plate {i}" if short else plate,
+                marker_color=color,
+                boxpoints="outliers",
+                hovertemplate=f"{plate}<br>%{{y:.2f}}<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title="Sample Signal by Plate",
+        yaxis_title=data.value_label + " per sample",
+        xaxis=dict(
+            showticklabels=not many,
+            title=f"Plates (n = {len(data.plate_ids)})" if many or short else "",
+        ),
+        showlegend=False,
+    )
+    return fig
+
+
+def render_qc_flags(data: QcFlagData) -> Figure:
+    """Stacked horizontal bars of the non-PASS share of measurements, per panel and flag type.
+
+    PASS usually covers >99% of measurements, so plotting the full 0-100% range
+    would hide the flags; the bars show WARN / FAIL / NA only and each row is
+    labelled with its PASS percentage.
+    """
+    go, _ = _import_plotly()
+    fig = go.Figure()
+    for status, values in data.status_pct.items():
+        if status == "PASS" or not any(values):
+            continue
+        fig.add_trace(
+            go.Bar(
+                y=data.rows,
+                x=values,
+                orientation="h",
+                name=status,
+                marker_color=_QC_STATUS_COLORS[status],
+                hovertemplate="%{y}<br>" + status + ": %{x:.2f}%<extra></extra>",
+            )
+        )
+    not_pass = [round(100 - p, 2) for p in data.status_pct["PASS"]]
+    fig.add_trace(
+        go.Scatter(
+            y=data.rows,
+            x=not_pass,
+            mode="text",
+            text=[f"  PASS {p:.2f}%" for p in data.status_pct["PASS"]],
+            textposition="middle right",
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    upper = max(not_pass + [0.0])
+    fig.update_layout(
+        title=data.title,
+        barmode="stack",
+        xaxis=dict(
+            title="% of measurements not PASS (study samples)",
+            range=[0, upper * 1.6 if upper > 0 else 1],
+            ticksuffix="%",
+        ),
+        yaxis=dict(autorange="reversed", automargin=True),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+        height=max(320, 26 * len(data.rows) + 140),
+    )
+    return fig
+
+
+_INDICATOR_LABELS = {"hemolysis": "Hemolysis score", "platelet": "Platelet-activation score"}
+
+
+def render_preanalytical(data: PreanalyticalData) -> Figure:
+    """Per-sample indicator scores; with two indicators a scatter, otherwise a ranked strip."""
+    go, _ = _import_plotly()
+    names = list(data.scores)
+    flagged = {sid for ids in data.outliers.values() for sid in ids}
+    colors = ["#e74c3c" if sid in flagged else "#3498db" for sid in data.sample_ids]
+    hover = [f"{sid}{' (outlier)' if sid in flagged else ''}" for sid in data.sample_ids]
+    fig = go.Figure()
+    if len(names) >= 2:
+        x, y = data.scores[names[0]], data.scores[names[1]]
+        xlab = f"{_INDICATOR_LABELS[names[0]]} ({', '.join(data.markers[names[0]])})"
+        ylab = f"{_INDICATOR_LABELS[names[1]]} ({', '.join(data.markers[names[1]])})"
+    else:
+        order = sorted(range(len(data.sample_ids)), key=lambda i: data.scores[names[0]][i])
+        x = list(range(1, len(order) + 1))
+        y = [data.scores[names[0]][i] for i in order]
+        colors = [colors[i] for i in order]
+        hover = [hover[i] for i in order]
+        xlab = "Samples (ranked)"
+        ylab = f"{_INDICATOR_LABELS[names[0]]} ({', '.join(data.markers[names[0]])})"
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y,
+            mode="markers",
+            marker=dict(color=colors, size=6, opacity=0.75),
+            text=hover,
+            hovertemplate="%{text}<br>%{x:.2f}, %{y:.2f}<extra></extra>",
+            showlegend=False,
+        )
+    )
+    counts = ", ".join(f"{_INDICATOR_LABELS[n].split()[0].lower()}: {len(data.outliers[n])}" for n in names)
+    fig.add_annotation(
+        text=f"Outliers (robust z &gt; {data.threshold:g}) {counts}",
+        xref="paper",
+        yref="paper",
+        x=0.01,
+        y=0.99,
+        showarrow=False,
+        font=dict(size=11, color="#e74c3c"),
+        xanchor="left",
+    )
+    fig.update_layout(title=data.title, xaxis_title=xlab, yaxis_title=ylab)
+    return fig
+
+
+def render_dilution_cv(data: DilutionQcData) -> Figure:
+    """Per-assay CV by SomaScan dilution bin: study samples vs QC replicates."""
+    go, _ = _import_plotly()
+    fig = go.Figure()
+    for values, name, color in (
+        (data.study_cv, "Study samples", _STUDY_COLOR),
+        (data.technical_cv, "QC samples (technical)", _TECH_COLOR),
+    ):
+        if not any(values):
+            continue
+        xs = [d for d, v in zip(data.dilutions, values) for _ in v]
+        ys = [c for v in values for c in v]
+        fig.add_trace(go.Box(x=xs, y=ys, name=name, marker_color=color, boxpoints=False))
+    labels = [
+        f"<b>{d}</b><br>{n} assays" + (f"<br>{pct:.0f}% &gt; LOD" if pct is not None else "")
+        for d, n, pct in zip(data.dilutions, data.n_assays, data.above_lod_pct)
+    ]
+    fig.update_layout(
+        title="CV by Dilution",
+        boxmode="group",
+        xaxis=dict(title="Dilution bin", tickvals=data.dilutions, ticktext=labels, tickangle=0),
+        yaxis=dict(title="CV (RFU, linear scale)", type="log"),
+        legend=dict(orientation="h", yanchor="top", y=-0.32, xanchor="center", x=0.5),
+        margin=dict(b=120),
+    )
+    return fig
+
+
+def render_dilution_norm_scale(data: DilutionQcData) -> Figure:
+    """Per-sample normalization scale factor for each dilution bin."""
+    go, _ = _import_plotly()
+    fig = go.Figure()
+    for d, values in zip(data.dilutions, data.norm_scale):
+        if values:
+            fig.add_trace(go.Box(y=values, name=d, boxpoints="outliers", marker_color="#16a085"))
+    for val, dash in ((0.4, "dash"), (2.5, "dash"), (1.0, "solid")):
+        fig.add_hline(y=val, line_dash=dash, line_color="#e74c3c" if val != 1.0 else "#2ecc71", line_width=1)
+    fig.update_layout(
+        title="Normalization Scale by Dilution",
+        xaxis_title="Dilution bin",
+        yaxis=dict(title="NormScale (log scale)", type="log"),
+        showlegend=False,
+    )
+    return fig
+
+
+def render_sex_check(data: SexCheckData) -> Figure:
+    """Protein sex score per sample, grouped by annotated sex when available; mismatches in red."""
+    go, _ = _import_plotly()
+    import numpy as np
+
+    groups = sorted({a for a in data.annotated if a}) or ["all"]
+    color = {"female": "#9b59b6", "male": "#16a085", "all": "#3498db"}
+    labels = [g.capitalize() if g != "all" else "Study samples" for g in groups]
+    rng = np.random.default_rng(0)
+    mism = set(data.mismatches)
+    fig = go.Figure()
+    for pos, (g, label) in enumerate(zip(groups, labels)):
+        idx = [i for i, a in enumerate(data.annotated) if g == "all" or a == g]
+        ys = [data.score[i] for i in idx]
+        fig.add_trace(go.Box(x=[pos] * len(idx), y=ys, name=label, boxpoints=False, line_color=color[g], width=0.5))
+        fig.add_trace(
+            go.Scatter(
+                x=(pos + rng.uniform(-0.18, 0.18, len(idx))).tolist(),
+                y=ys,
+                mode="markers",
+                marker=dict(
+                    color=["#e74c3c" if data.sample_ids[i] in mism else color[g] for i in idx], size=5, opacity=0.7
+                ),
+                text=[f"{data.sample_ids[i]} (predicted {data.predicted[i]})" for i in idx],
+                hovertemplate="%{text}<br>score %{y:.2f}<extra></extra>",
+            )
+        )
+    fig.add_hline(y=data.threshold, line_dash="dash", line_color="gray", annotation_text="threshold")
+    markers = " − ".join(filter(None, [", ".join(data.markers["male"]), ", ".join(data.markers["female"])]))
+    fig.update_layout(
+        title=data.title,
+        yaxis_title=f"Sex score ({markers})",
+        xaxis=dict(
+            tickvals=list(range(len(groups))), ticktext=labels, title="Annotated sex" if groups != ["all"] else ""
+        ),
+        showlegend=False,
     )
     return fig

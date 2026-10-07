@@ -5,7 +5,12 @@ from pathlib import Path
 import pandas as pd
 
 from pyprideap.core import AffinityDataset
-from pyprideap.io.readers.olink_csv import _detect_olink_platform, _detect_sample_key, _warn_data_quality
+from pyprideap.io.readers.olink_csv import (
+    _detect_olink_platform,
+    _detect_sample_key,
+    _qc_flag_matrices,
+    _warn_data_quality,
+)
 
 _SAMPLE_COLS = {"SampleID", "SampleName", "SampleType", "WellID", "PlateID", "SampleQC", "DataAnalysisRefID"}
 _FEATURE_COLS = {"OlinkID", "UniProt", "Assay", "Panel", "Block", "Normalization"}
@@ -48,7 +53,10 @@ def read_olink_parquet(path: str | Path) -> AffinityDataset:
         samples=samples,
         features=features,
         expression=expression,
-        metadata={"source_file": str(path)},
+        metadata={
+            "source_file": str(path),
+            **_qc_flag_matrices(df, sample_key, sample_order, expression.columns),
+        },
     )
     _warn_data_quality(dataset, source=path.name)
     return dataset

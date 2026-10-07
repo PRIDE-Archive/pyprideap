@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_mod
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -8,11 +9,14 @@ from typing import Any
 import numpy as np
 
 from pyprideap.core import AffinityDataset
+from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
+    BatchEffectData,
     ColCheckData,
     CorrelationData,
     CvDistributionData,
     DataCompletenessData,
+    DilutionQcData,
     DistributionData,
     HeatmapData,
     IqrMedianQcData,
@@ -21,7 +25,11 @@ from pyprideap.viz.qc.compute import (
     NormScaleData,
     PcaData,
     PlateCvData,
+    PreanalyticalData,
+    QcFlagData,
     QcLodSummaryData,
+    ReplicateCvData,
+    SexCheckData,
     UmapData,
     UniProtDuplicateData,
     VolcanoData,
@@ -32,6 +40,67 @@ from pyprideap.viz.qc.compute import (
 logger = logging.getLogger(__name__)
 
 _HELP_TEXT: dict[str, str] = {
+    "replicate_cv": (
+        "Technical precision from replicate controls of a single material: Olink sample controls or "
+        "SomaScan QC samples. Plate controls and calibrators are not used because they feed the vendor "
+        "normalization or calibration, which would make their CVs look artificially small. CVs are on a "
+        "linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited) and, when an LOD is available, "
+        "only assays detected above LOD in the controls are included. The study-sample CV (blue) adds "
+        "biological variation between participants, so it is expected to be much larger. Both depend on "
+        "the normalization applied to the deposited file."
+    ),
+    "batch_effect": (
+        "Principal component analysis of study samples (Olink NPX, SomaScan log10 RFU). Each bar is the "
+        "share of that component's variance explained by plate (η², between-plate over total sum of "
+        "squares); the label gives the component's share of total variance. A high value on a major "
+        "component suggests a plate/batch effect. It can also be legitimate when plates were not "
+        "randomized and coincide with study groups, which is a design issue to check rather than a "
+        "data error."
+    ),
+    "plate_signal": (
+        "Median signal per study sample, grouped by plate. Plates whose box is shifted from the others "
+        "indicate a plate-level offset that normalization did not remove, or a plate holding different "
+        "kinds of samples."
+    ),
+    "preanalytical": (
+        "Indicator scores for pre-analytical handling, computed per study sample as the mean z-score "
+        "of marker proteins present on the panel (listed on the axes): erythrocyte proteins for "
+        "<strong>hemolysis</strong> and platelet proteins for <strong>platelet activation</strong> "
+        "(delayed processing, serum vs plasma handling). Samples more than 3 robust SDs above the "
+        "median are shown in red. These are indicators, not diagnoses: high values can also be "
+        "biological (e.g. hematological disease) and should be checked against the sample "
+        "processing metadata."
+    ),
+    "dilution_cv": (
+        "SomaScan measures each reagent in one of three sample dilutions (20%, 0.5%, 0.005%) chosen "
+        "by the expected abundance of its target. CVs per dilution bin for study samples (biological "
+        "plus technical) and QC replicates (technical). The axis labels give the number of assays and "
+        "the share detected above LOD in most study samples. Normalization and calibration are "
+        "applied per dilution, so problems can affect a single bin."
+    ),
+    "dilution_norm_scale": (
+        "Per-sample SomaScan normalization scale factor for each dilution bin (NormScale_20, "
+        "NormScale_0_5, NormScale_0_005). Values near 1 are expected; SomaLogic flags samples outside "
+        "0.4–2.5 (red lines). A bin whose factors drift while the others do not points to a "
+        "dilution-specific problem."
+    ),
+    "sex_check": (
+        "Sex score from sex-linked proteins on the panel. Candidates are Y-chromosome genes and KLK3 "
+        "(higher in males) and PZP (higher in females); only markers that separate the sexes in this "
+        "dataset are used (listed on the axis), because reagent specificity differs between platforms. "
+        "With an annotated <code>sex</code> column, a sample is shown in red when its score is an "
+        "outlier for its annotated sex and typical of the other sex: a possible sample swap or "
+        "annotation error to review. Ordinary variation, such as low PSA in some men, is not flagged. "
+        "Without annotation, a prediction is shown only when the scores form two clearly separated "
+        "groups. Pregnancy, hormone therapy and some conditions (e.g. prostate disease for KLK3) can "
+        "shift the score."
+    ),
+    "qc_flags": (
+        "Vendor quality flags for each measurement in study samples, per panel. Assay QC is Olink's "
+        "per-assay flag (AssayQC / Assay_Warning); Sample QC is the per-sample flag, which Olink reports "
+        "separately for each panel or block, so one sample can pass in one block and fail in another. "
+        "NA means the vendor did not assess that measurement."
+    ),
     "distribution": (
         "Shows the intensity distribution of expression values for each sample as overlaid histograms. "
         "Each protein (assay) produces one NPX value per sample, so this plot shows how all protein "
@@ -108,9 +177,12 @@ _HELP_TEXT: dict[str, str] = {
         "Blocks of correlated colour reveal co-regulated protein groups or sample batches."
     ),
     "cv_distribution": (
-        "Histogram of the coefficient of variation (CV = standard deviation / mean) across all proteins. "
-        "CV measures relative variability: values below 0.2 (dashed line) indicate tight reproducibility, "
-        "while a long right tail suggests some proteins have high technical or biological variability."
+        "Histogram of the coefficient of variation (CV = standard deviation / mean) of each protein across "
+        "study samples (controls excluded). It reflects biological plus technical variability, not "
+        "replicate reproducibility. Olink NPX is converted to linear scale (2<sup>NPX</sup>) before the CV "
+        "is computed; SomaScan RFU is used as deposited, so its CVs depend on the normalization applied "
+        "to the submitted file (e.g. ANML can compress apparent CVs). The dashed line at CV = 0.2 is a "
+        "visual guide within this dataset only, not a pass/fail threshold or a cross-platform comparison."
     ),
     "norm_scale": (
         "Shows the hybridization control normalization scale factor (HybControlNormScale) per sample, "
@@ -122,12 +194,14 @@ _HELP_TEXT: dict[str, str] = {
     ),
     "plate_cv": (
         "Two-panel view of plate-level variability. "
+        "CVs use the same definition as the CV distribution (study samples only; Olink NPX on linear "
+        "scale, SomaScan RFU as deposited). "
         "<strong>Top — Intra-plate CV:</strong> for each plate, the CV (SD / mean) is computed "
         "per analyte across samples within that plate. Each violin shows the distribution of "
-        "these CVs. A plate with a notably higher distribution suggests worse reproducibility. "
+        "these CVs; a plate with a notably higher distribution may indicate a plate effect. "
         "<strong>Bottom — Inter-plate CV:</strong> for each analyte, the CV of plate medians "
-        "across all plates. This measures how consistently an analyte is measured between plates. "
-        "Lower CV indicates better reproducibility in both panels."
+        "across all plates. This measures how consistently an analyte is measured between plates, "
+        "assuming samples were randomized across plates."
     ),
     "lod_comparison": (
         "Scatter plot comparing LOD values from different sources for each protein. "
@@ -201,6 +275,33 @@ _HELP_TEXT: dict[str, str] = {
         "For downstream pathway or gene-set enrichment analyses, be aware that duplicated proteins "
         "may inflate counts unless handled (e.g. by averaging or selecting the best-performing assay)."
     ),
+    "mpi": (
+        "Measurement Precision Index (MPI) per protein: median divided by a robust SD "
+        "(1.4826 &times; MAD), i.e. the inverse of a robust CV, across study samples (controls "
+        "excluded). Values are on a linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), "
+        "as for the CV plots, because a ratio to the median is meaningless on log2 NPX. When the "
+        "SDRF or sample metadata defines biological groups (e.g. disease), MPI is computed within "
+        "each group and averaged, so group differences are not counted as imprecision; the label "
+        "on the plot says whether this was possible. Higher is more consistent. It reflects "
+        "biological as well as technical variation and depends on the deposited normalisation, so "
+        "it is a within-dataset view, not an acceptance threshold; see the technical CV for "
+        "replicate precision."
+    ),
+    "dynamic_range": (
+        "Relative spread per protein: interquartile range divided by the median across study "
+        "samples, on a linear scale. It shows how much each protein varies between samples; it is "
+        "not the assay's concentration dynamic range, which NPX or RFU distributions cannot show. "
+        "Low values mean a protein varies little in this cohort (naturally stable, or close to "
+        "the detection limit); high values mean it differs strongly between samples."
+    ),
+    "rank_concordance": (
+        "Spearman correlation of protein ranks between pairs of study samples (up to 500 random "
+        "pairs). Ranks do not depend on the measurement scale, so the value is comparable between "
+        "NPX and RFU within a dataset. Biological replicates of similar samples correlate highly; "
+        "mixed cohorts (e.g. cases and controls, or different tissues) correlate less, which "
+        "reflects biology rather than quality. A tail of low values points to individual samples "
+        "that differ from the rest; see the sample correlation heatmap to identify them."
+    ),
     "differential_expression": (
         "Volcano plots showing differentially expressed proteins between sample groups defined "
         "in the SDRF metadata file. Each dot is a protein; the x-axis shows fold change "
@@ -212,14 +313,24 @@ _HELP_TEXT: dict[str, str] = {
     ),
 }
 
+# Titles for plots rendered from another plot's data (see _DATA_KEY_MAP)
+_DERIVED_PLOT_TITLES = {
+    "plate_signal": "Sample Signal by Plate",
+    "dilution_cv": "CV by Dilution",
+    "dilution_norm_scale": "Normalization Scale by Dilution",
+}
+
 _SECTION_ORDER = [
     ("Quality Overview", ["lod_comparison", "qc_summary"]),
     ("Signal & Distribution", ["distribution", "lod_analysis"]),
     ("Sample Completeness", ["sample_completeness"]),
     ("Missing Frequency Distribution", ["missing_frequency_distribution"]),
-    ("Sample Relationships", ["dimreduction", "correlation", "heatmap"]),
+    ("Sample Relationships", ["dimreduction", "correlation", "rank_concordance", "heatmap"]),
     ("Normalization QC", ["norm_scale"]),
-    ("Variability", ["cv_distribution", "plate_cv"]),
+    ("Variability", ["cv_distribution", "replicate_cv", "mpi", "dynamic_range", "plate_cv"]),
+    ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags"]),
+    ("Pre-analytical & Sample Identity", ["preanalytical", "sex_check"]),
+    ("Dilution QC", ["dilution_cv", "dilution_norm_scale"]),
     ("Assay QC", ["iqr_median_qc", "uniprot_duplicates"]),
     ("SomaScan QC", ["col_check"]),
     ("Differential Expression", ["differential_expression"]),
@@ -417,6 +528,10 @@ footer {
 .dot-green { background: #2ecc71; }
 .dot-amber { background: #f39c12; }
 .dot-red { background: #e74c3c; }
+.summary-columns {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; align-items: start;
+}
+@media (max-width: 700px) { .summary-columns { grid-template-columns: 1fr; } }
 /* --- PRIDE embedded mode --- */
 body.pride-embedded {
     --bg: transparent;
@@ -601,7 +716,9 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
     """Detect which LOD sources are available and which one is active.
 
     For Olink datasets we consider three possible sources (Reported LOD,
-    NCLOD, FixedLOD) and pick the first available in that priority order.
+    NCLOD, FixedLOD). The active source is whichever one
+    :func:`~pyprideap.viz.qc.compute.resolve_lod_with_source` actually used,
+    so the summary always matches the LOD applied in the plots.
 
     For SomaScan datasets, the primary and typically only source is the
     estimated LOD from buffer samples (eLOD). SomaScan ADAT files do not
@@ -616,6 +733,7 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
         get_bundled_fixed_lod_path,
         get_reported_lod,
     )
+    from pyprideap.viz.qc.compute import resolve_lod_with_source
 
     info: dict[str, Any] = {"active": None, "sources": []}
     sources: list[dict[str, str]] = []
@@ -633,7 +751,6 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                     "detail": "Estimated from buffer RFU using a robust MAD-based formula",
                 }
             )
-            info["active"] = "eLOD"
         except (ValueError, KeyError, ImportError):
             sources.append(
                 {
@@ -648,7 +765,7 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
         reported = get_reported_lod(dataset)
         if reported is not None:
             if hasattr(reported, "shape") and reported.ndim == 2:
-                n_assays = int(reported.notna().any(axis=0).sum())
+                n_assays = int(np.count_nonzero(reported.notna().to_numpy().any(axis=0)))
             else:
                 n_assays = int(reported.notna().sum())
             sources.append(
@@ -658,8 +775,6 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                     "detail": f"LOD column in NPX file ({n_assays} assays)",
                 }
             )
-            if info["active"] is None:
-                info["active"] = "Reported LOD"
         else:
             sources.append({"name": "Reported LOD", "status": "unavailable", "detail": "No LOD column in data file"})
 
@@ -675,8 +790,6 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                         "detail": f"Computed from {n_controls} negative control samples",
                     }
                 )
-                if info["active"] is None:
-                    info["active"] = "NCLOD"
             else:
                 sources.append(
                     {
@@ -713,6 +826,10 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                     "detail": f"No bundled file for {dataset.platform.value}",
                 }
             )
+
+    _, info["active"] = resolve_lod_with_source(dataset)
+    if info["active"] == "Reported LOD" and not any(src["name"] == "Reported LOD" for src in sources):
+        sources.insert(0, {"name": "Reported LOD", "status": "available", "detail": "LOD values in data file"})
 
     info["sources"] = sources
     info["platform"] = dataset.platform.value
@@ -853,15 +970,47 @@ def _summary_group(title: str) -> str:
     return f'<tr class="summary-group"><td colspan="3">{title}</td></tr>'
 
 
+def _split_summary_columns(rows: list[str], columns: int) -> list[list[str]]:
+    """Split summary rows into *columns* lists at group boundaries, balancing row counts."""
+    groups: list[list[str]] = []
+    for row in rows:
+        if row.startswith('<tr class="summary-group">') or not groups:
+            groups.append([])
+        groups[-1].append(row)
+    if columns <= 1 or len(groups) < 2:
+        return [rows]
+    total = len(rows)
+    best_k, best_diff, running = 1, total, 0
+    for k in range(1, len(groups)):
+        running += len(groups[k - 1])
+        diff = abs(total - 2 * running)
+        if diff < best_diff:
+            best_k, best_diff = k, diff
+    return [[r for g in groups[:best_k] for r in g], [r for g in groups[best_k:] for r in g]]
+
+
 def _render_summary_table(
     dataset: AffinityDataset,
     plot_data: dict[str, object],
     lod_info: dict[str, Any],
+    columns: int = 1,
 ) -> str:
-    """Build the Dataset Summary HTML table with traffic-light indicators."""
+    """Build the Dataset Summary HTML table with traffic-light indicators.
+
+    With ``columns=2`` the groups are laid out as two side-by-side tables
+    (split at a group boundary so both halves have similar length), which
+    keeps the summary short when it spans a wide card.
+    """
     import pandas as pd
 
-    from pyprideap.viz.qc.compute import CvDistributionData, DataCompletenessData, LodAnalysisData, PlateCvData
+    from pyprideap.viz.qc.compute import (
+        CvDistributionData,
+        DataCompletenessData,
+        LodAnalysisData,
+        PlateCvData,
+        QcLodSummaryData,
+        UniProtDuplicateData,
+    )
 
     rows: list[str] = []
     samples = dataset.samples
@@ -938,6 +1087,15 @@ def _render_summary_table(
                 )
             )
 
+        # Share of all measurements above LOD (the QC and LOD Summary bar, as one number)
+        qc_lod = plot_data.get("qc_summary")
+        if isinstance(qc_lod, QcLodSummaryData) and any("> LOD" in c for c in qc_lod.categories):
+            n_total = sum(qc_lod.counts)
+            n_above = sum(n for c, n in zip(qc_lod.categories, qc_lod.counts) if "> LOD" in c)
+            if n_total > 0:
+                source = f" ({html_mod.escape(str(lod_active))})" if lod_active else ""
+                rows.append(_summary_row("", f"Measurements &gt; LOD{source}", f"{n_above / n_total:.1%}"))
+
     # --- Proteins ---
     rows.append(_summary_group("Proteins"))
     if "UniProt" in features.columns:
@@ -953,6 +1111,17 @@ def _render_summary_table(
     proteins_per_sample = numeric.notna().sum(axis=1)
     median_per_sample = float(proteins_per_sample.median())
     rows.append(_summary_row("", "Proteins per sample (median)", f"{median_per_sample:.0f}"))
+
+    dup = plot_data.get("uniprot_duplicates")
+    if isinstance(dup, UniProtDuplicateData) and dup.n_total_assays > 0:
+        n_replicate = sum(len(assays) for assays in dup.duplicates.values())
+        rows.append(
+            _summary_row(
+                "",
+                "Assays sharing a UniProt ID",
+                f"{n_replicate} / {dup.n_total_assays} ({len(dup.duplicates)} proteins)",
+            )
+        )
 
     # --- Missing Data (only when no LOD info, since LOD-based completeness is more informative) ---
     if not has_any_lod:
@@ -995,8 +1164,10 @@ def _render_summary_table(
     # --- Variability ---
     cv_data = plot_data.get("cv_distribution")
     plate_cv_data = plot_data.get("plate_cv")
-    has_cv = (isinstance(cv_data, CvDistributionData) and len(cv_data.cv_values) > 0) or (
-        isinstance(plate_cv_data, PlateCvData) and len(plate_cv_data.inter_cv) > 0
+    has_cv = (
+        (isinstance(cv_data, CvDistributionData) and len(cv_data.cv_values) > 0)
+        or (isinstance(plate_cv_data, PlateCvData) and len(plate_cv_data.inter_cv) > 0)
+        or isinstance(plot_data.get("replicate_cv"), ReplicateCvData)
     )
     if has_cv:
         rows.append(_summary_group("Variability"))
@@ -1005,42 +1176,99 @@ def _render_summary_table(
                 rows.append(_summary_row("", "Median CV", "N/A (single sample)"))
                 rows.append(_summary_row("", "CV range (5th\u201395th pctl)", "N/A"))
             else:
+                # No traffic-light status: CV across study samples is not a pass/fail metric
                 med_cv = float(np.median(cv_data.cv_values))
-                if med_cv < 0.15:
-                    cv_dot = _status_dot("green")
-                elif med_cv <= 0.25:
-                    cv_dot = _status_dot("amber")
-                else:
-                    cv_dot = _status_dot("red")
-                rows.append(_summary_row(cv_dot, "Median CV", f"{med_cv:.1%}"))
+                rows.append(_summary_row("", "Median CV", f"{med_cv:.1%}"))
                 p5, p95 = np.percentile(cv_data.cv_values, [5, 95])
                 rows.append(_summary_row("", "CV range (5th\u201395th pctl)", f"{p5:.1%} \u2013 {p95:.1%}"))
 
         if isinstance(plate_cv_data, PlateCvData) and len(plate_cv_data.inter_cv) > 0:
             med_inter = float(np.median(plate_cv_data.inter_cv))
-            if med_inter < 0.20:
-                pi_dot = _status_dot("green")
-            elif med_inter <= 0.30:
-                pi_dot = _status_dot("amber")
+            rows.append(_summary_row("", "Median inter-plate CV", f"{med_inter:.1%}"))
+
+        rep_cv = plot_data.get("replicate_cv")
+        if isinstance(rep_cv, ReplicateCvData) and rep_cv.technical_cv:
+            scope = f"{len(rep_cv.technical_cv)} assays &gt; LOD" if rep_cv.lod_filtered else "all assays"
+            rows.append(
+                _summary_row(
+                    "",
+                    f"Technical CV, median ({rep_cv.control_label.lower()}, n={rep_cv.n_replicates})",
+                    f"{float(np.median(rep_cv.technical_cv)):.1%} ({scope})",
+                )
+            )
+
+    batch = plot_data.get("batch_effect")
+    if isinstance(batch, BatchEffectData) and batch.plate_r2:
+        rows.append(_summary_group("Batch"))
+        top = ", ".join(f"{pc} {r2:.0%}" for pc, r2 in zip(batch.pc_labels[:2], batch.plate_r2[:2]))
+        rows.append(_summary_row("", "Variance explained by plate", top))
+
+    pre = plot_data.get("preanalytical")
+    sex = plot_data.get("sex_check")
+    if isinstance(pre, PreanalyticalData) or isinstance(sex, SexCheckData):
+        rows.append(_summary_group("Pre-analytical &amp; Identity"))
+        if isinstance(pre, PreanalyticalData):
+            for name, ids in pre.outliers.items():
+                label = "Possible hemolysis" if name == "hemolysis" else "Possible platelet activation"
+                rows.append(_summary_row("", f"{label} (indicator outliers)", f"{len(ids)} / {len(pre.sample_ids)}"))
+        if isinstance(sex, SexCheckData):
+            n_m, n_f = sex.predicted.count("male"), sex.predicted.count("female")
+            rows.append(_summary_row("", "Protein-predicted sex (F / M)", f"{n_f} / {n_m}"))
+            if any(sex.annotated):
+                dot = _status_dot("green") if not sex.mismatches else _status_dot("amber")
+                rows.append(_summary_row(dot, "Sex mismatches vs annotation", str(len(sex.mismatches))))
+
+    mpi_data = plot_data.get("mpi")
+    dr_data = plot_data.get("dynamic_range")
+    rc_data = plot_data.get("rank_concordance")
+    if mpi_data is not None or dr_data is not None or rc_data is not None:
+        from pyprideap.viz.qc.agnostic import DynamicRangeData as _DR
+        from pyprideap.viz.qc.agnostic import MpiData as _MPI
+        from pyprideap.viz.qc.agnostic import RankConcordanceData as _RC
+
+        rows.append(_summary_group("Precision &amp; Concordance"))
+        if isinstance(mpi_data, _MPI):
+            if mpi_data.has_case_control:
+                parts = [f"{html_mod.escape(str(k))}: {v}" for k, v in mpi_data.group_counts.items()]
+                source = html_mod.escape(mpi_data.group_column or "metadata")
+                rows.append(_summary_row("", f"Biological groups ({source})", ", ".join(parts)))
+                mpi_label = "Median MPI (within groups)"
             else:
-                pi_dot = _status_dot("red")
-            rows.append(_summary_row(pi_dot, "Median inter-plate CV", f"{med_inter:.1%}"))
+                mpi_label = "Median MPI (no biological groups found)"
+            rows.append(_summary_row("", mpi_label, f"{mpi_data.median:.2f}"))
+        if isinstance(dr_data, _DR):
+            rows.append(_summary_row("", "Median relative spread (IQR / median)", f"{dr_data.median:.2f}"))
+        if isinstance(rc_data, _RC):
+            rows.append(
+                _summary_row("", "Median rank concordance", f"{rc_data.median:.2f} ({rc_data.n_pairs} sample pairs)")
+            )
 
     # --- QC Status (Olink only) ---
-    if "SampleQC" in samples.columns:
+    qc_flags = plot_data.get("qc_flags")
+    worst = qc_flags.sample_worst if isinstance(qc_flags, QcFlagData) else {}
+    if worst or "SampleQC" in samples.columns:
         rows.append(_summary_group("QC Status"))
-        qc_counts = samples["SampleQC"].value_counts()
+        if worst:
+            # Olink reports SampleQC per panel/block; count each study sample by its worst block
+            qc_counts = pd.Series(worst)
+            qc_label = "PASS / WARN / FAIL (study samples, worst block)"
+        else:
+            qc_counts = samples["SampleQC"].value_counts()
+            qc_label = "PASS / WARN / FAIL"
         n_pass = int(qc_counts.get("PASS", 0))
         n_warn = int(qc_counts.get("WARN", 0))
         n_fail = int(qc_counts.get("FAIL", 0))
-        fail_rate = n_fail / n_samples if n_samples > 0 else 0.0
+        n_rated = n_pass + n_warn + n_fail
+        fail_rate = n_fail / n_rated if n_rated > 0 else 0.0
         if fail_rate == 0:
             qc_dot = _status_dot("green")
         elif fail_rate < 0.10:
             qc_dot = _status_dot("amber")
         else:
             qc_dot = _status_dot("red")
-        rows.append(_summary_row(qc_dot, "PASS / WARN / FAIL", f"{n_pass} / {n_warn} / {n_fail}"))
+        rows.append(_summary_row(qc_dot, qc_label, f"{n_pass} / {n_warn} / {n_fail}"))
+        if isinstance(qc_flags, QcFlagData) and qc_flags.flagged_assay_pct is not None:
+            rows.append(_summary_row("", "Measurements with assay QC WARN/FAIL", f"{qc_flags.flagged_assay_pct:.2f}%"))
 
     # --- Normalization (SomaScan only) ---
     if "HybControlNormScale" in samples.columns:
@@ -1110,7 +1338,12 @@ def _render_summary_table(
                 )
             )
 
-    table_html = f'<table class="summary-table">{"".join(rows)}</table>'
+    column_rows = _split_summary_columns(rows, columns)
+    if len(column_rows) == 1:
+        table_html = f'<table class="summary-table">{"".join(rows)}</table>'
+    else:
+        tables = "".join(f'<table class="summary-table">{"".join(part)}</table>' for part in column_rows)
+        table_html = f'<div class="summary-columns">{tables}</div>'
 
     return (
         '<div class="plot-card" id="dataset-summary">'
@@ -1293,6 +1526,30 @@ def _detect_covariates(
     return covariates
 
 
+def _prepare_qc_dataset(
+    dataset: AffinityDataset,
+    sdrf_path: str | Path | None,
+) -> AffinityDataset:
+    """Merge SDRF sample metadata when a path is provided.
+
+    MPI uses the merged table to find case/control groups. Failures are
+    logged and the original dataset is returned so the rest of the report
+    still generates.
+    """
+    if sdrf_path is None:
+        return dataset
+    try:
+        from pyprideap.io.readers.sdrf import merge_sdrf, read_sdrf
+
+        sdrf = read_sdrf(sdrf_path)
+        merged = merge_sdrf(dataset, sdrf)
+        logger.debug("qc_report: merged SDRF %s into sample metadata", sdrf_path)
+        return merged
+    except Exception:
+        logger.warning("qc_report: could not merge SDRF %s; continuing without it", sdrf_path, exc_info=True)
+        return dataset
+
+
 def qc_report(
     dataset: AffinityDataset,
     output: str | Path,
@@ -1310,7 +1567,8 @@ def qc_report(
     sdrf_path : str | Path | None
         Optional path to an SDRF TSV file.  When provided, differential
         expression volcano plots are added to the report with an
-        interactive dropdown to select the grouping variable.
+        interactive dropdown to select the grouping variable.  The same file is
+        also used to detect case/control groups for Measurement Precision Index.
     strip_plot_title : bool
         Remove the Plotly figure title from each plot (default ``True``).
         The card header already displays the title, so the in-plot title
@@ -1325,7 +1583,8 @@ def qc_report(
 
     output = Path(output)
     logger.debug("qc_report: starting report generation -> %s", output)
-    plot_data = compute_all(dataset)
+    qc_dataset = _prepare_qc_dataset(dataset, sdrf_path)
+    plot_data = compute_all(qc_dataset)
 
     _RENDERERS = {
         "lod_comparison": (LodComparisonData, R.render_lod_comparison),
@@ -1342,8 +1601,20 @@ def qc_report(
         # Olink-specific renderers
         "iqr_median_qc": (IqrMedianQcData, R.render_iqr_median_qc),
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
+        "mpi": (MpiData, R.render_mpi),
+        "dynamic_range": (DynamicRangeData, R.render_dynamic_range),
+        "rank_concordance": (RankConcordanceData, R.render_rank_concordance),
         # SomaScan-specific renderers
         "col_check": (ColCheckData, R.render_col_check),
+        # Technical QC
+        "replicate_cv": (ReplicateCvData, R.render_replicate_cv),
+        "batch_effect": (BatchEffectData, R.render_batch_effect),
+        "plate_signal": (BatchEffectData, R.render_plate_signal),
+        "qc_flags": (QcFlagData, R.render_qc_flags),
+        "preanalytical": (PreanalyticalData, R.render_preanalytical),
+        "dilution_cv": (DilutionQcData, R.render_dilution_cv),
+        "dilution_norm_scale": (DilutionQcData, R.render_dilution_norm_scale),
+        "sex_check": (SexCheckData, R.render_sex_check),
     }
 
     # Determine display order from _SECTION_ORDER so first-displayed plot gets plotly.js
@@ -1360,6 +1631,9 @@ def qc_report(
     _DATA_KEY_MAP = {
         "sample_completeness": "data_completeness",
         "missing_frequency_distribution": "data_completeness",
+        "plate_signal": "batch_effect",
+        "dilution_cv": "dilution_qc",
+        "dilution_norm_scale": "dilution_qc",
     }
 
     # Handle combined dimensionality reduction (PCA + t-SNE in one panel with toggle)
@@ -1450,7 +1724,7 @@ def qc_report(
         js = "cdn" if key == first_key else False
         plot_html = fig.to_html(full_html=False, include_plotlyjs=js, default_height=plot_height)
         if key in _DATA_KEY_MAP:
-            title = key.replace("_", " ").title()
+            title = _DERIVED_PLOT_TITLES.get(key, key.replace("_", " ").title())
         else:
             title = getattr(data, "title", key.replace("_", " ").title())
         rendered[key] = (title, plot_html)  # type: ignore[attr-defined]
@@ -1625,19 +1899,172 @@ def qc_report(
     return output
 
 
+_EMBED_CSS = """\
+    html, body { background: transparent; height: auto; min-height: 0; }
+    .plot-card { border: none; box-shadow: none; padding: 0; margin: 0; background: transparent; }
+    .plot-card:hover { box-shadow: none; }
+"""
+
+# Top margin for split plots whose Plotly title is stripped (the card header
+# already shows it); Plotly's default 100px leaves a blank band above the plot.
+_SPLIT_PLOT_TOP_MARGIN = 40
+
+# ---------------------------------------------------------------------------
+# Split-report layout manifest
+# ---------------------------------------------------------------------------
+# qc_report_split writes manifest.json describing how the plot files should be
+# arranged (tabs, order, half/full width). Plots shown side by side get the same
+# figure height so card borders line up in a two-column grid.
+
+SPLIT_MANIFEST_NAME = "manifest.json"
+_SPLIT_MANIFEST_SCHEMA = 1
+
+# (tab id, tab title, [(plot key, preferred width), ...]) in display order
+_SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
+    (
+        "overview",
+        "Overview",
+        [("summary", "full"), ("lod_analysis", "half"), ("missing_frequency_distribution", "half")],
+    ),
+    (
+        "signal",
+        "Signal & variability",
+        [
+            ("distribution", "half"),
+            ("sample_completeness", "half"),
+            ("cv_distribution", "half"),
+            ("replicate_cv", "half"),
+            ("mpi", "half"),
+            ("dynamic_range", "half"),
+            ("plate_cv", "full"),
+            ("lod_comparison", "full"),
+        ],
+    ),
+    (
+        "structure",
+        "Sample structure",
+        [("correlation", "half"), ("dimreduction", "half"), ("rank_concordance", "full"), ("heatmap", "full")],
+    ),
+    (
+        "technical",
+        "Technical QC",
+        [
+            ("batch_effect", "half"),
+            ("plate_signal", "half"),
+            ("qc_flags", "full"),
+            ("preanalytical", "half"),
+            ("sex_check", "half"),
+            ("dilution_cv", "half"),
+            ("dilution_norm_scale", "half"),
+            ("iqr_median_qc", "half"),
+            ("norm_scale", "half"),
+            ("col_check", "half"),
+        ],
+    ),
+]
+
+# Plots whose content is summarised as rows of the Dataset Summary table and
+# therefore left out of the layout (files are still written for older clients).
+_SPLIT_FOLDED_INTO_SUMMARY = ("qc_summary", "uniprot_duplicates")
+
+# Figure heights (px) for split plots; pairs in the same row share a height.
+_SPLIT_PLOT_HEIGHTS = {
+    "lod_analysis": 360,
+    "missing_frequency_distribution": 360,
+    "distribution": 380,
+    "cv_distribution": 380,
+    "replicate_cv": 380,
+    "mpi": 380,
+    "dynamic_range": 380,
+    "rank_concordance": 360,
+    "batch_effect": 360,
+    "plate_signal": 360,
+    "preanalytical": 380,
+    "sex_check": 380,
+    "dilution_cv": 380,
+    "dilution_norm_scale": 380,
+    "sample_completeness": 360,
+    "iqr_median_qc": 360,
+    "norm_scale": 360,
+    "col_check": 360,
+    "lod_comparison": 420,
+    "correlation": 460,
+    "dimreduction": 460,
+    "heatmap": 560,
+}
+
+
+def _build_split_manifest(written: list[str], platform: str) -> dict[str, Any]:
+    """Arrange the written plot files into tabs of a two-column grid.
+
+    Half-width plots are paired in order; a half-width plot left without a
+    partner (e.g. Olink has no ColCheck) is widened to full width so every
+    grid row is complete and borders stay aligned. Empty tabs are dropped.
+    """
+    import pyprideap
+
+    available = set(written)
+    tabs: list[dict[str, Any]] = []
+    for tab_id, title, plots in _SPLIT_LAYOUT:
+        items: list[dict[str, Any]] = []
+        pending: dict[str, Any] | None = None
+        for key, width in plots:
+            if key not in available:
+                continue
+            item: dict[str, Any] = {"key": key, "file": f"{key}.html", "width": width}
+            if key in _SPLIT_PLOT_HEIGHTS:
+                item["height"] = _SPLIT_PLOT_HEIGHTS[key]
+            if width == "full":
+                if pending is not None:
+                    pending["width"] = "full"
+                    pending = None
+                items.append(item)
+            elif pending is None:
+                pending = item
+                items.append(item)
+            else:
+                pending = None
+                items.append(item)
+        if pending is not None:
+            pending["width"] = "full"
+        if items:
+            tabs.append({"id": tab_id, "title": title, "items": items})
+
+    placed = {item["key"] for tab in tabs for item in tab["items"]}
+    return {
+        "schema": _SPLIT_MANIFEST_SCHEMA,
+        "generator": f"pyprideap {pyprideap.__version__}",
+        "platform": platform,
+        "tabs": tabs,
+        "folded_into_summary": [k for k in _SPLIT_FOLDED_INTO_SUMMARY if k in available],
+        # Anything written but not placed (new plot types) still gets shown by clients
+        "unplaced": sorted(available - placed - set(_SPLIT_FOLDED_INTO_SUMMARY)),
+    }
+
+
+def _plotlyjs_cdn_url() -> str:
+    """CDN URL for the plotly.js version bundled with the installed plotly package."""
+    from plotly.offline import get_plotlyjs_version
+
+    return f"https://cdn.plot.ly/plotly-{get_plotlyjs_version()}.min.js"
+
+
 def _wrap_standalone_html(
     title: str,
     body: str,
     include_plotlyjs: bool = True,
     no_border: bool = False,
 ) -> str:
-    """Wrap plot HTML in a standalone page with PRIDE styling."""
-    plotly_cdn = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>\n' if include_plotlyjs else ""
-    border_override = (
-        "    .plot-card { border: none; box-shadow: none; }\n    .plot-card:hover { box-shadow: none; }\n"
-        if no_border
-        else ""
-    )
+    """Wrap plot HTML in a standalone page with PRIDE styling.
+
+    With *no_border* the page is laid out for embedding in an iframe (as on
+    the PRIDE dataset pages, which supply their own card): no card chrome,
+    minimal padding, transparent background and an auto-height body, so the
+    page height is exactly its content height.
+    """
+    plotly_cdn = f'<script src="{_plotlyjs_cdn_url()}"></script>\n' if include_plotlyjs else ""
+    border_override = _EMBED_CSS if no_border else ""
+    wrapper_style = "padding:8px 12px;" if no_border else "max-width:1100px;margin:0 auto;padding:28px 36px;"
     return (
         f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         f'    <meta charset="utf-8">\n'
@@ -1646,7 +2073,7 @@ def _wrap_standalone_html(
         f"    {plotly_cdn}"
         f"    <style>\n{_CSS}{border_override}    </style>\n"
         f"</head>\n<body>\n"
-        f'<div style="max-width:1100px;margin:0 auto;padding:28px 36px;">\n'
+        f'<div class="standalone-wrapper" style="{wrapper_style}">\n'
         f"{body}\n"
         f"</div>\n"
         f"    <script>\n{_JS}    </script>\n"
@@ -1659,12 +2086,15 @@ def qc_report_split(
     output_dir: str | Path,
     no_border: bool = False,
     strip_plot_title: bool = True,
+    sdrf_path: str | Path | None = None,
 ) -> Path:
     """Generate individual QC plot HTML files in a directory.
 
     Each plot is saved as a standalone HTML file named by its plot type
     (e.g., ``distribution.html``, ``correlation.html``). A ``summary.html``
-    file with the dataset summary table is always generated.
+    file with the dataset summary table is always generated, together with
+    ``manifest.json``, which tells embedding pages (e.g. PRIDE) how to arrange
+    the files: tabs, order and half/full width (see ``_build_split_manifest``).
 
     Parameters
     ----------
@@ -1673,9 +2103,13 @@ def qc_report_split(
     output_dir : str | Path
         Directory to write individual HTML files into. Created if it doesn't exist.
     no_border : bool
-        If True, remove card borders and shadows from standalone plot files.
+        If True, lay files out for iframe embedding (e.g. PRIDE dataset pages):
+        no card border/shadow/padding, minimal page padding, transparent
+        background and content-height body.
     strip_plot_title : bool
         Remove the Plotly figure title from each plot (default ``True``).
+    sdrf_path : str | Path | None
+        Optional SDRF TSV used to detect case/control groups for MPI.
 
     Returns
     -------
@@ -1693,7 +2127,8 @@ def qc_report_split(
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.debug("qc_report_split: starting split report generation -> %s", output_dir)
 
-    plot_data = compute_all(dataset)
+    qc_dataset = _prepare_qc_dataset(dataset, sdrf_path)
+    plot_data = compute_all(qc_dataset)
     lod_info = _lod_source_info(dataset)
     platform_label = dataset.platform.value.replace("_", " ").title()
 
@@ -1712,8 +2147,20 @@ def qc_report_split(
         # Olink-specific renderers
         "iqr_median_qc": (IqrMedianQcData, R.render_iqr_median_qc),
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
+        "mpi": (MpiData, R.render_mpi),
+        "dynamic_range": (DynamicRangeData, R.render_dynamic_range),
+        "rank_concordance": (RankConcordanceData, R.render_rank_concordance),
         # SomaScan-specific renderers
         "col_check": (ColCheckData, R.render_col_check),
+        # Technical QC
+        "replicate_cv": (ReplicateCvData, R.render_replicate_cv),
+        "batch_effect": (BatchEffectData, R.render_batch_effect),
+        "plate_signal": (BatchEffectData, R.render_plate_signal),
+        "qc_flags": (QcFlagData, R.render_qc_flags),
+        "preanalytical": (PreanalyticalData, R.render_preanalytical),
+        "dilution_cv": (DilutionQcData, R.render_dilution_cv),
+        "dilution_norm_scale": (DilutionQcData, R.render_dilution_norm_scale),
+        "sex_check": (SexCheckData, R.render_sex_check),
     }
 
     written: list[str] = []
@@ -1722,6 +2169,9 @@ def qc_report_split(
     _DATA_KEY_MAP = {
         "sample_completeness": "data_completeness",
         "missing_frequency_distribution": "data_completeness",
+        "plate_signal": "batch_effect",
+        "dilution_cv": "dilution_qc",
+        "dilution_norm_scale": "dilution_qc",
     }
 
     # Render each plot as a standalone HTML file
@@ -1732,14 +2182,15 @@ def qc_report_split(
             continue
         fig = renderer(data)  # type: ignore[operator]
         if strip_plot_title:
-            fig.update_layout(title="")
-        current_height = fig.layout.height
-        if current_height is None:
+            fig.update_layout(title="", margin_t=_SPLIT_PLOT_TOP_MARGIN)
+        if key in _SPLIT_PLOT_HEIGHTS:
+            fig.update_layout(height=_SPLIT_PLOT_HEIGHTS[key])
+        elif fig.layout.height is None:
             fig.update_layout(height=500)
         plot_height = f"{fig.layout.height}px"
         plot_html = fig.to_html(full_html=False, include_plotlyjs=False, default_height=plot_height)
         if key in _DATA_KEY_MAP:
-            title = key.replace("_", " ").title()
+            title = _DERIVED_PLOT_TITLES.get(key, key.replace("_", " ").title())
         else:
             title = getattr(data, "title", key.replace("_", " ").title())
         help_html = _HELP_TEXT.get(key, "")
@@ -1766,14 +2217,26 @@ def qc_report_split(
 
         if pca_data is not None:
             pca_fig = R.render_pca(pca_data)
-            pca_fig.update_layout(title="" if strip_plot_title else pca_data.title, height=500)
-            pca_html = pca_fig.to_html(full_html=False, include_plotlyjs=False, default_height="500px")
+            pca_fig.update_layout(
+                title="" if strip_plot_title else pca_data.title, height=_SPLIT_PLOT_HEIGHTS["dimreduction"]
+            )
+            if strip_plot_title:
+                pca_fig.update_layout(margin_t=_SPLIT_PLOT_TOP_MARGIN)
+            pca_html = pca_fig.to_html(
+                full_html=False, include_plotlyjs=False, default_height=f"{_SPLIT_PLOT_HEIGHTS['dimreduction']}px"
+            )
             dimred_parts.append(f'<div class="dimred-panel" id="dimred-pca">{pca_html}</div>')
 
         if umap_data is not None:
             tsne_fig = R.render_tsne(umap_data)
-            tsne_fig.update_layout(title="" if strip_plot_title else umap_data.title, height=500)
-            tsne_html = tsne_fig.to_html(full_html=False, include_plotlyjs=False, default_height="500px")
+            tsne_fig.update_layout(
+                title="" if strip_plot_title else umap_data.title, height=_SPLIT_PLOT_HEIGHTS["dimreduction"]
+            )
+            if strip_plot_title:
+                tsne_fig.update_layout(margin_t=_SPLIT_PLOT_TOP_MARGIN)
+            tsne_html = tsne_fig.to_html(
+                full_html=False, include_plotlyjs=False, default_height=f"{_SPLIT_PLOT_HEIGHTS['dimreduction']}px"
+            )
             hidden = ' style="display:none"' if pca_data is not None else ""
             dimred_parts.append(f'<div class="dimred-panel" id="dimred-tsne"{hidden}>{tsne_html}</div>')
 
@@ -1814,12 +2277,15 @@ def qc_report_split(
         written.append("dimreduction")
 
     # Summary table (includes LOD sources inline)
-    summary_html = _render_summary_table(dataset, plot_data, lod_info)
+    summary_html = _render_summary_table(dataset, plot_data, lod_info, columns=2)
     page = _wrap_standalone_html(
         f"Dataset Summary — {platform_label}", summary_html, include_plotlyjs=False, no_border=no_border
     )
     (output_dir / "summary.html").write_text(page, encoding="utf-8")
     written.append("summary")
+
+    manifest = _build_split_manifest(written, dataset.platform.value)
+    (output_dir / SPLIT_MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     logger.debug("qc_report_split: written %d files to %s", len(written), output_dir)
     return output_dir
