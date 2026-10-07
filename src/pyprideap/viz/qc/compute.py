@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
+from pyprideap.viz.qc.agnostic import compute_agnostic_qc
 
 logger = logging.getLogger(__name__)
 
@@ -2080,6 +2081,9 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
 
     # UniProt duplicate detection (Olink and SomaScan when feature table has UniProt)
     results["uniprot_duplicates"] = compute_uniprot_duplicates(dataset)
+
+    # Technology-agnostic QC (MPI, dynamic range, rank concordance)
+    results.update(compute_agnostic_qc(dataset))
 
     available = {k: v for k, v in results.items() if v is not None}
     logger.debug("compute_all: %d/%d plots computed successfully", len(available), len(results))
