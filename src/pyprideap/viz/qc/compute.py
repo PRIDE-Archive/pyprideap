@@ -1606,7 +1606,8 @@ class QcFlagData:
 
 
 def _status_counts(matrix: pd.DataFrame) -> dict[str, int]:
-    vals = matrix.stack(future_stack=True).fillna("NA").astype(str)
+    # Flatten via numpy (DataFrame.stack(future_stack=...) needs pandas >= 2.1)
+    vals = pd.Series(matrix.to_numpy().ravel(), dtype="object").fillna("NA").astype(str)
     vals = vals.where(vals.isin(_QC_STATUS_ORDER[:3]), "NA")
     counts = vals.value_counts()
     return {s: int(counts.get(s, 0)) for s in _QC_STATUS_ORDER}
@@ -1758,7 +1759,8 @@ def compute_preanalytical(dataset: AffinityDataset) -> PreanalyticalData | None:
     sample_ids = _sample_ids(ds)
     for name, genes in _PREANALYTICAL_MARKERS.items():
         cols = _marker_columns(symbols, genes)
-        if len(cols) < _MIN_MARKERS:
+        # Count distinct reagents: a multi-target reagent (e.g. "HBA1|HBA2") is one measurement
+        if len(set(cols.values())) < _MIN_MARKERS:
             continue
         score = _marker_score(numeric, list(cols.values()))
         rz = _robust_z(score)
@@ -1811,8 +1813,21 @@ def compute_dilution_qc(dataset: AffinityDataset) -> DilutionQcData | None:
         qc = dataset.expression.apply(pd.to_numeric, errors="coerce").loc[is_qc]
         rep_cv = (qc.std() / qc.mean()).replace([np.inf, -np.inf], np.nan)
 
-    lod_pct = compute_lod_analysis(dataset)
-    above = pd.Series(lod_pct.above_lod_pct, index=lod_pct.assay_ids) if isinstance(lod_pct, LodAnalysisData) else None
+    # Share of study samples above LOD per assay. The LOD is resolved on the full
+    # dataset because SomaScan eLOD is estimated from buffer samples.
+    from pyprideap.processing.filtering import control_sample_mask
+    from pyprideap.processing.lod import _above_lod_matrix
+
+    above = None
+    lod = _resolve_lod(dataset)
+    if lod is not None:
+        study = ~control_sample_mask(dataset.samples).to_numpy()
+        numeric_all = dataset.expression.apply(pd.to_numeric, errors="coerce")
+        above_m, has_lod = _above_lod_matrix(numeric_all, lod)
+        valid = (numeric_all.notna() & has_lod).loc[study]
+        n_valid = valid.sum()
+        above = ((above_m & has_lod).loc[study].sum() / n_valid.where(n_valid > 0)) * 100
+        above.index = above.index.astype(str)
 
     out = DilutionQcData([], [], [], [], [], [])
     for b in bins:

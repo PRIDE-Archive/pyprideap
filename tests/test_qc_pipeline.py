@@ -820,3 +820,72 @@ class TestPreanalyticalDilutionSex:
         assert sc.marker_auc["EIF1AY"] < 0.8 <= sc.marker_auc["KLK3"]
         # Low-KLK3 men are normal variation; only the female in the male range is flagged
         assert sc.mismatches == [f"S{n_m + 3}"]
+
+
+class TestReviewFixes:
+    def test_status_counts_without_future_stack(self):
+        from pyprideap.viz.qc.compute import _status_counts
+
+        m = pd.DataFrame({"a": ["PASS", "WARN", None], "b": ["FAIL", "odd", "PASS"]})
+        assert _status_counts(m) == {"PASS": 2, "WARN": 1, "FAIL": 1, "NA": 2}
+
+    def test_single_multitarget_reagent_is_not_two_markers(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_preanalytical
+
+        rng = np.random.default_rng(2)
+        genes = ["HBA1|HBA2", "PF4", "PPBP", "G1", "G2"]
+        ds = AffinityDataset(
+            platform=Platform.SOMASCAN,
+            samples=pd.DataFrame({"SampleId": [f"S{i}" for i in range(20)], "SampleType": "Sample"}),
+            features=pd.DataFrame({"SeqId": [f"{i}-1" for i in range(5)], "EntrezGeneSymbol": genes}),
+            expression=pd.DataFrame(np.abs(rng.normal(1000, 100, (20, 5))), columns=[f"SL{i}" for i in range(5)]),
+            metadata={},
+        )
+        pa = compute_preanalytical(ds)
+        assert "hemolysis" not in pa.scores  # one reagent, even if it lists two genes
+        assert pa.markers["platelet"] == ["PF4", "PPBP"]
+
+    def test_dilution_above_lod_counts_study_samples_only(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_dilution_qc
+
+        rng = np.random.default_rng(4)
+        n_s, n_qc, n_buf = 12, 4, 20  # buffers outnumber study samples
+        n = n_s + n_qc + n_buf
+        expr = np.abs(rng.normal(5000, 300, (n, 4)))
+        expr[n_s + n_qc :] = np.abs(rng.normal(50, 5, (n_buf, 4)))  # blanks, below eLOD
+        ds = AffinityDataset(
+            platform=Platform.SOMASCAN,
+            samples=pd.DataFrame(
+                {
+                    "SampleId": [f"S{i}" for i in range(n)],
+                    "SampleType": ["Sample"] * n_s + ["QC"] * n_qc + ["Buffer"] * n_buf,
+                }
+            ),
+            features=pd.DataFrame({"SeqId": [f"{i}-1" for i in range(4)], "Dilution": ["20", "20", "0.5", "0.5"]}),
+            expression=pd.DataFrame(expr, columns=[f"SL{i}" for i in range(4)]),
+            metadata={},
+        )
+        assert compute_dilution_qc(ds).above_lod_pct == [100.0, 100.0]
+
+    def test_reader_maps_warning_to_warn(self, tmp_path):
+        rows = [
+            {
+                "SampleID": s,
+                "OlinkID": "OID1",
+                "NPX": 1.0,
+                "UniProt": "P1",
+                "Assay": "A",
+                "Panel": "X",
+                "QC_Warning": "Warning" if s == "B" else "Pass",
+            }
+            for s in ("A", "B")
+        ]
+        path = tmp_path / "warning.npx.csv"
+        pd.DataFrame(rows).to_csv(path, index=False)
+        from pyprideap.io.readers.olink_csv import read_olink_csv
+
+        assert read_olink_csv(path).metadata["sample_qc_matrix"].values.ravel().tolist() == ["PASS", "WARN"]

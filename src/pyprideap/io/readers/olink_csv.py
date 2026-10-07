@@ -122,7 +122,8 @@ def _qc_flag_matrices(df: pd.DataFrame, sample_key: str, sample_order: object, a
         if col not in df.columns or key in matrices:
             continue
         flags = df[[sample_key, "OlinkID", col]].copy()
-        flags[col] = flags[col].astype("string").str.strip().str.upper()
+        # Olink writes WARN in current exports; accept the long form too, as filter_qc does
+        flags[col] = flags[col].astype("string").str.strip().str.upper().replace({"WARNING": "WARN"})
         matrix = flags.pivot_table(index=sample_key, columns="OlinkID", values=col, aggfunc="first")
         matrices[key] = matrix.reindex(index=sample_order, columns=assays).reset_index(drop=True)
     return matrices
