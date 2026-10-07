@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from pyprideap.core import AffinityDataset
+from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
     BatchEffectData,
     ColCheckData,
@@ -274,6 +275,33 @@ _HELP_TEXT: dict[str, str] = {
         "For downstream pathway or gene-set enrichment analyses, be aware that duplicated proteins "
         "may inflate counts unless handled (e.g. by averaging or selecting the best-performing assay)."
     ),
+    "mpi": (
+        "Measurement Precision Index (MPI) per protein: median divided by a robust SD "
+        "(1.4826 &times; MAD), i.e. the inverse of a robust CV, across study samples (controls "
+        "excluded). Values are on a linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), "
+        "as for the CV plots, because a ratio to the median is meaningless on log2 NPX. When the "
+        "SDRF or sample metadata defines biological groups (e.g. disease), MPI is computed within "
+        "each group and averaged, so group differences are not counted as imprecision; the label "
+        "on the plot says whether this was possible. Higher is more consistent. It reflects "
+        "biological as well as technical variation and depends on the deposited normalisation, so "
+        "it is a within-dataset view, not an acceptance threshold; see the technical CV for "
+        "replicate precision."
+    ),
+    "dynamic_range": (
+        "Relative spread per protein: interquartile range divided by the median across study "
+        "samples, on a linear scale. It shows how much each protein varies between samples; it is "
+        "not the assay's concentration dynamic range, which NPX or RFU distributions cannot show. "
+        "Low values mean a protein varies little in this cohort (naturally stable, or close to "
+        "the detection limit); high values mean it differs strongly between samples."
+    ),
+    "rank_concordance": (
+        "Spearman correlation of protein ranks between pairs of study samples (up to 500 random "
+        "pairs). Ranks do not depend on the measurement scale, so the value is comparable between "
+        "NPX and RFU within a dataset. Biological replicates of similar samples correlate highly; "
+        "mixed cohorts (e.g. cases and controls, or different tissues) correlate less, which "
+        "reflects biology rather than quality. A tail of low values points to individual samples "
+        "that differ from the rest; see the sample correlation heatmap to identify them."
+    ),
     "differential_expression": (
         "Volcano plots showing differentially expressed proteins between sample groups defined "
         "in the SDRF metadata file. Each dot is a protein; the x-axis shows fold change "
@@ -297,9 +325,9 @@ _SECTION_ORDER = [
     ("Signal & Distribution", ["distribution", "lod_analysis"]),
     ("Sample Completeness", ["sample_completeness"]),
     ("Missing Frequency Distribution", ["missing_frequency_distribution"]),
-    ("Sample Relationships", ["dimreduction", "correlation", "heatmap"]),
+    ("Sample Relationships", ["dimreduction", "correlation", "rank_concordance", "heatmap"]),
     ("Normalization QC", ["norm_scale"]),
-    ("Variability", ["cv_distribution", "replicate_cv", "plate_cv"]),
+    ("Variability", ["cv_distribution", "replicate_cv", "mpi", "dynamic_range", "plate_cv"]),
     ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags"]),
     ("Pre-analytical & Sample Identity", ["preanalytical", "sex_check"]),
     ("Dilution QC", ["dilution_cv", "dilution_norm_scale"]),
@@ -1190,6 +1218,31 @@ def _render_summary_table(
                 dot = _status_dot("green") if not sex.mismatches else _status_dot("amber")
                 rows.append(_summary_row(dot, "Sex mismatches vs annotation", str(len(sex.mismatches))))
 
+    mpi_data = plot_data.get("mpi")
+    dr_data = plot_data.get("dynamic_range")
+    rc_data = plot_data.get("rank_concordance")
+    if mpi_data is not None or dr_data is not None or rc_data is not None:
+        from pyprideap.viz.qc.agnostic import DynamicRangeData as _DR
+        from pyprideap.viz.qc.agnostic import MpiData as _MPI
+        from pyprideap.viz.qc.agnostic import RankConcordanceData as _RC
+
+        rows.append(_summary_group("Precision &amp; Concordance"))
+        if isinstance(mpi_data, _MPI):
+            if mpi_data.has_case_control:
+                parts = [f"{html_mod.escape(str(k))}: {v}" for k, v in mpi_data.group_counts.items()]
+                source = html_mod.escape(mpi_data.group_column or "metadata")
+                rows.append(_summary_row("", f"Biological groups ({source})", ", ".join(parts)))
+                mpi_label = "Median MPI (within groups)"
+            else:
+                mpi_label = "Median MPI (no biological groups found)"
+            rows.append(_summary_row("", mpi_label, f"{mpi_data.median:.2f}"))
+        if isinstance(dr_data, _DR):
+            rows.append(_summary_row("", "Median relative spread (IQR / median)", f"{dr_data.median:.2f}"))
+        if isinstance(rc_data, _RC):
+            rows.append(
+                _summary_row("", "Median rank concordance", f"{rc_data.median:.2f} ({rc_data.n_pairs} sample pairs)")
+            )
+
     # --- QC Status (Olink only) ---
     qc_flags = plot_data.get("qc_flags")
     worst = qc_flags.sample_worst if isinstance(qc_flags, QcFlagData) else {}
@@ -1473,6 +1526,30 @@ def _detect_covariates(
     return covariates
 
 
+def _prepare_qc_dataset(
+    dataset: AffinityDataset,
+    sdrf_path: str | Path | None,
+) -> AffinityDataset:
+    """Merge SDRF sample metadata when a path is provided.
+
+    MPI uses the merged table to find case/control groups. Failures are
+    logged and the original dataset is returned so the rest of the report
+    still generates.
+    """
+    if sdrf_path is None:
+        return dataset
+    try:
+        from pyprideap.io.readers.sdrf import merge_sdrf, read_sdrf
+
+        sdrf = read_sdrf(sdrf_path)
+        merged = merge_sdrf(dataset, sdrf)
+        logger.debug("qc_report: merged SDRF %s into sample metadata", sdrf_path)
+        return merged
+    except Exception:
+        logger.warning("qc_report: could not merge SDRF %s; continuing without it", sdrf_path, exc_info=True)
+        return dataset
+
+
 def qc_report(
     dataset: AffinityDataset,
     output: str | Path,
@@ -1490,7 +1567,8 @@ def qc_report(
     sdrf_path : str | Path | None
         Optional path to an SDRF TSV file.  When provided, differential
         expression volcano plots are added to the report with an
-        interactive dropdown to select the grouping variable.
+        interactive dropdown to select the grouping variable.  The same file is
+        also used to detect case/control groups for Measurement Precision Index.
     strip_plot_title : bool
         Remove the Plotly figure title from each plot (default ``True``).
         The card header already displays the title, so the in-plot title
@@ -1505,7 +1583,8 @@ def qc_report(
 
     output = Path(output)
     logger.debug("qc_report: starting report generation -> %s", output)
-    plot_data = compute_all(dataset)
+    qc_dataset = _prepare_qc_dataset(dataset, sdrf_path)
+    plot_data = compute_all(qc_dataset)
 
     _RENDERERS = {
         "lod_comparison": (LodComparisonData, R.render_lod_comparison),
@@ -1522,6 +1601,9 @@ def qc_report(
         # Olink-specific renderers
         "iqr_median_qc": (IqrMedianQcData, R.render_iqr_median_qc),
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
+        "mpi": (MpiData, R.render_mpi),
+        "dynamic_range": (DynamicRangeData, R.render_dynamic_range),
+        "rank_concordance": (RankConcordanceData, R.render_rank_concordance),
         # SomaScan-specific renderers
         "col_check": (ColCheckData, R.render_col_check),
         # Technical QC
@@ -1852,6 +1934,8 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("sample_completeness", "half"),
             ("cv_distribution", "half"),
             ("replicate_cv", "half"),
+            ("mpi", "half"),
+            ("dynamic_range", "half"),
             ("plate_cv", "full"),
             ("lod_comparison", "full"),
         ],
@@ -1859,7 +1943,7 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
     (
         "structure",
         "Sample structure",
-        [("correlation", "half"), ("dimreduction", "half"), ("heatmap", "full")],
+        [("correlation", "half"), ("dimreduction", "half"), ("rank_concordance", "full"), ("heatmap", "full")],
     ),
     (
         "technical",
@@ -1890,6 +1974,9 @@ _SPLIT_PLOT_HEIGHTS = {
     "distribution": 380,
     "cv_distribution": 380,
     "replicate_cv": 380,
+    "mpi": 380,
+    "dynamic_range": 380,
+    "rank_concordance": 360,
     "batch_effect": 360,
     "plate_signal": 360,
     "preanalytical": 380,
@@ -1999,6 +2086,7 @@ def qc_report_split(
     output_dir: str | Path,
     no_border: bool = False,
     strip_plot_title: bool = True,
+    sdrf_path: str | Path | None = None,
 ) -> Path:
     """Generate individual QC plot HTML files in a directory.
 
@@ -2020,6 +2108,8 @@ def qc_report_split(
         background and content-height body.
     strip_plot_title : bool
         Remove the Plotly figure title from each plot (default ``True``).
+    sdrf_path : str | Path | None
+        Optional SDRF TSV used to detect case/control groups for MPI.
 
     Returns
     -------
@@ -2037,7 +2127,8 @@ def qc_report_split(
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.debug("qc_report_split: starting split report generation -> %s", output_dir)
 
-    plot_data = compute_all(dataset)
+    qc_dataset = _prepare_qc_dataset(dataset, sdrf_path)
+    plot_data = compute_all(qc_dataset)
     lod_info = _lod_source_info(dataset)
     platform_label = dataset.platform.value.replace("_", " ").title()
 
@@ -2056,6 +2147,9 @@ def qc_report_split(
         # Olink-specific renderers
         "iqr_median_qc": (IqrMedianQcData, R.render_iqr_median_qc),
         "uniprot_duplicates": (UniProtDuplicateData, R.render_uniprot_duplicates),
+        "mpi": (MpiData, R.render_mpi),
+        "dynamic_range": (DynamicRangeData, R.render_dynamic_range),
+        "rank_concordance": (RankConcordanceData, R.render_rank_concordance),
         # SomaScan-specific renderers
         "col_check": (ColCheckData, R.render_col_check),
         # Technical QC

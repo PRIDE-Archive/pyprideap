@@ -59,7 +59,7 @@ dataset = pp.read("olink_npx.csv")
 pp.qc_report(dataset, "my_report.html")
 ```
 
-The report includes a dataset summary table with traffic-light quality indicators and interactive plots: expression distributions, PCA/t-SNE, LOD analysis, sample correlation, completeness, CV distributions, and more. All plots are rendered with Plotly and include help tooltips explaining how to interpret each visualization.
+The report includes a dataset summary table with traffic-light quality indicators and interactive plots: expression distributions, PCA/t-SNE, LOD analysis, sample correlation, completeness, CV distributions, and technology-agnostic QC plots (Measurement Precision Index, relative spread, rank concordance) computed on study samples, with MPI and relative spread on a linear scale (2^NPX for Olink). All plots are rendered with Plotly and include help tooltips explaining how to interpret each visualization.
 
 Generate individual plot files for embedding:
 
@@ -111,7 +111,7 @@ pyprideap report -a PAD000001
 # Generate individual plot files instead of a single report
 pyprideap report data.npx.csv --split -o plots_dir/
 
-# Include SDRF metadata for volcano plots
+# Include SDRF metadata for case/control groups (MPI) and volcano plots
 pyprideap report data.npx.csv --sdrf samples.sdrf.tsv
 
 # Enable verbose logging (shows format detection, LOD method, PCA variance, etc.)
@@ -158,6 +158,7 @@ The HTML report is a self-contained, interactive document with a sidebar table o
 | **Sample Completeness** | Per-sample above/below LOD stacked bars |
 | **Missing Frequency Distribution** | Per-protein missing rate histogram with 30% threshold |
 | **Sample Relationships** | PCA / t-SNE (toggle switch), sample correlation heatmap, clustered expression heatmap |
+| **Precision & Concordance** | Measurement Precision Index (MPI) and relative spread (in Variability), rank concordance (in Sample Relationships) |
 | **Normalization QC** | Hybridization control scale (SomaScan) |
 | **Variability** | CV distribution, intra/inter-plate CV |
 | **Assay QC** | IQR/Median outlier detection, UniProt duplicate mapping (Olink) |
@@ -198,7 +199,12 @@ The embedded report posts `pride-qc-resize` messages with the document height, a
 pyprideap can read [SDRF](https://github.com/bigbio/proteomics-metadata-standard) (Sample and Data Relationship Format) files and merge sample metadata into datasets:
 
 ```python
-from pyprideap.io.readers.sdrf import read_sdrf, merge_sdrf, get_grouping_columns
+from pyprideap.io.readers.sdrf import (
+    read_sdrf,
+    merge_sdrf,
+    get_grouping_columns,
+    resolve_biological_groups,
+)
 
 # Read and parse an SDRF file
 sdrf = read_sdrf("samples.sdrf.tsv")
@@ -210,9 +216,46 @@ dataset = merge_sdrf(dataset, sdrf)
 # Identify columns suitable for differential expression grouping
 group_cols = get_grouping_columns(sdrf)
 # e.g. ["disease", "sex", "treatment"]
+
+# Case/control (or equivalent) groups for MPI
+groups = resolve_biological_groups(dataset)
 ```
 
 Column names are automatically shortened from the full SDRF syntax (e.g. `characteristics[disease]` becomes `disease`). Duplicate column names are disambiguated with numeric suffixes.
+
+Sample IDs in PAD files often omit the accession prefix used in SDRF (`XB6` vs `PAD000001-XB6`). `merge_sdrf` strips `PAD######-` (and `PAD######-r#####-`) prefixes when an exact join matches few rows, so the same report command works across datasets.
+
+### Case/control groups for every dataset
+
+QC reports use SDRF to decide whether MPI should be calculated **within biological groups**:
+
+1. Pass `--sdrf path/to/file.sdrf.tsv`, **or**
+2. Place the dataset's SDRF next to the expression matrix; it is picked up automatically when both file names contain the same PAD accession (e.g. `PAD000001_olink_npx.csv` and `PAD000001.sdrf.tsv`), **or**
+3. Run `pyprideap report -a PAD000001` — SDRF files are downloaded with the data when present.
+
+The column used for grouping is the first of `disease`, `phenotype`, `condition`, `treatment`, or `group` that has 2–10 levels and at least 3 samples per level (`not available` is ignored). Sex, plate, and QC flags are not treated as case/control.
+
+If those columns are empty in an auto-annotated SDRF, pyprideap falls back to tokens in the IDs of study samples (`positive`/`negative`, `case`/`control`, `patient`/`healthy`); control samples are excluded first, and the report states which source defined the groups. A `Group` column already in the expression file (common in SomaScan tables) is used the same way.
+
+Generate the three plots for any PAD dataset:
+
+```bash
+# Local files (an SDRF with the same PAD accession next to the CSV is picked up automatically)
+pyprideap report olink_npx.csv --sdrf PAD000001_community_annotated.sdrf.tsv -o report.html
+
+# Or from the archive, including SDRF when PRIDE lists one
+pyprideap report -a PAD000003 -o pad000003_qc.html
+
+# Individual HTML files (mpi.html, dynamic_range.html, rank_concordance.html)
+pyprideap report olink_npx.csv --sdrf samples.sdrf.tsv --split -o qc_plots/
+```
+
+```python
+pp.qc_report(dataset, "report.html", sdrf_path="samples.sdrf.tsv")
+pp.qc_report_split(dataset, "qc_plots/", sdrf_path="samples.sdrf.tsv")
+```
+
+Each plot has a **Case/control: yes/no** tag and a **?** help panel with *What this shows*, *How to interpret*, and *What to look for*. These plots are visual guides, not pass/fail filters, and they do not re-normalise vendor data.
 
 ## Supported File Formats
 

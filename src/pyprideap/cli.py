@@ -25,6 +25,7 @@ Examples:
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -46,8 +47,44 @@ def _setup_logging(verbose: bool) -> None:
     logger.setLevel(level)
 
 
-def _download_pad_files(accession: str, dest_dir: Path) -> list[Path]:
-    """Download NPX/ADAT files from PRIDE for a given PAD accession."""
+def _is_sdrf_filename(name: str) -> bool:
+    lower = name.lower()
+    return "sdrf" in lower and lower.endswith((".tsv", ".txt"))
+
+
+_PAD_ACCESSION_RE = re.compile(r"PAD\d{6}", re.IGNORECASE)
+
+
+def _discover_sdrf(data_path: Path) -> Path | None:
+    """Find the SDRF of the same PAD accession next to the data file.
+
+    Only files whose name carries the data file's accession are considered, so
+    a folder holding several datasets never pairs data with another dataset's
+    SDRF. Community-annotated files are preferred.
+    """
+    accession = _PAD_ACCESSION_RE.search(data_path.name)
+    if accession is None or not data_path.parent.exists():
+        return None
+    acc = accession.group(0).upper()
+    matches: list[Path] = []
+    for pattern in ("*sdrf*.tsv", "*sdrf*.txt"):
+        matches.extend(p for p in data_path.parent.glob(pattern) if acc in p.name.upper())
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in matches:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    if not unique:
+        return None
+    unique.sort(key=lambda p: (0 if "community" in p.name.lower() else 1, p.name.lower()))
+    return unique[0]
+
+
+def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Path | None]:
+    """Download NPX/ADAT files (and SDRF if present) from PRIDE for a PAD accession."""
     from pyprideap.api.pride import PrideClient
 
     client = PrideClient()
@@ -61,6 +98,7 @@ def _download_pad_files(accession: str, dest_dir: Path) -> list[Path]:
         for name, url in urls.items()
         if any(name.lower().endswith(ext) for ext in data_extensions) and "checksum" not in name.lower()
     }
+    sdrf_urls = {name: url for name, url in urls.items() if _is_sdrf_filename(name) and "checksum" not in name.lower()}
 
     if not data_urls:
         click.echo(f"Error: No supported data files found for {accession}", err=True)
@@ -68,9 +106,12 @@ def _download_pad_files(accession: str, dest_dir: Path) -> list[Path]:
         sys.exit(1)
 
     logger.debug("Found %d data file(s): %s", len(data_urls), list(data_urls.keys()))
+    if sdrf_urls:
+        logger.debug("Found %d SDRF file(s): %s", len(sdrf_urls), list(sdrf_urls.keys()))
 
     downloaded: list[Path] = []
-    for name, url in data_urls.items():
+    sdrf_files: list[Path] = []
+    for name, url in {**data_urls, **sdrf_urls}.items():
         dest = dest_dir / Path(name).name  # sanitize: strip directory components
         # Convert FTP URLs to HTTPS for broader compatibility
         if url.startswith("ftp://ftp.pride.ebi.ac.uk/"):
@@ -80,9 +121,16 @@ def _download_pad_files(accession: str, dest_dir: Path) -> list[Path]:
         import urllib.request
 
         urllib.request.urlretrieve(url, dest)
-        downloaded.append(dest)
+        if _is_sdrf_filename(name):
+            sdrf_files.append(dest)
+        else:
+            downloaded.append(dest)
 
-    return downloaded
+    sdrf_path = None
+    if sdrf_files:
+        sdrf_files.sort(key=lambda p: (0 if "community" in p.name.lower() else 1, p.name.lower()))
+        sdrf_path = sdrf_files[0]
+    return downloaded, sdrf_path
 
 
 def _generate_report(
@@ -103,6 +151,15 @@ def _generate_report(
     logger.debug("Samples columns: %s", list(ds.samples.columns))
     logger.debug("Features columns: %s", list(ds.features.columns))
 
+    if sdrf_path is None:
+        nearby = _discover_sdrf(input_path)
+        if nearby is not None:
+            sdrf_path = nearby
+            click.echo(f"  SDRF (auto): {sdrf_path.name}")
+    else:
+        click.echo(f"  SDRF: {sdrf_path.name}")
+        logger.debug("SDRF full path: %s", sdrf_path)
+
     if split:
         from pyprideap.viz.qc.report import qc_report_split
 
@@ -114,7 +171,7 @@ def _generate_report(
 
         click.echo("Generating individual plot files...")
         logger.debug("Output directory: %s", output_path)
-        result = qc_report_split(ds, output_path, no_border=no_border)
+        result = qc_report_split(ds, output_path, no_border=no_border, sdrf_path=sdrf_path)
         n_files = len(list(result.glob("*.html")))
         click.echo(f"  {n_files} HTML files saved to {result}/")
         return result
@@ -125,10 +182,6 @@ def _generate_report(
         if stem.endswith(".npx") or stem.endswith(".ct"):
             stem = Path(stem).stem
         output_path = Path(f"{stem}_qc_report.html")
-
-    if sdrf_path is not None:
-        click.echo(f"  SDRF: {sdrf_path.name}")
-        logger.debug("SDRF full path: %s", sdrf_path)
 
     click.echo("Generating report...")
     logger.debug("Output path: %s", output_path)
@@ -157,7 +210,13 @@ def main() -> None:
 @click.option(
     "--split", is_flag=True, default=False, help="Output individual plot HTML files instead of a single report."
 )
-@click.option("--sdrf", default=None, type=click.Path(exists=True), help="Path to SDRF TSV file for volcano plots.")
+@click.option(
+    "--sdrf",
+    default=None,
+    type=click.Path(exists=True),
+    help="Path to SDRF TSV (case/control groups for MPI and volcano plots). "
+    "If omitted, pyprideap looks for *sdrf*.tsv next to the data file.",
+)
 @click.option(
     "--no-border/--border", default=True, help="Remove card borders from split plot files (default: no border)."
 )
@@ -192,7 +251,10 @@ def report(
 
         with tempfile.TemporaryDirectory(prefix="pyprideap_") as tmpdir:
             tmppath = Path(tmpdir)
-            files = _download_pad_files(accession, tmppath)
+            files, downloaded_sdrf = _download_pad_files(accession, tmppath)
+            if sdrf_path is None and downloaded_sdrf is not None:
+                sdrf_path = downloaded_sdrf
+                click.echo(f"  SDRF: {sdrf_path.name}")
 
             for f in files:
                 try:
@@ -277,7 +339,7 @@ def proteins_above_lod(
 
         with tempfile.TemporaryDirectory(prefix="pyprideap_") as tmpdir:
             tmppath = Path(tmpdir)
-            files = _download_pad_files(accession, tmppath)
+            files, _sdrf = _download_pad_files(accession, tmppath)
 
             for f in files:
                 try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
     BatchEffectData,
     BridgeabilityData,
@@ -1691,6 +1692,136 @@ def render_volcano(data: VolcanoData) -> Figure:
         annotations=annotations,
     )
     return fig
+
+
+def _case_control_annotation(has_case_control: bool) -> dict:
+    if has_case_control:
+        return dict(
+            x=0.02,
+            y=0.03,
+            xref="paper",
+            yref="paper",
+            text="Case/control: yes",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+            font=dict(size=12, color="#1b5e20"),
+            bgcolor="#c8e6c9",
+            bordercolor="#2e7d32",
+            borderwidth=1.2,
+            borderpad=6,
+        )
+    return dict(
+        x=0.02,
+        y=0.03,
+        xref="paper",
+        yref="paper",
+        text="Case/control: no",
+        showarrow=False,
+        xanchor="left",
+        yanchor="bottom",
+        font=dict(size=12, color="#424242"),
+        bgcolor="#eeeeee",
+        bordercolor="#616161",
+        borderwidth=1.2,
+        borderpad=6,
+    )
+
+
+def _render_median_histogram(
+    values: list[float],
+    *,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    bar_color: str,
+    median_value: float,
+    has_case_control: bool,
+    xmin: float | None = None,
+    xmax: float | None = None,
+) -> Figure:
+    """Histogram with the dataset median marked.
+
+    No quality bands: these metrics depend on the platform, the deposited
+    normalisation and the study design, so fixed cut-offs would read as
+    cross-platform acceptance thresholds.
+    """
+    go, _ = _import_plotly()
+    import numpy as np
+
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    lo = float(np.nanpercentile(arr, 0.5)) if xmin is None and arr.size else (xmin if xmin is not None else 0.0)
+    hi = float(np.nanpercentile(arr, 99.5)) if xmax is None and arr.size else (xmax if xmax is not None else 1.0)
+    shown = arr[(arr >= lo) & (arr <= hi)]
+    fig = go.Figure(
+        go.Histogram(
+            x=shown.tolist(),
+            nbinsx=50,
+            marker=dict(color=bar_color),
+            opacity=0.85,
+            showlegend=False,
+            hovertemplate="%{x}<br>%{y}<extra></extra>",
+        )
+    )
+    fig.add_vline(
+        x=median_value,
+        line_dash="dash",
+        line_color="#2c3e50",
+        line_width=2,
+        annotation_text=f"median {median_value:.2f}",
+        annotation_position="top right",
+    )
+    n_hidden = int(arr.size - shown.size)
+    note = f" ({n_hidden} beyond the 0.5–99.5th percentile not shown)" if n_hidden else ""
+    fig.update_layout(
+        title=title,
+        xaxis_title=xlabel + note,
+        yaxis_title=ylabel,
+        bargap=0.05,
+    )
+    fig.add_annotation(_case_control_annotation(has_case_control))
+    return fig
+
+
+def render_mpi(data: MpiData) -> Figure:
+    return _render_median_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel + " (median / robust SD, linear scale)",
+        ylabel=data.ylabel,
+        bar_color="#3498db",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmin=0.0,
+    )
+
+
+def render_dynamic_range(data: DynamicRangeData) -> Figure:
+    return _render_median_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel,
+        ylabel=data.ylabel,
+        bar_color="#16a085",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmin=0.0,
+    )
+
+
+def render_rank_concordance(data: RankConcordanceData) -> Figure:
+    return _render_median_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel,
+        ylabel=data.ylabel,
+        bar_color="#e67e22",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmin=-1.0,
+        xmax=1.0,
+    )
 
 
 def render_bridgeability(data: BridgeabilityData) -> Figure:
