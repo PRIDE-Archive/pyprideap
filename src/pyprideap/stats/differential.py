@@ -12,6 +12,7 @@ adjusted *p*-values.
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -243,7 +244,7 @@ def ttest(
     result["significant"] = result["adj_p_value"] < 0.05
     n_sig = int(result["significant"].sum())
     logger.debug("ttest: %d proteins tested, %d significant (adj_p < 0.05)", len(result), n_sig)
-    return result
+    return cast(pd.DataFrame, result)
 
 
 def _empty_ttest_row(protein_id: str, assay_map: dict) -> dict:
@@ -257,16 +258,19 @@ def _empty_ttest_row(protein_id: str, assay_map: dict) -> dict:
 
 
 def _empty_ttest_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "protein_id",
-            "assay",
-            "estimate",
-            "statistic",
-            "p_value",
-            "adj_p_value",
-            "significant",
-        ]
+    return cast(
+        pd.DataFrame,
+        pd.DataFrame(
+            columns=[
+                "protein_id",
+                "assay",
+                "estimate",
+                "statistic",
+                "p_value",
+                "adj_p_value",
+                "significant",
+            ]
+        ),
     )
 
 
@@ -382,7 +386,7 @@ def linear_model(
         len(result),
         n_sig,
     )
-    return result
+    return cast(pd.DataFrame, result)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +495,7 @@ def wilcoxon(
     result["significant"] = result["adj_p_value"] < 0.05
     n_sig = int(result["significant"].sum())
     logger.debug("wilcoxon: %d proteins tested, %d significant (adj_p < 0.05)", len(result), n_sig)
-    return result
+    return cast(pd.DataFrame, result)
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +605,7 @@ def anova(
     result["significant"] = result["adj_p_value"] < 0.05
     n_sig = int(result["significant"].sum())
     logger.debug("anova: %d proteins tested, %d significant (adj_p < 0.05)", len(result), n_sig)
-    return result
+    return cast(pd.DataFrame, result)
 
 
 def _anova_ols(
@@ -664,17 +668,20 @@ def _empty_anova_row(protein_id: str, assay_map: dict) -> dict:
 
 
 def _empty_anova_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "protein_id",
-            "assay",
-            "statistic",
-            "df_between",
-            "df_within",
-            "p_value",
-            "adj_p_value",
-            "significant",
-        ]
+    return cast(
+        pd.DataFrame,
+        pd.DataFrame(
+            columns=[
+                "protein_id",
+                "assay",
+                "statistic",
+                "df_between",
+                "df_within",
+                "p_value",
+                "adj_p_value",
+                "significant",
+            ]
+        ),
     )
 
 
@@ -772,21 +779,24 @@ def anova_posthoc(
     result_df = pd.DataFrame(records)
     logger.debug("anova_posthoc: %d pairwise comparisons computed", len(result_df))
     if result_df.empty:
-        return pd.DataFrame(
-            columns=[
-                "protein_id",
-                "assay",
-                "contrast",
-                "estimate",
-                "p_value",
-                "adj_p_value",
-                "ci_lower",
-                "ci_upper",
-            ]
+        return cast(
+            pd.DataFrame,
+            pd.DataFrame(
+                columns=[
+                    "protein_id",
+                    "assay",
+                    "contrast",
+                    "estimate",
+                    "p_value",
+                    "adj_p_value",
+                    "ci_lower",
+                    "ci_upper",
+                ]
+            ),
         )
 
     result_df["adj_p_value"] = _bh_adjust(np.asarray(result_df["p_value"]))
-    return result_df
+    return cast(pd.DataFrame, result_df)
 
 
 def _tukey_pair_index(result, i: int, j: int) -> int | None:

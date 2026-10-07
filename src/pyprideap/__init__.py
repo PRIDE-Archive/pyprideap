@@ -6,7 +6,7 @@ from pyprideap.api.pride import PrideClient
 from pyprideap.core import AffinityDataset, Level, Platform, ValidationResult
 from pyprideap.io.readers.registry import read
 from pyprideap.io.validators import validate
-from pyprideap.processing.filtering import filter_controls, filter_qc
+from pyprideap.processing.filtering import filter_controls, filter_qc, get_unique_samples
 from pyprideap.processing.lod import (
     LodMethod,
     LodStats,
@@ -103,6 +103,7 @@ __all__ = [
     # Filtering
     "filter_controls",
     "filter_qc",
+    "get_unique_samples",
     # Normalization
     "assess_bridgeability",
     "bridge_normalize",

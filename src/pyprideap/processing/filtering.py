@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import pandas as pd
 
@@ -57,7 +58,7 @@ def control_sample_mask(samples: pd.DataFrame) -> pd.Series:
     for col in ("SampleType", _SDRF_SAMPLE_TYPE_COLUMN):
         if col in samples.columns:
             mask |= normalize_sample_type(samples[col]).isin(_CONTROL_SAMPLE_TYPES)
-    return mask
+    return cast(pd.Series, mask)
 
 
 def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
@@ -104,6 +105,67 @@ def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
         expression=expression,
         metadata=metadata,
     )
+
+
+def get_unique_samples(
+    dataset: AffinityDataset,
+    *,
+    exclude_controls: bool = False,
+) -> list[str]:
+    """Return sorted unique sample identifiers from a dataset.
+
+    Args:
+        dataset: The AffinityDataset to extract samples from.
+        exclude_controls: If True, remove control/QC samples
+            before collecting unique identifiers (default: False).
+
+    Returns:
+        Sorted list of unique sample identifier strings.
+    """
+    samples = dataset.samples
+
+    if exclude_controls:
+        # Same matching as filter_controls (vendor spellings such as NEGATIVE_CONTROL,
+        # and an SDRF "sample type" column when merged)
+        is_control = control_sample_mask(samples)
+        samples = samples[~is_control]
+        logger.debug(
+            "get_unique_samples: excluded %d control samples",
+            int(is_control.sum()),
+        )
+
+    # Resolve the best sample identifier column.
+    # SampleID may actually be an assay index in some Olink files (its
+    # cardinality equals the number of features).  When that happens, skip
+    # it and prefer SampleName instead.  Also accept the SomaScan-style
+    # ``SampleId`` (lowercase 'd').
+    id_col: str | None = None
+    for candidate in ("SampleID", "SampleId", "SampleName"):
+        if candidate not in samples.columns:
+            continue
+        # Guard against assay-indexed columns: if the number of unique
+        # values equals the number of features, it is likely an assay key.
+        n_unique = samples[candidate].nunique()
+        n_features = len(dataset.features)
+        if n_unique == n_features and n_features > 0 and n_unique != len(samples):
+            logger.debug(
+                "get_unique_samples: skipping %s (nunique=%d matches feature count)",
+                candidate,
+                n_unique,
+            )
+            continue
+        id_col = candidate
+        break
+
+    if id_col is None:
+        logger.debug("get_unique_samples: no suitable sample ID column found, using row index")
+        ids = [str(i) for i in samples.index]
+        return sorted(set(ids))
+
+    raw = samples[id_col].dropna().astype(str).str.strip()
+    unique = sorted(set(raw) - {""})
+    logger.debug("get_unique_samples: %d unique samples (column=%s)", len(unique), id_col)
+    return unique
 
 
 def filter_qc(

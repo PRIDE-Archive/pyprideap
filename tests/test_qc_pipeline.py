@@ -143,10 +143,14 @@ class TestComputeMetrics:
         # Result should be sorted
         assert result == sorted(result)
 
-    def test_proteins_above_lod_no_lod(self):
+    def test_proteins_above_lod_no_lod_somascan_returns_measured(self):
+        # SomaScan without buffer samples has no LOD: all measured proteins are returned
         ds = _make_somascan_dataset()
-        result = get_proteins_above_lod(ds)
-        assert result == []
+        assert get_proteins_above_lod(ds) == ["P1", "P2"]
+
+    def test_proteins_above_lod_no_lod_olink_is_empty(self):
+        ds = _make_olink_dataset()  # no LOD column, no negative controls, no FixedLOD match
+        assert get_proteins_above_lod(ds) == []
 
     def test_pca(self):
         ds = _make_olink_dataset()
@@ -889,3 +893,80 @@ class TestReviewFixes:
         from pyprideap.io.readers.olink_csv import read_olink_csv
 
         assert read_olink_csv(path).metadata["sample_qc_matrix"].values.ravel().tolist() == ["PASS", "WARN"]
+
+
+# ---------------------------------------------------------------------------
+# Protein counts used by PRIDE (proteins-above-lod)
+# ---------------------------------------------------------------------------
+
+
+class TestProteinCounts:
+    def test_somascan_measured_proteins_exclude_control_reagents(self):
+        ds = _make_somascan_dataset()
+        ds.features["Type"] = ["Protein", "Hybridization Control Elution"]
+        assert get_proteins_above_lod(ds) == ["P1"]
+
+    def test_controls_do_not_dilute_the_above_lod_share(self):
+        import numpy as np
+
+        n_study, n_ctrl = 6, 8
+        ds = AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame(
+                {
+                    "SampleID": [f"S{i}" for i in range(n_study + n_ctrl)],
+                    "SampleType": ["SAMPLE"] * n_study + ["NEGATIVE_CONTROL"] * n_ctrl,
+                }
+            ),
+            features=pd.DataFrame({"OlinkID": ["O1"], "UniProt": ["P1"], "LOD": [1.0]}),
+            expression=pd.DataFrame({"O1": np.r_[np.full(n_study, 3.0), np.full(n_ctrl, 0.0)]}),
+            metadata={},
+        )
+        # 6/14 samples above LOD overall (43%), but 100% of study samples
+        assert get_proteins_above_lod(ds) == ["P1"]
+
+    def test_olink_reader_prefers_lodnpx_and_coerces_text(self, tmp_path):
+        from pyprideap.io.readers.olink_csv import read_olink_csv
+
+        rows = [
+            {
+                "SampleID": s,
+                "OlinkID": "OID1",
+                "UniProt": "P1",
+                "Assay": "A",
+                "Panel": "X",
+                "NPX": npx,
+                "LODNPX": 0.5,
+                "LOD": 1000,
+            }
+            for s, npx in (("S1", "2.0"), ("S2", "1.5"), ("S3", "PlateID"))
+        ]
+        path = tmp_path / "lodnpx.npx.csv"
+        pd.DataFrame(rows).to_csv(path, index=False)
+        ds = read_olink_csv(path)
+        assert ds.metadata["lod_matrix"]["OID1"].tolist() == [0.5, 0.5, 0.5]
+        assert ds.expression["OID1"].isna().tolist() == [False, False, True]
+        assert get_proteins_above_lod(ds) == ["P1"]
+
+    def test_table_only_adat_is_read(self, tmp_path):
+        from pyprideap.io.readers.somascan_adat import read_somascan_adat
+
+        n_meta = 3  # sample metadata columns: PlateId, SampleId, SampleType
+        pad = "\t" * n_meta
+        lines = [
+            f"{pad}SeqId\t10000-28\t10001-7",
+            f"{pad}UniProt\tP43320\tP04049",
+            f"{pad}Type\tProtein\tProtein",
+            f"{pad}Dilution\t20\t0.5",
+            # header: sample metadata names, one empty field above the feature-name
+            # column, then empty fields over the analyte columns (as in real exports)
+            "PlateId\tSampleId\tSampleType\t\t\t",
+            "P1\tS1\tSample\t\t1000.5\t200.1",
+            "P1\tB1\tBuffer\t\t50.2\t20.3",
+        ]
+        path = tmp_path / "table_only.adat"
+        path.write_text("\n".join(lines) + "\n")
+        ds = read_somascan_adat(path)
+        assert ds.features["UniProt"].tolist() == ["P43320", "P04049"]
+        assert ds.samples["SampleType"].tolist() == ["Sample", "Buffer"]
+        assert ds.expression.iloc[0].tolist() == [1000.5, 200.1]

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -85,7 +86,7 @@ class RankConcordanceData:
 
 
 def _numeric_expression(dataset: AffinityDataset) -> pd.DataFrame:
-    return dataset.expression.apply(pd.to_numeric, errors="coerce")
+    return cast(pd.DataFrame, dataset.expression.apply(pd.to_numeric, errors="coerce"))
 
 
 def _study_mask(dataset: AffinityDataset) -> np.ndarray:
@@ -127,7 +128,7 @@ def _mpi_from_matrix(numeric: pd.DataFrame) -> pd.Series:
     mpi = 1.0 / robust_cv.replace(0, np.nan)
     mpi = mpi.replace([np.inf, -np.inf], np.nan)
     mpi = mpi.where((n >= _MIN_SAMPLES_MPI) & median.abs().gt(0) & mad.gt(0))
-    return mpi.dropna()
+    return cast(pd.Series, mpi.dropna())
 
 
 def compute_mpi(

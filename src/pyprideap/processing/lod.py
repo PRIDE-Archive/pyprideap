@@ -246,7 +246,7 @@ def compute_nc_lod_detailed(
         nc_counts = count_matrix[control_mask].apply(pd.to_numeric, errors="coerce")
         max_counts = nc_counts.max()
         lod_count = np.maximum(_LOD_COUNT_FLOOR, _LOD_COUNT_MULTIPLIER * max_counts)
-        lod_method = pd.Series(
+        lod_method: pd.Series = pd.Series(
             np.where(max_counts > _LOD_COUNT_FLOOR, "lod_npx", "lod_count"),
             index=lod_npx.index,
         )
@@ -348,7 +348,7 @@ def compute_pc_normalized_lod(
                 plate_idx = plates[plates == plate_id].index
                 lod_matrix.loc[plate_idx] = lod_matrix.loc[plate_idx].subtract(plate_median, axis=1)
 
-    return lod_matrix
+    return cast(pd.DataFrame, lod_matrix)
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +448,7 @@ def _intensity_adjustment(
         # Adjustment = plate_median - global_median
         adjustments.loc[grp_idx] = plate_median - global_median
 
-    return adjustments
+    return cast(pd.Series | None, adjustments)
 
 
 def compute_nclod(
@@ -525,9 +525,15 @@ def get_reported_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | Non
 
     if "OlinkID" in dataset.features.columns:
         lod_map = dict(zip(dataset.features["OlinkID"], lod_series))
-        return pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns})
+        return cast(
+            pd.Series,
+            pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns}),
+        )
 
-    return pd.Series(lod_series.values, index=dataset.expression.columns[: len(lod_series)])
+    return cast(
+        pd.Series,
+        pd.Series(lod_series.values, index=dataset.expression.columns[: len(lod_series)]),
+    )
 
 
 _CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
@@ -623,7 +629,7 @@ def load_fixed_lod(
         lod_map = dict(zip(lod_dedup["OlinkID"], lod_dedup["LODNPX"]))
 
     lod_series = pd.Series({col: lod_map.get(col, np.nan) for col in dataset.expression.columns})
-    return lod_series
+    return cast(pd.Series, lod_series)
 
 
 # Backwards-compat alias
@@ -801,6 +807,54 @@ def compute_lod_stats(
     )
 
 
+def resolve_lod_with_source(dataset: AffinityDataset) -> tuple[pd.DataFrame | pd.Series | None, str | None]:
+    """Resolve the LOD used for QC reports and protein counts, and name its source.
+
+    Olink:    Reported LOD → NCLOD (≥10 negative controls) → FixedLOD
+    SomaScan: Reported LOD → eLOD (buffer-based, MAD formula)
+
+    NCLOD (median + max(0.2, 3·SD)) is defined on log2 NPX by OlinkAnalyze and
+    is never applied to SomaScan RFU, even when there are ≥10 buffer samples.
+
+    Returns ``(lod, source_name)``, or ``(None, None)`` when no source applies.
+    """
+    lod = get_reported_lod(dataset)
+    if lod is not None:
+        return lod, "Reported LOD"
+
+    if dataset.platform == Platform.SOMASCAN:
+        try:
+            return compute_soma_elod(dataset), "eLOD"
+        except (ValueError, KeyError):
+            return None, None
+
+    try:
+        return compute_nclod(dataset, plate_adjusted=True), "NCLOD"
+    except (ValueError, KeyError):
+        pass
+
+    try:
+        return load_fixed_lod(dataset), "FixedLOD"
+    except (ValueError, FileNotFoundError):
+        pass
+
+    return None, None
+
+
+def _measured_somascan_proteins(dataset: AffinityDataset) -> list[str]:
+    """UniProt accessions of SomaScan protein reagents (Type == "Protein").
+
+    Hybridisation controls, spuriomers, non-biotin and non-human/deprecated
+    reagents are excluded when the ADAT provides a ``Type`` column.
+    """
+    features = dataset.features
+    if "Type" in features.columns:
+        features = features[features["Type"].astype(str).str.strip().str.lower() == "protein"]
+    ids = features["UniProt"].astype(str).str.strip()
+    ids = ids[~ids.isin(["", "nan", "NA", "None"])]
+    return sorted(set(ids))
+
+
 def get_proteins_above_lod(
     dataset: AffinityDataset,
     lod: pd.DataFrame | pd.Series | None = None,
@@ -809,47 +863,48 @@ def get_proteins_above_lod(
 ) -> list[str]:
     """Return UniProt accessions for proteins above LOD in sufficient samples.
 
-    A protein passes if at least *threshold* % of valid (non-NaN) samples
-    have expression above the LOD for that assay.
+    A protein passes if at least *threshold* % of the valid (non-NaN) study
+    samples have expression above the LOD for that assay. Control samples
+    (negative/plate/sample controls, buffers, calibrators, QC) are excluded.
+
+    The LOD is resolved as in the QC report (:func:`resolve_lod_with_source`).
+    SomaScan files without buffer samples have no LOD source; for them all
+    measured human protein reagents are returned (a warning is logged), since
+    nearly all SomaScan assays are detected in plasma (e.g. 95–99.7% above eLOD
+    per dilution on PAD000021). Olink datasets without any LOD return an empty
+    list, because many Olink assays are genuinely below LOD.
 
     Args:
         dataset: The AffinityDataset to analyze.
-        lod: Pre-computed LOD values. If None, resolved automatically
-            (Reported > NCLOD > FixedLOD/eLOD).
+        lod: Pre-computed LOD values. If None, resolved automatically.
         threshold: Minimum percentage of samples that must be above LOD
             for the protein to be included (default 50%).
 
     Returns:
         Sorted list of unique UniProt accession strings.
     """
+    from pyprideap.processing.filtering import control_sample_mask
+
     if "UniProt" not in dataset.features.columns:
         return []
 
-    # Resolve LOD
     if lod is None:
-        lod = get_reported_lod(dataset)
-    if lod is None:
-        try:
-            lod = compute_nclod(dataset, plate_adjusted=True)
-        except ValueError:
-            pass
-    if lod is None:
-        # Try FixedLOD
-        try:
-            lod = load_fixed_lod(dataset)
-        except (ValueError, FileNotFoundError):
-            pass
-    if lod is None:
-        # Try SomaScan eLOD
-        try:
-            lod = compute_soma_elod(dataset)
-        except ValueError:
-            pass
+        lod, source = resolve_lod_with_source(dataset)
+        if lod is None and dataset.platform == Platform.SOMASCAN:
+            proteins_measured = _measured_somascan_proteins(dataset)
+            logger.warning(
+                "No LOD source (no buffer samples); returning all %d measured SomaScan proteins",
+                len(proteins_measured),
+            )
+            return proteins_measured
+        logger.debug("proteins above LOD: LOD source %s", source)
     if lod is None:
         return []
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     above_lod, has_lod = _above_lod_matrix(numeric, lod)
+    study = ~control_sample_mask(dataset.samples).to_numpy()
+    numeric, above_lod, has_lod = numeric.loc[study], above_lod.loc[study], has_lod.loc[study]
 
     # Map expression columns to UniProt.
     # Use "Name" for SomaScan (matches expression column names like "seq.10000.28")
@@ -874,7 +929,7 @@ def get_proteins_above_lod(
         pct = float(above_lod.loc[valid, col].sum() / n * 100)
         if pct >= threshold:
             up = id_to_uniprot.get(col)
-            if up and pd.notna(up):
+            if up and pd.notna(up) and str(up).strip() not in ("", "nan", "NA"):
                 proteins.add(str(up))
 
     logger.debug("proteins above LOD: %d unique UniProt accessions", len(proteins))
