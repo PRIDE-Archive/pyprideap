@@ -1264,3 +1264,54 @@ class TestSweepFixes:
         m = read_olink_csv(path).metadata["sample_qc_matrix"]
         assert m.loc[0, "O1"] == "PASS" and m.loc[0, "O2"] == "WARN"
         assert pd.isna(m.loc[1, "O1"]) and pd.isna(m.loc[1, "O2"])
+
+    @staticmethod
+    def _write_long(path, sep=",", npx=("1.25", "2.5", "-0.75", "3.0")):
+        rows = [
+            {
+                "SampleID": sid,
+                "OlinkID": oid,
+                "UniProt": "P" + oid[-1],
+                "Assay": "A" + oid[-1],
+                "Panel": "X",
+                "PlateID": "P1",
+                "MissingFreq": "30%" if oid == "OID1" else "0.1",
+                "NPX": v,
+                "LOD": "0.5",
+                "QC_Warning": "PASS",
+                "Unused": "x" * 20,
+            }
+            for (sid, oid), v in zip([("007", "OID1"), ("007", "OID2"), ("010", "OID1"), ("010", "OID2")], npx)
+        ]
+        pd.DataFrame(rows).to_csv(path, sep=sep, index=False)
+
+    def test_streamed_and_single_read_agree(self, tmp_path, monkeypatch):
+        import pyprideap.io.readers.olink_csv as oc
+
+        path = tmp_path / "long.npx.csv"
+        self._write_long(path)
+        small = oc.read_olink_csv(path)
+        monkeypatch.setattr(oc, "_STREAM_MIN_BYTES", 0)
+        streamed = oc.read_olink_csv(path)
+        assert small.expression.equals(streamed.expression)
+        assert small.samples.equals(streamed.samples) and small.features.equals(streamed.features)
+
+    def test_ids_keep_leading_zeros_and_unused_columns_are_skipped(self, tmp_path):
+        from pyprideap.io.readers.olink_csv import read_olink_csv
+
+        path = tmp_path / "ids.npx.csv"
+        self._write_long(path)
+        ds = read_olink_csv(path)
+        assert ds.samples["SampleID"].tolist() == ["007", "010"]
+        assert ds.expression.to_numpy().tolist() == [[1.25, 2.5], [-0.75, 3.0]]
+        assert "Unused" not in ds.samples.columns and "Unused" not in ds.features.columns
+        # MissingFreq written as "30%" stays text, as before
+        assert ds.features["MissingFreq"].tolist() == ["30%", "0.1"]
+
+    def test_text_in_npx_falls_back_and_becomes_missing(self, tmp_path):
+        from pyprideap.io.readers.olink_csv import read_olink_csv
+
+        path = tmp_path / "shifted.npx.csv"
+        self._write_long(path, sep=";", npx=("1.25", "PlateID", "-0.75", "3.0"))
+        ds = read_olink_csv(path)
+        assert ds.expression.isna().to_numpy().tolist() == [[False, True], [False, False]]
