@@ -141,6 +141,13 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
 
     sample_key = _detect_sample_key(df, source=path.name)
 
+    # Numeric columns can arrive as text when a file was re-arranged by hand and
+    # some rows are shifted; unparsable values become NaN instead of breaking LOD
+    # comparisons downstream.
+    for col in ("NPX", "LOD", "LODNPX"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     sample_cols = [c for c in df.columns if c in _SAMPLE_COLS]
     samples = df[sample_cols].drop_duplicates(subset=[sample_key]).reset_index(drop=True)
 
@@ -165,13 +172,16 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
 
     metadata: dict[str, object] = {"source_file": str(path)}
 
-    # Build per-sample x per-assay LOD matrix if LOD column exists
-    if "LOD" in df.columns:
-        logger.debug("LOD column present, building LOD matrix")
+    # Build per-sample x per-assay LOD matrix. Newer Explore HT / Reveal exports
+    # carry both LODNPX (LOD on the NPX scale) and LOD (count-based); NPX must be
+    # compared with LODNPX.
+    lod_col = "LODNPX" if "LODNPX" in df.columns else ("LOD" if "LOD" in df.columns else None)
+    if lod_col is not None:
+        logger.debug("LOD column %s present, building LOD matrix", lod_col)
         lod_matrix = df.pivot_table(
             index=sample_key,
             columns="OlinkID",
-            values="LOD",
+            values=lod_col,
             aggfunc="first",
         )
         lod_matrix = lod_matrix.reindex(sample_order).reset_index(drop=True)

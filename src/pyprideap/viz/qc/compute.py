@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
+from pyprideap.processing.lod import resolve_lod_with_source
 from pyprideap.viz.qc.agnostic import compute_agnostic_qc
 
 logger = logging.getLogger(__name__)
@@ -665,47 +666,6 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
         matrix=[[None if np.isnan(v) else round(v, 3) for v in row] for row in corr.values],
         labels=labels,
     )
-
-
-def resolve_lod_with_source(dataset: AffinityDataset) -> tuple[pd.DataFrame | pd.Series | None, str | None]:
-    """Resolve the LOD used throughout the QC report, and name its source.
-
-    Olink:    Reported LOD → NCLOD (≥10 negative controls) → FixedLOD
-    SomaScan: Reported LOD → eLOD (buffer-based, MAD formula)
-
-    NCLOD (median + max(0.2, 3·SD)) is defined on log2 NPX by OlinkAnalyze and
-    is never applied to SomaScan RFU, even when there are ≥10 buffer samples.
-
-    Returns ``(lod, source_name)``, or ``(None, None)`` when no source applies.
-    """
-    from pyprideap.processing.lod import (
-        compute_nclod,
-        compute_soma_elod,
-        get_reported_lod,
-        load_fixed_lod,
-    )
-
-    lod = get_reported_lod(dataset)
-    if lod is not None:
-        return lod, "Reported LOD"
-
-    if dataset.platform == Platform.SOMASCAN:
-        try:
-            return compute_soma_elod(dataset), "eLOD"
-        except (ValueError, KeyError):
-            return None, None
-
-    try:
-        return compute_nclod(dataset, plate_adjusted=True), "NCLOD"
-    except (ValueError, KeyError):
-        pass
-
-    try:
-        return load_fixed_lod(dataset), "FixedLOD"
-    except (ValueError, FileNotFoundError):
-        pass
-
-    return None, None
 
 
 def _resolve_lod(dataset: AffinityDataset) -> pd.DataFrame | pd.Series | None:

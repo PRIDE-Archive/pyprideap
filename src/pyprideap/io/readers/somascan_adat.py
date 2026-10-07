@@ -42,20 +42,24 @@ def read_somascan_adat(path: str | Path) -> AffinityDataset:
 def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     """Parse an ADAT file into header, column metadata, and row data.
 
-    Supports two ADAT layouts:
+    Supports three ADAT layouts:
     - **Legacy**: ^HEADER, ^COL_DATA (feature meta rows), ^ROW_DATA (header + data rows)
     - **TABLE_BEGIN**: ^HEADER, ^COL_DATA, ^ROW_DATA (row meta definitions only),
       ^TABLE_BEGIN (combined feature meta + data in a single block)
+    - **Table-only**: the TABLE_BEGIN body without any section markers or header
+      (e.g. exports where only the data table was kept)
     """
     header: dict[str, str] = {}
     col_lines: list[str] = []
     row_lines: list[str] = []
     table_lines: list[str] = []
+    all_lines: list[str] = []
     current_section = None
 
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
+            all_lines.append(line)
             if line.startswith("^HEADER"):
                 current_section = "HEADER"
                 continue
@@ -86,6 +90,12 @@ def _parse_adat_sections(path: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
 
     def strip_meta(s: str) -> str:
         return s.lstrip("\\").lstrip("!")
+
+    # Table-only export: no ^HEADER/^COL_DATA/^ROW_DATA/^TABLE_BEGIN markers, just
+    # the TABLE_BEGIN body (tab-indented feature metadata rows, header row, data rows)
+    if current_section is None and all_lines and all_lines[0].startswith("\t"):
+        logger.debug("ADAT layout: table-only export without section markers")
+        return _parse_table_begin(header, col_lines, row_lines, [line for line in all_lines if line.strip()])
 
     # TABLE_BEGIN format: combined col metadata + data in one block
     if table_lines:
