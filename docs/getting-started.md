@@ -91,7 +91,12 @@ dataset = pp.read("ambiguous.csv", platform="somascan")
 pyprideap can read [SDRF](https://github.com/bigbio/proteomics-metadata-standard) (Sample and Data Relationship Format) files and merge sample metadata into datasets:
 
 ```python
-from pyprideap.io.readers.sdrf import read_sdrf, merge_sdrf, get_grouping_columns
+from pyprideap.io.readers.sdrf import (
+    read_sdrf,
+    merge_sdrf,
+    get_grouping_columns,
+    resolve_biological_groups,
+)
 
 # Read and parse an SDRF file
 sdrf = read_sdrf("samples.sdrf.tsv")
@@ -103,9 +108,24 @@ dataset = merge_sdrf(dataset, sdrf)
 # Identify columns suitable for differential expression grouping
 group_cols = get_grouping_columns(sdrf)
 # e.g. ["disease", "sex", "treatment"]
+
+# Case/control groups used by Measurement Precision Index
+resolved = resolve_biological_groups(dataset)
 ```
 
 Column names are automatically shortened from the full SDRF syntax (e.g. `characteristics[disease]` becomes `disease`). Duplicate column names are disambiguated with numeric suffixes.
+
+`merge_sdrf` also matches `PAD000001-XB6` in the SDRF to `XB6` in the expression file by stripping PAD accession prefixes.
+
+### Case/control detection
+
+MPI is calculated **within groups** when a biological grouping column is found (2–10 levels, ≥3 samples each). Preferred columns: `disease`, `phenotype`, `condition`, `treatment`, `group`. If those are missing or all `not available`, sample IDs are scanned for `positive`/`negative` (or `case`/`control`) tokens. Pass the SDRF into the report so this works for every dataset:
+
+```python
+pp.qc_report(dataset, "my_report.html", sdrf_path="samples.sdrf.tsv")
+```
+
+The CLI looks for `*sdrf*.tsv` next to the data file, or downloads SDRF with `pyprideap report -a PAD000001`.
 
 ## Validation
 
@@ -210,6 +230,7 @@ The report includes:
 - Clustered expression heatmap
 - Data completeness (above/below LOD)
 - CV distributions
+- Technology-agnostic QC: Measurement Precision Index, Dynamic Range, Rank Concordance
 - Platform-specific QC (normalization scales, RowCheck/ColCheck, etc.)
 
 ### Individual plot files
@@ -336,7 +357,7 @@ pyprideap report data.npx.csv --split -o plots_dir/
 # Download from PRIDE and generate report
 pyprideap report -a PAD000001
 
-# Include SDRF metadata for volcano plots
+# Include SDRF metadata for case/control groups (MPI) and volcano plots
 pyprideap report data.npx.csv --sdrf samples.sdrf.tsv
 
 # Enable verbose logging for debugging
@@ -374,6 +395,7 @@ pyprideap/
     ├── plots.py         # Standalone plots (boxplot)
     └── qc/
         ├── compute.py   # QC metric computation
+        ├── agnostic.py  # MPI, dynamic range, rank concordance
         ├── render.py    # Plotly figure rendering
         └── report.py    # HTML report assembly
 ```

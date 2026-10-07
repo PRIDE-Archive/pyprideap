@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
     BridgeabilityData,
     ColCheckData,
@@ -1675,6 +1676,193 @@ def render_volcano(data: VolcanoData) -> Figure:
         annotations=annotations,
     )
     return fig
+
+
+def _case_control_annotation(has_case_control: bool) -> dict:
+    if has_case_control:
+        return dict(
+            x=0.02,
+            y=0.03,
+            xref="paper",
+            yref="paper",
+            text="Case/control: yes",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+            font=dict(size=12, color="#1b5e20"),
+            bgcolor="#c8e6c9",
+            bordercolor="#2e7d32",
+            borderwidth=1.2,
+            borderpad=6,
+        )
+    return dict(
+        x=0.02,
+        y=0.03,
+        xref="paper",
+        yref="paper",
+        text="Case/control: no",
+        showarrow=False,
+        xanchor="left",
+        yanchor="bottom",
+        font=dict(size=12, color="#424242"),
+        bgcolor="#eeeeee",
+        bordercolor="#616161",
+        borderwidth=1.2,
+        borderpad=6,
+    )
+
+
+def _render_zoned_histogram(
+    values: list[float],
+    *,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    zones: list[tuple[float, float, str, str]],
+    bar_color: str,
+    median_color: str,
+    median_value: float,
+    has_case_control: bool,
+    xmax: float | None = None,
+    xmin: float = 0.0,
+) -> Figure:
+    go, _ = _import_plotly()
+    import numpy as np
+
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    fig = go.Figure()
+
+    if xmax is None:
+        xmax = float(np.nanpercentile(arr, 99.5)) * 1.05 if arr.size else 1.0
+        xmax = max(xmax, zones[-1][0] if zones else 1.0)
+
+    clipped = arr[(arr >= xmin) & (arr <= xmax)] if arr.size else arr
+    fig.add_trace(
+        go.Histogram(
+            x=clipped.tolist(),
+            nbinsx=50,
+            marker=dict(color=bar_color, line=dict(color="black", width=0.5)),
+            opacity=0.85,
+            name="Proteins" if "protein" in ylabel.lower() else "Pairs",
+            showlegend=False,
+        )
+    )
+
+    for x0, x1, color, label in zones:
+        fig.add_vrect(
+            x0=x0,
+            x1=min(x1, xmax) if xmax is not None else x1,
+            fillcolor=color,
+            opacity=0.12,
+            line_width=0,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(size=10, color=color),
+                name=label,
+            )
+        )
+
+    fig.add_vline(
+        x=median_value,
+        line_dash="dash",
+        line_color=median_color,
+        line_width=2.5,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="lines",
+            line=dict(color=median_color, dash="dash", width=2.5),
+            name=f"Median = {median_value:.2f}",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=xlabel,
+        yaxis_title=ylabel,
+        xaxis=dict(range=[xmin, xmax]),
+        bargap=0.05,
+        margin=dict(b=70, t=60),
+        legend=dict(orientation="v", yanchor="top", y=0.98, xanchor="right", x=0.98),
+    )
+    fig.add_annotation(_case_control_annotation(has_case_control))
+    return fig
+
+
+def render_mpi(data: MpiData) -> Figure:
+    import numpy as np
+
+    xmax = max(30.0, float(np.nanpercentile(data.values, 99.5)) * 1.05) if data.values else 30.0
+    return _render_zoned_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel,
+        ylabel=data.ylabel,
+        zones=[
+            (0, 1, "red", "Poor (<1)"),
+            (1, 2, "orange", "Moderate (1–2)"),
+            (2, 5, "gold", "Good (2–5)"),
+            (5, xmax, "green", "Excellent (>5)"),
+        ],
+        bar_color="steelblue",
+        median_color="darkblue",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmax=xmax,
+    )
+
+
+def render_dynamic_range(data: DynamicRangeData) -> Figure:
+    import numpy as np
+
+    if data.values:
+        xmax = min(20.0, max(6.0, float(np.nanpercentile(data.values, 99)) * 1.1))
+    else:
+        xmax = 6.0
+    return _render_zoned_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel,
+        ylabel=data.ylabel,
+        zones=[
+            (0, 0.5, "red", "Compressed (<0.5)"),
+            (0.5, 2, "gold", "Moderate (0.5–2)"),
+            (2, xmax, "green", "Good (>2)"),
+        ],
+        bar_color="forestgreen",
+        median_color="darkgreen",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmax=xmax,
+    )
+
+
+def render_rank_concordance(data: RankConcordanceData) -> Figure:
+    return _render_zoned_histogram(
+        data.values,
+        title=data.title,
+        xlabel=data.xlabel,
+        ylabel=data.ylabel,
+        zones=[
+            (-1, 0, "red", "Negative (<0)"),
+            (0, 0.3, "orange", "Weak (0–0.3)"),
+            (0.3, 0.5, "gold", "Moderate (0.3–0.5)"),
+            (0.5, 1, "green", "Strong (>0.5)"),
+        ],
+        bar_color="coral",
+        median_color="darkred",
+        median_value=data.median,
+        has_case_control=data.has_case_control,
+        xmax=1.0,
+        xmin=-1.0,
+    )
 
 
 def render_bridgeability(data: BridgeabilityData) -> Figure:
