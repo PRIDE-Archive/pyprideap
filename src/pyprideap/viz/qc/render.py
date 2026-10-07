@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pyprideap.viz.qc.compute import (
+    BatchEffectData,
     BridgeabilityData,
     ColCheckData,
     ControlAnalyteData,
@@ -19,7 +20,9 @@ from pyprideap.viz.qc.compute import (
     OutlierMapData,
     PcaData,
     PlateCvData,
+    QcFlagData,
     QcLodSummaryData,
+    ReplicateCvData,
     RowCheckData,
     UmapData,
     UniProtDuplicateData,
@@ -949,7 +952,8 @@ def render_norm_scale(data: NormScaleData) -> Figure:
     fig.update_layout(
         title=data.title,
         xaxis_title="Sample Rank (sorted by NormScale)",
-        yaxis_title="HybControlNormScale",
+        # Scale factors are ratios: a log axis keeps 0.4-2.5 readable when one sample is far out
+        yaxis=dict(title="HybControlNormScale (log scale)", type="log"),
         legend=legend_cfg,
         margin=margin_cfg,
     )
@@ -1817,5 +1821,161 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
         height=800,
         legend=dict(orientation="h", yanchor="top", y=-0.18),
         margin=dict(b=100),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Technical QC
+# ---------------------------------------------------------------------------
+
+_STUDY_COLOR = "#3498db"
+_TECH_COLOR = "#e67e22"
+_MAX_PLATE_LABEL = 18
+_QC_STATUS_COLORS = {"PASS": "#2ecc71", "WARN": "#f39c12", "FAIL": "#e74c3c", "NA": "#bdc3c7"}
+
+
+def render_replicate_cv(data: ReplicateCvData) -> Figure:
+    """Overlaid CV distributions: replicate controls (technical) vs study samples."""
+    go, _ = _import_plotly()
+    import numpy as np
+
+    upper = float(np.nanpercentile(data.study_cv + data.technical_cv, 98)) if data.study_cv else 2.0
+    bins = dict(start=0, end=upper, size=upper / 60)
+    fig = go.Figure()
+    if data.study_cv:
+        fig.add_trace(
+            go.Histogram(
+                x=data.study_cv,
+                xbins=bins,
+                histnorm="percent",
+                name=f"Study samples (median {np.median(data.study_cv):.0%})",
+                marker_color=_STUDY_COLOR,
+                opacity=0.55,
+            )
+        )
+    fig.add_trace(
+        go.Histogram(
+            x=data.technical_cv,
+            xbins=bins,
+            histnorm="percent",
+            name=f"{data.control_label}, n={data.n_replicates} (median {np.median(data.technical_cv):.0%})",
+            marker_color=_TECH_COLOR,
+            opacity=0.75,
+        )
+    )
+    fig.update_layout(
+        title=data.title,
+        barmode="overlay",
+        xaxis_title="Coefficient of Variation (linear scale)",
+        yaxis_title="% of Assays",
+        xaxis=dict(range=[0, upper], tickformat=".0%"),
+        legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+        margin=dict(b=90),
+    )
+    return fig
+
+
+def render_batch_effect(data: BatchEffectData) -> Figure:
+    """Share of each principal component's variance explained by plate."""
+    go, _ = _import_plotly()
+    labels = [f"{pc}<br>({v:.0%} of variance)" for pc, v in zip(data.pc_labels, data.variance_explained)]
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=data.plate_r2,
+            marker_color="#9b59b6",
+            text=[f"{r:.0%}" for r in data.plate_r2],
+            textposition="outside",
+            hovertemplate="%{x}<br>Explained by plate: %{y:.1%}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=data.title,
+        yaxis=dict(title="Variance explained by plate (η²)", range=[0, 1.08], tickformat=".0%"),
+        xaxis_title=f"Principal component (study samples, {len(data.plate_ids)} plates)",
+        showlegend=False,
+    )
+    return fig
+
+
+def render_plate_signal(data: BatchEffectData) -> Figure:
+    """Per-sample median signal by plate (study samples)."""
+    go, _ = _import_plotly()
+    from pyprideap.viz.theme import pride_color_discrete
+
+    colors = pride_color_discrete(len(data.plate_ids))
+    many = len(data.plate_ids) > 12
+    # Vendor plate IDs can be long file-like names; use short labels and keep the name on hover
+    short = any(len(p) > _MAX_PLATE_LABEL for p in data.plate_ids)
+    fig = go.Figure()
+    for i, (plate, values, color) in enumerate(zip(data.plate_ids, data.plate_sample_medians, colors), start=1):
+        fig.add_trace(
+            go.Box(
+                y=values,
+                name=f"Plate {i}" if short else plate,
+                marker_color=color,
+                boxpoints="outliers",
+                hovertemplate=f"{plate}<br>%{{y:.2f}}<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title="Sample Signal by Plate",
+        yaxis_title=data.value_label + " per sample",
+        xaxis=dict(
+            showticklabels=not many,
+            title=f"Plates (n = {len(data.plate_ids)})" if many or short else "",
+        ),
+        showlegend=False,
+    )
+    return fig
+
+
+def render_qc_flags(data: QcFlagData) -> Figure:
+    """Stacked horizontal bars of the non-PASS share of measurements, per panel and flag type.
+
+    PASS usually covers >99% of measurements, so plotting the full 0-100% range
+    would hide the flags; the bars show WARN / FAIL / NA only and each row is
+    labelled with its PASS percentage.
+    """
+    go, _ = _import_plotly()
+    fig = go.Figure()
+    for status, values in data.status_pct.items():
+        if status == "PASS" or not any(values):
+            continue
+        fig.add_trace(
+            go.Bar(
+                y=data.rows,
+                x=values,
+                orientation="h",
+                name=status,
+                marker_color=_QC_STATUS_COLORS[status],
+                hovertemplate="%{y}<br>" + status + ": %{x:.2f}%<extra></extra>",
+            )
+        )
+    not_pass = [round(100 - p, 2) for p in data.status_pct["PASS"]]
+    fig.add_trace(
+        go.Scatter(
+            y=data.rows,
+            x=not_pass,
+            mode="text",
+            text=[f"  PASS {p:.2f}%" for p in data.status_pct["PASS"]],
+            textposition="middle right",
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    upper = max(not_pass + [0.0])
+    fig.update_layout(
+        title=data.title,
+        barmode="stack",
+        xaxis=dict(
+            title="% of measurements not PASS (study samples)",
+            range=[0, upper * 1.6 if upper > 0 else 1],
+            ticksuffix="%",
+        ),
+        yaxis=dict(autorange="reversed", automargin=True),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+        height=max(320, 26 * len(data.rows) + 140),
     )
     return fig

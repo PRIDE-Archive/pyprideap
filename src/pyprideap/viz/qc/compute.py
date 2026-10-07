@@ -1429,6 +1429,238 @@ def compute_bridgeability(
     )
 
 
+# ---------------------------------------------------------------------------
+# Technical QC: replicate-control CV, plate/batch effect, vendor QC flags
+# ---------------------------------------------------------------------------
+
+# Replicate controls of one material that are not used for normalization or
+# calibration, so their CV is an independent estimate of technical precision.
+# Olink PLATE_CONTROLs feed plate normalization and SomaScan Calibrators feed
+# calibration; both would understate the CV and are not used.
+_TECHNICAL_REPLICATE_TYPES = {
+    "olink": ("sample control", "Sample controls"),
+    "somascan": ("qc", "QC samples"),
+}
+_MIN_REPLICATES = 3
+
+
+@dataclass
+class ReplicateCvData:
+    """Technical CV across replicate controls next to the CV across study samples."""
+
+    control_label: str
+    n_replicates: int
+    technical_cv: list[float]
+    study_cv: list[float]
+    n_assays_total: int
+    lod_filtered: bool  # technical_cv excludes assays below LOD in the controls (where LOD is known)
+    title: str = "Technical vs Study-Sample CV"
+
+
+def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
+    """CV of each assay across replicate control samples (Olink sample controls, SomaScan QC samples).
+
+    Values are linearized the same way as :func:`compute_cv_distribution`
+    (Olink 2^NPX, SomaScan RFU as deposited). When an LOD is available only
+    assays whose median control value is above LOD are kept, because CVs of
+    assays at noise level are not meaningful.
+    """
+    from pyprideap.processing.filtering import normalize_sample_type
+
+    if "SampleType" not in dataset.samples.columns:
+        return None
+    family = "somascan" if dataset.platform == Platform.SOMASCAN else "olink"
+    control_type, label = _TECHNICAL_REPLICATE_TYPES[family]
+    is_rep = (normalize_sample_type(dataset.samples["SampleType"]) == control_type).to_numpy()
+    n_rep = int(is_rep.sum())
+    if n_rep < _MIN_REPLICATES:
+        return None
+
+    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    controls = numeric.loc[is_rep]
+    linear = np.power(2, controls) if family == "olink" else controls
+    cv = (linear.std() / linear.mean()).replace([np.inf, -np.inf], np.nan)
+
+    lod = _resolve_lod(dataset)
+    lod_filtered = lod is not None
+    if lod is not None:
+        if isinstance(lod, pd.DataFrame):
+            lod_ctrl = lod.reindex(columns=numeric.columns).loc[is_rep].median()
+        else:
+            lod_ctrl = pd.Series(lod).reindex(numeric.columns)
+        # Assays without a known LOD (e.g. missing from the FixedLOD reference) are kept
+        lod_filtered = bool(lod_ctrl.notna().any())
+        detected = (controls.median() > lod_ctrl) | lod_ctrl.isna()
+        cv = cv[detected]
+    cv = cv.dropna()
+    if cv.empty:
+        return None
+
+    study = compute_cv_distribution(dataset)
+    return ReplicateCvData(
+        control_label=label,
+        n_replicates=n_rep,
+        technical_cv=cv.round(4).tolist(),
+        study_cv=study.cv_values if study is not None else [],
+        n_assays_total=int(numeric.shape[1]),
+        lod_filtered=lod_filtered,
+    )
+
+
+@dataclass
+class BatchEffectData:
+    """Association of the main expression structure with plate, and per-plate signal."""
+
+    pc_labels: list[str]
+    variance_explained: list[float]  # fraction of total variance per PC
+    plate_r2: list[float]  # fraction of each PC's variance explained by plate (eta squared)
+    plate_ids: list[str]
+    plate_sample_medians: list[list[float]]  # per plate: per-sample median signal
+    value_label: str
+    title: str = "Plate Effect on Principal Components"
+
+
+def _plate_column(samples: pd.DataFrame) -> str | None:
+    return next((c for c in ("PlateId", "PlateID") if c in samples.columns), None)
+
+
+def compute_batch_effect(dataset: AffinityDataset, n_components: int = 5) -> BatchEffectData | None:
+    """How much of each top principal component is explained by plate (study samples only).
+
+    PCA uses Olink NPX or SomaScan log10 RFU, assays with at most 50% missing
+    values (median-imputed). For each PC, eta squared = between-plate sum of
+    squares / total sum of squares of the PC scores.
+    """
+    from pyprideap.processing.filtering import filter_controls
+
+    plate_col = _plate_column(dataset.samples)
+    if plate_col is None:
+        return None
+    ds = filter_controls(dataset)
+    plates = ds.samples[plate_col].astype("string")
+    counts = plates.value_counts()
+    keep_plates = counts[counts >= 3].index
+    mask = plates.isin(keep_plates).to_numpy()
+    if len(keep_plates) < 2 or mask.sum() < 6:
+        return None
+
+    numeric = ds.expression.apply(pd.to_numeric, errors="coerce").loc[mask]
+    plates = plates[mask].reset_index(drop=True)
+    if dataset.platform == Platform.SOMASCAN:
+        numeric = np.log10(numeric.where(numeric > 0))
+        value_label = "Median log10 RFU"
+    else:
+        value_label = "Median NPX"
+    numeric = numeric.loc[:, numeric.isna().mean() <= 0.5].reset_index(drop=True)
+    if numeric.shape[1] < 2:
+        return None
+
+    filled = numeric.fillna(numeric.median())
+    centered = filled.to_numpy(dtype=float) - filled.to_numpy(dtype=float).mean(axis=0)
+    n_comp = min(n_components, centered.shape[0] - 1, centered.shape[1])
+    try:
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=n_comp, svd_solver="randomized", random_state=0)
+        scores = pca.fit_transform(centered)
+        var_ratio = pca.explained_variance_ratio_
+    except ImportError:
+        u, sv, _ = np.linalg.svd(centered, full_matrices=False)
+        scores = u[:, :n_comp] * sv[:n_comp]
+        var_ratio = (sv**2 / np.sum(sv**2))[:n_comp]
+
+    codes = pd.Categorical(plates).codes
+    r2 = []
+    for k in range(n_comp):
+        pc = scores[:, k]
+        total = float(np.sum((pc - pc.mean()) ** 2))
+        between = sum(
+            float((codes == g).sum()) * float(pc[codes == g].mean() - pc.mean()) ** 2 for g in np.unique(codes)
+        )
+        r2.append(round(between / total, 4) if total > 0 else 0.0)
+
+    sample_medians = numeric.median(axis=1)
+    plate_ids = sorted(plates.unique(), key=str)
+    return BatchEffectData(
+        pc_labels=[f"PC{k + 1}" for k in range(n_comp)],
+        variance_explained=[round(float(v), 4) for v in var_ratio],
+        plate_r2=r2,
+        plate_ids=[str(p) for p in plate_ids],
+        plate_sample_medians=[sample_medians[plates == p].round(4).tolist() for p in plate_ids],
+        value_label=value_label,
+    )
+
+
+_QC_STATUS_ORDER = ("PASS", "WARN", "FAIL", "NA")
+
+
+@dataclass
+class QcFlagData:
+    """Vendor per-measurement QC flags summarised per panel (Olink AssayQC / SampleQC)."""
+
+    rows: list[str]  # e.g. "Explore_HT · Assay QC"
+    status_pct: dict[str, list[float]]  # status -> % of measurements per row
+    flagged_assay_pct: float | None  # % of measurements with assay QC WARN/FAIL (study samples)
+    sample_worst: dict[str, int]  # per-sample worst sample-QC status across blocks
+    title: str = "Vendor QC Flags"
+
+
+def _status_counts(matrix: pd.DataFrame) -> dict[str, int]:
+    vals = matrix.stack(future_stack=True).fillna("NA").astype(str)
+    vals = vals.where(vals.isin(_QC_STATUS_ORDER[:3]), "NA")
+    counts = vals.value_counts()
+    return {s: int(counts.get(s, 0)) for s in _QC_STATUS_ORDER}
+
+
+def compute_qc_flags(dataset: AffinityDataset) -> QcFlagData | None:
+    """Summarise Olink per-measurement assay and sample QC flags per panel (study samples only)."""
+    from pyprideap.processing.filtering import filter_controls
+
+    ds = filter_controls(dataset)
+    matrices = {
+        name: m
+        for name, key in (("Assay QC", "assay_qc_matrix"), ("Sample QC", "sample_qc_matrix"))
+        if isinstance(m := ds.metadata.get(key), pd.DataFrame) and m.shape == ds.expression.shape
+    }
+    if not matrices:
+        return None
+
+    panels = (
+        ds.features["Panel"].astype(str).to_numpy()
+        if "Panel" in ds.features.columns and len(ds.features) == ds.expression.shape[1]
+        else np.array(["All assays"] * ds.expression.shape[1])
+    )
+    rows: list[str] = []
+    status_pct: dict[str, list[float]] = {s: [] for s in _QC_STATUS_ORDER}
+    for panel in sorted(set(panels)):
+        cols = panels == panel
+        for name, m in matrices.items():
+            counts = _status_counts(m.loc[:, cols])
+            total = sum(counts.values())
+            if total == 0:
+                continue
+            rows.append(f"{panel} · {name}")
+            for st in _QC_STATUS_ORDER:
+                status_pct[st].append(round(100 * counts[st] / total, 2))
+
+    flagged = None
+    if "Assay QC" in matrices:
+        c = _status_counts(matrices["Assay QC"])
+        assessed = c["PASS"] + c["WARN"] + c["FAIL"]
+        flagged = round(100 * (c["WARN"] + c["FAIL"]) / assessed, 2) if assessed else None
+
+    worst: dict[str, int] = {}
+    if "Sample QC" in matrices:
+        rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
+        per_sample = matrices["Sample QC"].apply(
+            lambda r: max((rank.get(str(v), -1) for v in r.dropna()), default=-1), axis=1
+        )
+        names = {0: "PASS", 1: "WARN", 2: "FAIL", -1: "NA"}
+        worst = {names[k]: int(v) for k, v in per_sample.value_counts().sort_index().items()}
+
+    return QcFlagData(rows=rows, status_pct=status_pct, flagged_assay_pct=flagged, sample_worst=worst)
+
+
 def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     """Compute all applicable QC plot data for the dataset."""
     logger.debug(
@@ -1447,6 +1679,9 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     results["plate_cv"] = compute_plate_cv(dataset)
     results["norm_scale"] = compute_norm_scale(dataset)
     results["lod_comparison"] = compute_lod_comparison(dataset)
+    results["replicate_cv"] = compute_replicate_cv(dataset)
+    results["batch_effect"] = compute_batch_effect(dataset)
+    results["qc_flags"] = compute_qc_flags(dataset)
 
     # SomaScan-specific QC
     if dataset.platform == Platform.SOMASCAN:
