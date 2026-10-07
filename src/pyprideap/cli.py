@@ -432,7 +432,7 @@ def unique_samples(
 
         with tempfile.TemporaryDirectory(prefix="pyprideap_") as tmpdir:
             tmppath = Path(tmpdir)
-            files = _download_pad_files(accession, tmppath)
+            files, _sdrf = _download_pad_files(accession, tmppath)
 
             for f in files:
                 try:
