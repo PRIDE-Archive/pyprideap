@@ -7,10 +7,10 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from pyprideap.core import AffinityDataset
-from pyprideap.io.readers.olink_csv import read_olink_csv
+from pyprideap.io.readers.olink_csv import _OLINK_COLUMN_ALIASES, read_olink_csv
 from pyprideap.io.readers.olink_parquet import read_olink_parquet
 from pyprideap.io.readers.olink_xlsx import read_olink_xlsx
-from pyprideap.io.readers.somascan_adat import read_somascan_adat
+from pyprideap.io.readers.somascan_adat import is_somascan_table_csv, read_somascan_adat
 from pyprideap.io.readers.somascan_csv import read_somascan_csv
 
 logger = logging.getLogger(__name__)
@@ -30,11 +30,23 @@ def detect_format(path: str | Path) -> str:
 
     if suffix == ".parquet":
         schema = pq.read_schema(path)
-        cols = set(schema.names)
+        cols = {_OLINK_COLUMN_ALIASES.get(c, c) for c in schema.names}
         if _OLINK_MARKER_COLS.issubset(cols):
             logger.debug("Format detected: olink_parquet (suffix=%s)", suffix)
             return "olink_parquet"
         raise ValueError(f"Cannot detect format: parquet file lacks Olink marker columns at {path}")
+
+    if suffix == ".csv":
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            head = [f.readline() for _ in range(2)]
+        if "Olink NPX Signature" in head[0] and head[1].strip().lower().startswith("ct data"):
+            raise ValueError(
+                f"{path.name} contains Olink Ct values (raw qPCR cycle thresholds before NPX "
+                "normalisation); QC needs the NPX export of the same run"
+            )
+        if is_somascan_table_csv(path):
+            logger.debug("Format detected: somascan table CSV (ADAT table exported as CSV)")
+            return "somascan_adat"
 
     if name.endswith(".npx.csv") or name.endswith(".ct.csv"):
         logger.debug("Format detected: olink_csv (name pattern=%s)", name)

@@ -104,6 +104,7 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
     # Build clean column names, disambiguating repeated base names
     rename: dict[str, str] = {}
     seen_counts: dict[str, int] = {}
+    factor_columns: list[str] = []
     for col in df.columns:
         # Extract short name from characteristics[X] or factor value[X]
         m = re.match(r"(characteristics|factor value)\[(.+?)\]", col)
@@ -121,8 +122,13 @@ def read_sdrf(path: str | Path) -> pd.DataFrame:
             rename[col] = base
         else:
             rename[col] = f"{base} {count}"
+        if m and m.group(1) == "factor value":
+            factor_columns.append(rename[col])
 
     renamed_df = pd.DataFrame(df.rename(columns=rename))
+    # Factor value columns are the study's declared design variables; their
+    # (shortened) names are kept so group detection can prefer them.
+    renamed_df.attrs["factor_value_columns"] = factor_columns
     logger.debug("SDRF columns renamed: %d mappings applied", len(rename))
     return cast(pd.DataFrame, renamed_df)
 
@@ -140,7 +146,8 @@ def get_grouping_columns(sdrf: pd.DataFrame) -> list[str]:
     skip.update(_SKIP_PATTERNS)
 
     for col in sdrf.columns:
-        if col.lower() in skip:
+        # Repeated SDRF columns are renamed "individual 2", "individual 3", ...
+        if col.lower() in skip or _base_column_name(col) in skip:
             continue
         # Filter out "not available" / "not applicable" / NaN
         vals = sdrf[col].astype(str).str.strip().str.lower()
@@ -162,6 +169,11 @@ def get_grouping_columns(sdrf: pd.DataFrame) -> list[str]:
     return candidates
 
 
+def _loose_sample_id(value: object) -> str:
+    """Sample ID for tolerant matching: no PAD prefix, case, separators or leading zeros."""
+    return re.sub(r"[\s_\-.]+", "", normalize_sample_id(value).lower()).lstrip("0")
+
+
 def normalize_sample_id(value: object) -> str:
     """Strip PAD accession prefixes so SDRF source names can join expression IDs.
 
@@ -171,21 +183,33 @@ def normalize_sample_id(value: object) -> str:
     return _PAD_ID_RE.sub("", str(value).strip())
 
 
-def select_biological_group_column(frame: pd.DataFrame) -> str | None:
+def _base_column_name(name: str) -> str:
+    """Column name without the " 2", " 3" suffix added for repeated SDRF columns."""
+    return re.sub(r" \d+$", "", name.lower().strip())
+
+
+def select_biological_group_column(frame: pd.DataFrame, factor_columns: list[str] | None = None) -> str | None:
     """Pick the best case/control-like column from SDRF or sample metadata.
 
-    Uses :func:`get_grouping_columns` (2–10 groups, ≥3 samples each) and
-    prefers disease / phenotype / treatment / group over other covariates.
-    Sex, plate, and QC flags are never treated as case/control.
+    Uses :func:`get_grouping_columns` (2–10 groups, ≥3 samples each). SDRF
+    ``factor value[...]`` columns (*factor_columns*) come first, as the study's
+    declared design variables; otherwise disease / phenotype / treatment /
+    group are preferred over other covariates, matching repeated columns by
+    base name (``disease 2`` counts as ``disease``). Sex, plate, and QC flags
+    are never treated as case/control.
     """
     candidates = get_grouping_columns(frame)
     if not candidates:
         return None
 
-    by_lower = {c.lower().strip(): c for c in candidates}
+    for col in factor_columns or []:
+        if col in candidates and _base_column_name(col) not in _NOT_CASE_CONTROL:
+            return col
+
     for preferred in _BIOLOGICAL_GROUP_PRIORITY:
-        if preferred in by_lower:
-            return by_lower[preferred]
+        for col in candidates:
+            if _base_column_name(col) == preferred:
+                return col
     return None
 
 
@@ -228,7 +252,10 @@ def resolve_biological_groups(dataset: AffinityDataset) -> tuple[pd.Series, str]
         ``(labels, column_name)`` where ``labels`` has one value per sample
         (NaN if unknown). ``None`` if no usable case/control split is found.
     """
-    column = select_biological_group_column(dataset.samples)
+    factor_columns = dataset.metadata.get("sdrf_factor_columns")
+    column = select_biological_group_column(
+        dataset.samples, factor_columns if isinstance(factor_columns, list) else None
+    )
     if column is not None:
         labels = dataset.samples[column].astype("object")
         logger.debug("Biological groups from column %s", column)
@@ -280,14 +307,14 @@ def merge_sdrf(
     if sdrf_col not in sdrf.columns:
         raise ValueError(f"SDRF column '{sdrf_col}' not found. Available: {list(sdrf.columns)}")
 
-    # Auto-detect sample column
-    if sample_col is None:
-        for candidate in ("SampleId", "SampleID", "SampleName"):
-            if candidate in dataset.samples.columns:
-                sample_col = candidate
-                break
-        logger.debug("Auto-detected sample column: %s", sample_col)
-    if sample_col is None:
+    # Candidate sample columns; when not given, each is tried and the one matching
+    # the most SDRF rows is used (some exports carry a constant SampleID and the
+    # real names in SampleName, others the reverse)
+    if sample_col is not None:
+        sample_cols = [sample_col]
+    else:
+        sample_cols = [c for c in ("SampleId", "SampleID", "SampleName") if c in dataset.samples.columns]
+    if not sample_cols:
         raise ValueError("Cannot detect sample ID column in dataset.samples. Specify sample_col explicitly.")
 
     # Only merge columns not already in the dataset
@@ -301,39 +328,44 @@ def merge_sdrf(
     if sdrf_join_col not in sdrf.columns and "assay name" in sdrf.columns:
         sdrf_join_col = "assay name"
 
+    # An SDRF often describes several data files; use only the rows for this one
+    source_file = dataset.metadata.get("source_file")
+    if source_file and "comment[data file]" in sdrf.columns:
+        own = sdrf["comment[data file]"].astype(str).str.strip() == Path(str(source_file)).name
+        if own.any() and not own.all():
+            logger.debug(
+                "SDRF merge: using %d of %d rows for %s", int(own.sum()), len(sdrf), Path(str(source_file)).name
+            )
+            sdrf = sdrf[own]
+
     sdrf_subset = sdrf[[sdrf_join_col] + new_cols].copy()
     left = dataset.samples.copy()
-    # SDRF allows several rows per source name (e.g. one per assay); keep one so
-    # the merge stays 1:1 and samples stay aligned with the expression matrix.
-    n_dup = int(sdrf_subset[sdrf_join_col].duplicated().sum())
-    if n_dup:
-        logger.debug("SDRF merge: %d duplicate %s rows ignored", n_dup, sdrf_join_col)
-    right = sdrf_subset.drop_duplicates(subset=[sdrf_join_col], keep="first")
 
-    merged = left.merge(right, left_on=sample_col, right_on=sdrf_join_col, how="left")
-    matched = int(merged[new_cols[0]].notna().sum()) if new_cols else 0
-
-    # PAD source names are often "PAD000001-XB6" while expression IDs are "XB6".
-    if matched < max(1, int(0.5 * len(left))) and len(left) > 0:
-        left_key = "_prideap_join_left"
-        right_key = "_prideap_join_right"
-        left[left_key] = left[sample_col].map(normalize_sample_id)
-        right[right_key] = right[sdrf_join_col].map(normalize_sample_id)
-        # Keep one SDRF row per normalised ID so the merge stays 1:1.
-        right = right.drop_duplicates(subset=[right_key], keep="first")
-        retry = left.merge(right, left_on=left_key, right_on=right_key, how="left")
-        retry_matched = int(retry[new_cols[0]].notna().sum()) if new_cols else 0
-        if retry_matched > matched:
-            logger.debug(
-                "SDRF merge using normalised IDs: %d matched (was %d with exact IDs)",
-                retry_matched,
-                matched,
-            )
-            merged = retry
-            matched = retry_matched
-        for extra in (left_key, right_key):
-            if extra in merged.columns:
-                merged = merged.drop(columns=[extra])
+    # Join keys, tried in order; the one matching the most samples wins:
+    # exact text, PAD accession prefix removed ("PAD000001-XB6" -> "XB6"), and
+    # additionally case, separators and leading zeros ignored
+    # ("L14_NIST N4" ~ "L14_NIST_N4", "CE002303 201" ~ "CE002303-201").
+    key_functions = (
+        lambda v: str(v).strip(),
+        normalize_sample_id,
+        _loose_sample_id,
+    )
+    merged, matched, sample_col = left, -1, sample_cols[0]
+    for col in sample_cols:
+        for key_fn in key_functions:
+            lk, rk = left[col].map(key_fn), sdrf_subset[sdrf_join_col].map(key_fn)
+            # SDRF allows several rows per source name (e.g. one per assay); keep one
+            # so the merge stays 1:1 and samples stay aligned with the expression matrix.
+            right = sdrf_subset.assign(_prideap_key=rk).drop_duplicates(subset=["_prideap_key"], keep="first")
+            attempt = left.assign(_prideap_key=lk).merge(right, on="_prideap_key", how="left")
+            n = int(attempt[new_cols[0]].notna().sum())
+            if n > matched:
+                merged, matched, sample_col = attempt.drop(columns=["_prideap_key"]), n, col
+            if matched == len(left):
+                break
+        if matched == len(left):
+            break
+    logger.debug("SDRF merge: %d of %d samples matched on %s", matched, len(left), sample_col)
 
     if sdrf_join_col != sample_col and sdrf_join_col in merged.columns:
         merged = merged.drop(columns=[sdrf_join_col])
@@ -351,4 +383,9 @@ def merge_sdrf(
         sdrf_join_col,
     )
 
-    return replace(dataset, samples=merged)
+    metadata = dict(dataset.metadata)
+    metadata["sdrf_merge"] = {"matched": int(matched), "total": int(len(merged))}
+    factor_columns = [c for c in sdrf.attrs.get("factor_value_columns", []) if c in new_cols]
+    if factor_columns:
+        metadata["sdrf_factor_columns"] = factor_columns
+    return replace(dataset, samples=merged, metadata=metadata)
