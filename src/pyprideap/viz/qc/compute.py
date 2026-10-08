@@ -41,10 +41,14 @@ class QcLodSummaryData:
 @dataclass
 class LodAnalysisData:
     assay_ids: list[str]
-    above_lod_pct: list[float]
+    above_lod_pct: list[float]  # % of study samples above LOD (controls excluded)
     panel: list[str]
     title: str = "LOD Analysis: % Samples Above LOD"
     unit: str = "NPX"  # "NPX" for Olink, "RFU" for SomaScan
+    # % of negative controls / blanks / buffers above LOD for the same assays (empty when none)
+    negative_above_lod_pct: list[float] = field(default_factory=list)
+    n_study: int = 0
+    n_negative: int = 0
 
 
 @dataclass
@@ -55,6 +59,8 @@ class PcaData:
     labels: list[str]
     groups: list[str]
     title: str = "PCA"
+    # Alternative colourings offered in the plot ("Sample type", "Plate", "Study group (...)")
+    color_options: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -64,6 +70,7 @@ class UmapData:
     labels: list[str]
     groups: list[str]
     title: str = "UMAP"
+    color_options: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -349,12 +356,36 @@ def compute_distribution(dataset: AffinityDataset) -> DistributionData:
     )
 
 
+def _measurement_qc_flags(dataset: AffinityDataset, numeric: pd.DataFrame) -> pd.DataFrame | None:
+    """Sample QC flag of every measurement (samples x assays), upper-case PASS/WARN/FAIL.
+
+    Olink assigns sample QC per sample and panel block, so the per-measurement
+    flags are used when the reader kept them; otherwise each sample's SampleQC
+    value is applied to all its measurements.
+    """
+    matrix = dataset.metadata.get("sample_qc_matrix")
+    if isinstance(matrix, pd.DataFrame) and matrix.shape == numeric.shape:
+        flags = matrix.copy()
+        flags.columns = numeric.columns
+        flags.index = numeric.index
+    elif "SampleQC" in dataset.samples.columns:
+        per_sample = dataset.samples["SampleQC"].reset_index(drop=True)
+        flags = pd.DataFrame(
+            np.repeat(per_sample.to_numpy(dtype=object)[:, None], numeric.shape[1], axis=1),
+            index=numeric.index,
+            columns=numeric.columns,
+        )
+    else:
+        return None
+    text = flags.astype("string").apply(lambda c: c.str.strip().str.upper())
+    return cast(pd.DataFrame, text.replace({"WARNING": "WARN"}))
+
+
 def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     """QC status × LOD stacked bar. Falls back to simple QC counts if no LOD."""
-    # Some Olink exports (and some PAD uploads) don't include SampleQC.
-    # In that case we can still compute the overall % above/below LOD,
-    # but we can't stratify by PASS/WARN/FAIL.
-    has_sample_qc = "SampleQC" in dataset.samples.columns
+    # Some Olink exports (and some PAD uploads) have no sample QC flags. In that
+    # case we can still compute the overall % above/below LOD, but we can't
+    # stratify by PASS/WARN/FAIL.
 
     from pyprideap.processing.lod import _above_lod_matrix
 
@@ -369,24 +400,29 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
         categories: list[str] = []
         counts: list[int] = []
 
-        if has_sample_qc:
+        qc = _measurement_qc_flags(dataset, numeric)
+        if qc is not None:
+            valid = numeric.notna() & has_lod
+            above_all = above_lod & valid
+            # All PASS / WARN / FAIL categories are reported, including empty ones,
+            # so the plot shows explicitly when there are no WARN or FAIL measurements
             for qc_val in ["PASS", "WARN", "FAIL"]:
-                mask = dataset.samples["SampleQC"] == qc_val
-                if mask.sum() == 0:
-                    continue
-
-                above_subset = above_lod.loc[mask] & has_lod.loc[mask]
-                valid_subset = numeric.loc[mask].notna() & has_lod.loc[mask]
-
-                above = int(above_subset.sum().sum())
-                below = int(valid_subset.sum().sum()) - above
-
-                if above > 0:
-                    categories.append(f"{qc_val} & {unit} > LOD")
-                    counts.append(above)
-                if below > 0:
-                    categories.append(f"{qc_val} & {unit} ≤ LOD")
-                    counts.append(below)
+                in_flag = qc.isin([qc_val]).astype(bool)
+                above = int((above_all & in_flag).to_numpy().sum())
+                below = int((valid & in_flag).to_numpy().sum()) - above
+                categories += [f"{qc_val} & {unit} > LOD", f"{qc_val} & {unit} ≤ LOD"]
+                counts += [above, below]
+                # Olink leaves the value empty for failed measurements: count them too
+                no_value = int((numeric.isna() & in_flag).to_numpy().sum())
+                if no_value:
+                    categories.append(f"{qc_val} & no value")
+                    counts.append(no_value)
+            # Measurements without a recognised flag are shown rather than dropped
+            unflagged = valid & ~qc.isin(["PASS", "WARN", "FAIL"]).fillna(False).astype(bool)
+            if unflagged.to_numpy().any():
+                above = int((above_all & unflagged).to_numpy().sum())
+                categories += [f"No QC flag & {unit} > LOD", f"No QC flag & {unit} ≤ LOD"]
+                counts += [above, int(unflagged.to_numpy().sum()) - above]
         else:
             # No QC flags available: show overall above/below LOD split
             valid = numeric.notna() & has_lod
@@ -399,18 +435,30 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
                 categories.append(f"{unit} ≤ LOD")
                 counts.append(below)
 
-        if categories:
+        if categories and sum(counts) > 0:
             return QcLodSummaryData(categories=categories, counts=counts)
 
     # Fallback: simple QC counts when no LOD is available but SampleQC exists
-    if has_sample_qc:
+    if "SampleQC" in dataset.samples.columns:
         vc = dataset.samples["SampleQC"].value_counts()
         return QcLodSummaryData(categories=vc.index.tolist(), counts=vc.values.tolist())
 
     return None
 
 
+# Sample types that carry no analyte: their signal should stay below LOD
+_NEGATIVE_SAMPLE_TYPES = frozenset({"negative", "negative control", "neg", "buffer", "buffer control", "blank"})
+
+
 def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
+    """Per assay, the % of study samples above LOD, and the % of negative controls above LOD.
+
+    Control samples are excluded from the study-sample percentage, so a fully
+    detected assay reaches 100% whatever the share of controls in the file.
+    Negative controls, blanks and buffers are reported separately: they should
+    stay near 0%; higher values point to contamination or high background.
+    """
+    from pyprideap.processing.filtering import control_sample_mask, normalize_sample_type
     from pyprideap.processing.lod import _above_lod_matrix
 
     lod = _resolve_lod(dataset)
@@ -419,36 +467,90 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     above_lod, has_lod = _above_lod_matrix(numeric, lod)
+    valid = numeric.notna() & has_lod
+    above = above_lod & valid
 
-    assay_ids = []
-    above_lod_pct = []
-    panels = []
+    study = ~control_sample_mask(dataset.samples).to_numpy()
+    negative = np.zeros(len(numeric), dtype=bool)
+    for col in ("SampleType", "sample type"):
+        if col in dataset.samples.columns:
+            negative |= normalize_sample_type(dataset.samples[col]).isin(_NEGATIVE_SAMPLE_TYPES).to_numpy()
+
+    def pct_above(rows: np.ndarray) -> pd.Series:
+        n_valid = valid.loc[rows].sum()
+        return cast(pd.Series, (above.loc[rows].sum() / n_valid.where(n_valid > 0) * 100).fillna(0.0))
+
+    # Assays with a LOD for at least one sample
+    assays = [c for c in numeric.columns if bool(has_lod[c].any())]
+    if not assays or not study.any():
+        return None
+    study_pct = pct_above(study)
+    negative_pct = pct_above(negative) if negative.any() else None
 
     id_col = "OlinkID" if "OlinkID" in dataset.features.columns else dataset.features.columns[0]
     id_to_panel: dict[str, str] = {}
     if "Panel" in dataset.features.columns:
         id_to_panel = dict(zip(dataset.features[id_col].astype(str), dataset.features["Panel"].astype(str)))
 
-    for col in numeric.columns:
-        # Skip assays with no LOD for any sample
-        if not has_lod[col].any():
-            continue
-        vals_valid = numeric[col].notna() & has_lod[col]
-        n_valid = int(vals_valid.sum())
-        if n_valid == 0:
-            pct = 0.0
-        else:
-            pct = float(above_lod.loc[vals_valid, col].sum() / n_valid * 100)
-
-        assay_ids.append(str(col))
-        above_lod_pct.append(round(pct, 2))
-        panels.append(id_to_panel.get(str(col), ""))
-
-    if not assay_ids:
-        return None
-
     unit = "RFU" if dataset.platform == Platform.SOMASCAN else "NPX"
-    return LodAnalysisData(assay_ids=assay_ids, above_lod_pct=above_lod_pct, panel=panels, unit=unit)
+    return LodAnalysisData(
+        assay_ids=[str(c) for c in assays],
+        above_lod_pct=[round(float(study_pct[c]), 2) for c in assays],
+        panel=[id_to_panel.get(str(c), "") for c in assays],
+        unit=unit,
+        negative_above_lod_pct=[round(float(negative_pct[c]), 2) for c in assays] if negative_pct is not None else [],
+        n_study=int(study.sum()),
+        n_negative=int(negative.sum()),
+    )
+
+
+def _sample_color_options(dataset: AffinityDataset) -> dict[str, list[str]]:
+    """Per-sample labels for colouring sample-relationship plots, first entry the default.
+
+    - "Sample type" (or "QC flag" when all samples share one type): as before
+    - "Plate": when there is more than one plate
+    - "Study group (<column>)": when the SDRF or sample metadata defines biological
+      groups; control samples are labelled as such, unannotated samples as such
+    """
+    from pyprideap.io.readers.sdrf import resolve_biological_groups
+    from pyprideap.processing.filtering import control_sample_mask, filter_controls
+
+    samples = dataset.samples
+    n = len(samples)
+    options: dict[str, list[str]] = {}
+    # Only colourings that separate the samples are offered
+    type_col = next((c for c in ("SampleType", "sample type") if c in samples.columns), None)
+    if type_col is not None and samples[type_col].nunique() > 1:
+        options["Sample type"] = samples[type_col].astype(str).tolist()
+    elif "SampleQC" in samples.columns and samples["SampleQC"].nunique() > 1:
+        options["QC flag"] = samples["SampleQC"].astype(str).tolist()
+
+    plate_col = _plate_column(samples)
+    if plate_col is not None and samples[plate_col].nunique() > 1:
+        options["Plate"] = samples[plate_col].astype(str).tolist()
+
+    try:
+        resolved = resolve_biological_groups(filter_controls(dataset))
+    except Exception:  # group resolution is optional decoration
+        resolved = None
+    if resolved is not None:
+        labels, column = resolved
+        is_control = control_sample_mask(samples).to_numpy()
+        study_labels = iter(labels.tolist())
+        values = []
+        for control in is_control:
+            if control:
+                values.append("Control samples")
+            else:
+                v = next(study_labels, None)
+                values.append("Not annotated" if v is None or pd.isna(v) or str(v).strip() == "" else str(v))
+        factor_columns = dataset.metadata.get("sdrf_factor_columns")
+        is_factor = isinstance(factor_columns, list) and column in factor_columns
+        name = f"factor value[{re.sub(r' [0-9]+$', '', column)}]" if is_factor else column
+        options[f"Study group: {name}"] = values
+    if not options:
+        options["Samples"] = [""] * n
+    return options
 
 
 def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | None:
@@ -477,16 +579,8 @@ def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | No
 
     labels = _sample_ids(dataset)
 
-    # Use SampleQC for color if all SampleType values are the same
-    groups: list[str]
-    if "SampleType" in dataset.samples.columns:
-        types = dataset.samples["SampleType"].unique()
-        if len(types) == 1 and "SampleQC" in dataset.samples.columns:
-            groups = dataset.samples["SampleQC"].astype(str).tolist()
-        else:
-            groups = dataset.samples["SampleType"].astype(str).tolist()
-    else:
-        groups = [""] * len(labels)
+    color_options = _sample_color_options(dataset)
+    groups = next(iter(color_options.values()), [""] * len(labels))
 
     return PcaData(
         pc1=np.round(transformed[:, 0], 4).tolist(),
@@ -494,6 +588,7 @@ def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | No
         variance_explained=[round(float(v), 4) for v in pca.explained_variance_ratio_],
         labels=labels,
         groups=groups,
+        color_options=color_options,
     )
 
 
@@ -523,16 +618,8 @@ def compute_tsne(dataset: AffinityDataset) -> UmapData | None:
 
     labels = _sample_ids(dataset)
 
-    # Use SampleQC for color if all SampleType values are the same
-    groups: list[str]
-    if "SampleType" in dataset.samples.columns:
-        types = dataset.samples["SampleType"].unique()
-        if len(types) == 1 and "SampleQC" in dataset.samples.columns:
-            groups = dataset.samples["SampleQC"].astype(str).tolist()
-        else:
-            groups = dataset.samples["SampleType"].astype(str).tolist()
-    else:
-        groups = [""] * len(labels)
+    color_options = _sample_color_options(dataset)
+    groups = next(iter(color_options.values()), [""] * len(labels))
 
     return UmapData(
         x=np.round(transformed[:, 0], 4).tolist(),
@@ -540,6 +627,7 @@ def compute_tsne(dataset: AffinityDataset) -> UmapData | None:
         labels=labels,
         groups=groups,
         title="t-SNE",
+        color_options=color_options,
     )
 
 
@@ -1486,10 +1574,45 @@ class BatchEffectData:
     plate_sample_medians: list[list[float]]  # per plate: per-sample median signal
     value_label: str
     title: str = "Plate Effect on Principal Components"
+    # Same quantities after plate median centring (each assay's per-plate median moved
+    # to its overall median), to show residual plate structure
+    corrected_sample_medians: list[list[float]] = field(default_factory=list)
+    corrected_plate_r2: list[float] = field(default_factory=list)
 
 
 def _plate_column(samples: pd.DataFrame) -> str | None:
     return next((c for c in ("PlateId", "PlateID") if c in samples.columns), None)
+
+
+def _plate_pca_r2(numeric: pd.DataFrame, plates: pd.Series, n_components: int) -> tuple[list[float], list[float]]:
+    """Variance explained by the top PCs, and the share of each PC explained by plate (eta squared).
+
+    Missing values are median-imputed per assay before the PCA.
+    """
+    filled = numeric.fillna(numeric.median())
+    centered = filled.to_numpy(dtype=float) - filled.to_numpy(dtype=float).mean(axis=0)
+    n_comp = min(n_components, centered.shape[0] - 1, centered.shape[1])
+    try:
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=n_comp, svd_solver="randomized", random_state=0)
+        scores = pca.fit_transform(centered)
+        var_ratio = pca.explained_variance_ratio_
+    except ImportError:
+        u, sv, _ = np.linalg.svd(centered, full_matrices=False)
+        scores = u[:, :n_comp] * sv[:n_comp]
+        var_ratio = (sv**2 / np.sum(sv**2))[:n_comp]
+
+    codes = pd.Categorical(plates).codes
+    r2 = []
+    for k in range(n_comp):
+        pc = scores[:, k]
+        total = float(np.sum((pc - pc.mean()) ** 2))
+        between = sum(
+            float((codes == g).sum()) * float(pc[codes == g].mean() - pc.mean()) ** 2 for g in np.unique(codes)
+        )
+        r2.append(round(between / total, 4) if total > 0 else 0.0)
+    return [float(v) for v in var_ratio], r2
 
 
 def compute_batch_effect(dataset: AffinityDataset, n_components: int = 5) -> BatchEffectData | None:
@@ -1523,39 +1646,24 @@ def compute_batch_effect(dataset: AffinityDataset, n_components: int = 5) -> Bat
     if numeric.shape[1] < 2:
         return None
 
-    filled = numeric.fillna(numeric.median())
-    centered = filled.to_numpy(dtype=float) - filled.to_numpy(dtype=float).mean(axis=0)
-    n_comp = min(n_components, centered.shape[0] - 1, centered.shape[1])
-    try:
-        from sklearn.decomposition import PCA
+    var_ratio, r2 = _plate_pca_r2(numeric, plates, n_components)
 
-        pca = PCA(n_components=n_comp, svd_solver="randomized", random_state=0)
-        scores = pca.fit_transform(centered)
-        var_ratio = pca.explained_variance_ratio_
-    except ImportError:
-        u, sv, _ = np.linalg.svd(centered, full_matrices=False)
-        scores = u[:, :n_comp] * sv[:n_comp]
-        var_ratio = (sv**2 / np.sum(sv**2))[:n_comp]
-
-    codes = pd.Categorical(plates).codes
-    r2 = []
-    for k in range(n_comp):
-        pc = scores[:, k]
-        total = float(np.sum((pc - pc.mean()) ** 2))
-        between = sum(
-            float((codes == g).sum()) * float(pc[codes == g].mean() - pc.mean()) ** 2 for g in np.unique(codes)
-        )
-        r2.append(round(between / total, 4) if total > 0 else 0.0)
+    # Plate median centring: per assay, shift each plate's median to the overall median
+    plate_medians = numeric.groupby(plates.to_numpy()).transform("median")
+    corrected = numeric - plate_medians + numeric.median()
+    _, corrected_r2 = _plate_pca_r2(corrected, plates, n_components)
 
     sample_medians = numeric.median(axis=1)
     plate_ids = sorted(plates.unique(), key=str)
     return BatchEffectData(
-        pc_labels=[f"PC{k + 1}" for k in range(n_comp)],
+        pc_labels=[f"PC{k + 1}" for k in range(len(r2))],
         variance_explained=[round(float(v), 4) for v in var_ratio],
         plate_r2=r2,
         plate_ids=[str(p) for p in plate_ids],
         plate_sample_medians=[sample_medians[plates == p].round(4).tolist() for p in plate_ids],
         value_label=value_label,
+        corrected_sample_medians=[corrected.median(axis=1)[plates == p].round(4).tolist() for p in plate_ids],
+        corrected_plate_r2=corrected_r2,
     )
 
 

@@ -71,7 +71,13 @@ _HELP_TEXT: dict[str, str] = {
     "plate_signal": (
         "Median signal per study sample, grouped by plate. Plates whose box is shifted from the others "
         "indicate a plate-level offset that normalization did not remove, or a plate holding different "
-        "kinds of samples."
+        "kinds of samples. The buttons switch between the values as deposited and after plate median "
+        "centring (each assay's median on each plate moved to its overall median). Centring aligns the "
+        "plate medians by construction, so check the caption below the plot: the share of PC1 explained by "
+        "plate. If it "
+        "stays high after centring, plates differ in more than an offset (residual batch effect, or plates "
+        "holding different sample groups). If study groups are confined to single plates, centring also "
+        "removes real biological differences."
     ),
     "preanalytical": (
         "Indicator scores for pre-analytical handling, computed per study sample as the mean z-score "
@@ -120,15 +126,24 @@ _HELP_TEXT: dict[str, str] = {
         "(e.g. failed plate, low protein yield)."
     ),
     "qc_summary": (
-        "Stacked bar showing the percentage of sample–protein measurements in each QC category. "
-        "Categories combine the Olink QC flag (PASS / WARN / FAIL) with whether the value is above "
-        "or below the Limit of Detection (LOD). A high proportion of PASS & NPX > LOD (green) "
-        "indicates good data quality. Large WARN or FAIL fractions suggest systematic issues."
+        "Every sample–protein measurement, split by its Olink sample QC flag (PASS / WARN / FAIL, "
+        "assigned per sample and panel block) and by whether the value is above or below the Limit "
+        "of Detection (LOD) used in this report. The legend lists all six categories with their "
+        'counts and percentages, including empty ones: "WARN ... 0 (0.0%)" means no measurement '
+        "was flagged. PASS &amp; above LOD (green) is reliable signal; PASS &amp; at or below LOD (blue) "
+        "is valid data near the detection limit. Large WARN or FAIL fractions suggest systematic "
+        'issues. Measurements without a recognised flag are shown as "No QC flag", and measurements '
+        'whose value is empty (Olink blanks failed measurements) as "&amp; no value".'
     ),
     "lod_analysis": (
-        "Proteins ranked by the percentage of samples with signal above the Limit of Detection, "
-        "coloured by panel. A steep drop-off reveals how many proteins have weak signal. "
-        "Proteins with low %% above LOD are unreliable and may need filtering."
+        "Proteins ranked by the percentage of <strong>study samples</strong> with signal above the "
+        "Limit of Detection, coloured by panel; control samples are excluded, so a fully detected "
+        "protein reaches 100%. A steep drop-off reveals how many proteins have weak signal; proteins "
+        "with a low % above LOD are unreliable and may need filtering. When the file has negative "
+        "controls, blanks or buffers, the dashed line gives the % of them above LOD for the same "
+        "proteins: it should stay near 0%. Proteins where it rises point to contamination or high "
+        "background. When the LOD itself is derived from these controls (e.g. Olink NCLOD), most of them "
+        "fall below it by construction."
     ),
     "pca": (
         "Principal Component Analysis projects the high-dimensional protein expression data onto "
@@ -154,9 +169,9 @@ _HELP_TEXT: dict[str, str] = {
         "(orange, measured but below detection limit). A sample with a large orange fraction may "
         "indicate low protein input or technical issues. "
         "<strong>Bottom:</strong> Missing Frequency distribution — a histogram of per-protein missing rate "
-        "(%% of samples where signal is below LOD). Olink recommends a missing frequency threshold "
-        "of 30%%: proteins above this threshold may be unreliable and should be considered for filtering. "
-        "Proteins clustered near 0%% are reliably detected; those near 100%% may need filtering."
+        "(% of samples where signal is below LOD). Olink recommends a missing frequency threshold "
+        "of 30%: proteins above this threshold may be unreliable and should be considered for filtering. "
+        "Proteins clustered near 0% are reliably detected; those near 100% may need filtering."
     ),
     "sample_completeness": (
         "Per-sample stacked bar showing Above LOD (green, reliable signal) vs Below LOD "
@@ -164,10 +179,10 @@ _HELP_TEXT: dict[str, str] = {
         "A sample with a large orange fraction may indicate low protein input or technical issues."
     ),
     "missing_frequency_distribution": (
-        "Histogram of per-protein missing rate (%% of samples where signal is below LOD). "
-        "Olink recommends a missing frequency threshold of 30%%: proteins above this threshold "
+        "Histogram of per-protein missing rate (% of samples where signal is below LOD). "
+        "Olink recommends a missing frequency threshold of 30%: proteins above this threshold "
         "may be unreliable and should be considered for filtering. "
-        "Proteins clustered near 0%% are reliably detected; those near 100%% may need filtering."
+        "Proteins clustered near 0% are reliably detected; those near 100% may need filtering."
     ),
     "dimreduction": (
         "Dimensionality reduction projects the high-dimensional protein expression data onto two axes. "
@@ -233,7 +248,7 @@ _HELP_TEXT: dict[str, str] = {
         "|x &minus; median(x)| &gt; 6 &times; MAD(x) <strong>and</strong> a fold-change &gt; 5&times; "
         "from the analyte median (matching SomaDataIO's <code>calcOutlierMap()</code>). "
         "Samples with a large number of red cells across many analytes may be technical outliers. "
-        "The default flagging threshold is 5%% of analytes — samples exceeding this are candidates for removal."
+        "The default flagging threshold is 5% of analytes — samples exceeding this are candidates for removal."
     ),
     "row_check": (
         "Summary of sample-level normalization QC (RowCheck). Each sample's normalization scale factors "
@@ -269,7 +284,7 @@ _HELP_TEXT: dict[str, str] = {
     "iqr_median_qc": (
         "Per-panel scatter plot of IQR (Interquartile Range) vs Median NPX per sample, mirroring "
         "OlinkAnalyze's <code>olink_qc_plot()</code>. The IQR (Q3 &minus; Q1) measures the spread of "
-        "the middle 50%% of a sample's protein measurements — a large IQR indicates high variability. "
+        "the middle 50% of a sample's protein measurements — a large IQR indicates high variability. "
         "For each panel, IQR and median are computed per sample. "
         "Outlier thresholds (dashed lines) are set at mean &plusmn; 3 &times; SD on both axes. "
         "Samples outside these bounds on either axis are flagged as outliers (red points). "
@@ -289,14 +304,14 @@ _HELP_TEXT: dict[str, str] = {
     "mpi": (
         "Measurement Precision Index (MPI) per protein: median divided by a robust SD "
         "(1.4826 &times; MAD), i.e. the inverse of a robust CV, across study samples (controls "
-        "excluded). Values are on a linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), "
-        "as for the CV plots, because a ratio to the median is meaningless on log2 NPX. When the "
-        "SDRF or sample metadata defines biological groups (e.g. disease), MPI is computed within "
-        "each group and averaged, so group differences are not counted as imprecision; the label "
-        "on the plot says whether this was possible. Higher is more consistent. It reflects "
-        "biological as well as technical variation and depends on the deposited normalisation, so "
-        "it is a within-dataset view, not an acceptance threshold; see the technical CV for "
-        "replicate precision."
+        "excluded). Higher is more consistent. It reflects biological as well as technical variation "
+        "and depends on the deposited normalisation, so it is a within-dataset view, not an "
+        "acceptance threshold; see the technical CV for replicate precision. Values are on a linear "
+        "scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), as for the CV plots, because a "
+        "ratio to the median is meaningless on log2 NPX. When the SDRF or sample metadata defines "
+        "biological groups (e.g. disease), MPI is computed within each group and averaged, so group "
+        "differences are not counted as imprecision; the label on the plot says whether this was "
+        "possible."
     ),
     "dynamic_range": (
         "Relative spread per protein: interquartile range divided by the median across study "
@@ -307,11 +322,11 @@ _HELP_TEXT: dict[str, str] = {
     ),
     "rank_concordance": (
         "Spearman correlation of protein ranks between pairs of study samples (up to 500 random "
-        "pairs). Ranks do not depend on the measurement scale, so the value is comparable between "
-        "NPX and RFU within a dataset. Biological replicates of similar samples correlate highly; "
-        "mixed cohorts (e.g. cases and controls, or different tissues) correlate less, which "
-        "reflects biology rather than quality. A tail of low values points to individual samples "
-        "that differ from the rest; see the sample correlation heatmap to identify them."
+        "pairs). Biological replicates of similar samples correlate highly; mixed cohorts (e.g. "
+        "cases and controls, or different tissues) correlate less, which reflects biology rather "
+        "than quality. A tail of low values points to individual samples that differ from the "
+        "rest; see the sample correlation heatmap to identify them. Ranks do not depend on the "
+        "measurement scale, so the value is comparable between NPX and RFU within a dataset."
     ),
     "differential_expression": (
         "Volcano plots showing differentially expressed proteins between sample groups defined "
@@ -1138,7 +1153,8 @@ def _render_summary_table(
         # Share of all measurements above LOD (the QC and LOD Summary bar, as one number)
         qc_lod = plot_data.get("qc_summary")
         if isinstance(qc_lod, QcLodSummaryData) and any("> LOD" in c for c in qc_lod.categories):
-            n_total = sum(qc_lod.counts)
+            # Measurements without a value (e.g. blanked after a FAIL flag) have no LOD status
+            n_total = sum(n for c, n in zip(qc_lod.categories, qc_lod.counts) if "no value" not in c)
             n_above = sum(n for c, n in zip(qc_lod.categories, qc_lod.counts) if "> LOD" in c)
             if n_total > 0:
                 source = f" ({html_mod.escape(str(lod_active))})" if lod_active else ""
@@ -1250,6 +1266,8 @@ def _render_summary_table(
         rows.append(_summary_group("Batch"))
         top = ", ".join(f"{pc} {r2:.0%}" for pc, r2 in zip(batch.pc_labels[:2], batch.plate_r2[:2]))
         rows.append(_summary_row("", "Variance explained by plate", top))
+        if batch.corrected_plate_r2:
+            rows.append(_summary_row("", "After plate median centring (PC1)", f"{batch.corrected_plate_r2[0]:.0%}"))
     bridge = plot_data.get("bridge_agreement")
     if isinstance(bridge, BridgeAgreementData):
         if not (isinstance(batch, BatchEffectData) and batch.plate_r2):
@@ -1269,11 +1287,15 @@ def _render_summary_table(
         rows.append(_summary_group("Pre-analytical &amp; Identity"))
         if isinstance(pre, PreanalyticalData):
             for name, ids in pre.outliers.items():
-                label = "Possible hemolysis" if name == "hemolysis" else "Possible platelet activation"
+                label = (
+                    "Samples with possible hemolysis"
+                    if name == "hemolysis"
+                    else "Samples with possible platelet activation"
+                )
                 rows.append(_summary_row("", f"{label} (indicator outliers)", f"{len(ids)} / {len(pre.sample_ids)}"))
         if isinstance(sex, SexCheckData):
             n_m, n_f = sex.predicted.count("male"), sex.predicted.count("female")
-            rows.append(_summary_row("", "Protein-predicted sex (F / M)", f"{n_f} / {n_m}"))
+            rows.append(_summary_row("", "Samples by protein-predicted sex (F / M)", f"{n_f} / {n_m}"))
             if any(sex.annotated):
                 dot = _status_dot("green") if not sex.mismatches else _status_dot("amber")
                 rows.append(_summary_row(dot, "Sex mismatches vs annotation", str(len(sex.mismatches))))
@@ -1935,7 +1957,7 @@ def qc_report(
         stat_items.append(f'<span class="stat-item"><strong>Unique Proteins</strong> {n_proteins}</span>')
     if n_proteins_above_lod is not None and n_proteins_above_lod > 0:
         stat_items.append(
-            f'<span class="stat-item" title="Unique proteins where &gt;50%% of samples have signal above LOD">'
+            f'<span class="stat-item" title="Unique proteins where &gt;50% of samples have signal above LOD">'
             f"<strong>Proteins &gt; LOD</strong> {n_proteins_above_lod}</span>"
         )
 

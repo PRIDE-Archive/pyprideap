@@ -794,7 +794,10 @@ class TestPreanalyticalDilutionSex:
         keys = [i["key"] for i in technical["items"]]
         assert "preanalytical" in keys and "sex_check" in keys
         summary = (out / "summary.html").read_text()
-        assert "Sex mismatches vs annotation" in summary and "Possible hemolysis" in summary
+        assert (
+            "Sex mismatches vs annotation" in summary
+            and "Samples with possible hemolysis (indicator outliers)" in summary
+        )
 
     def test_sex_check_drops_uninformative_markers_and_ignores_wide_male_range(self):
         """Mirrors PAD000003 (SomaScan): KLK3 informative, EIF1AY reagent not; PSA varies widely in men."""
@@ -1315,3 +1318,200 @@ class TestSweepFixes:
         self._write_long(path, sep=";", npx=("1.25", "PlateID", "-0.75", "3.0"))
         ds = read_olink_csv(path)
         assert ds.expression.isna().to_numpy().tolist() == [[False, True], [False, False]]
+
+
+class TestQcLodSummary:
+    """Issue #50: every category listed, per-measurement flags, readable labels."""
+
+    @staticmethod
+    def _dataset(flags, npx):
+        import numpy as np
+
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame({"SampleID": ["S1", "S2"], "SampleType": "SAMPLE", "SampleQC": ["PASS", "PASS"]}),
+            features=pd.DataFrame({"OlinkID": ["O1", "O2"], "UniProt": ["P1", "P2"], "LOD": [1.0, 1.0]}),
+            expression=pd.DataFrame(np.array(npx, dtype=float), columns=["O1", "O2"]),
+            metadata={"sample_qc_matrix": pd.DataFrame(flags, columns=["O1", "O2"]).astype("string")},
+        )
+
+    def test_empty_categories_are_reported(self):
+        q = compute_qc_summary(self._dataset([["PASS", "PASS"], ["PASS", "PASS"]], [[2, 0.5], [3, 4]]))
+        counts = dict(zip(q.categories, q.counts))
+        assert counts["PASS & NPX > LOD"] == 3 and counts["PASS & NPX ≤ LOD"] == 1
+        assert counts["WARN & NPX > LOD"] == 0 and counts["FAIL & NPX ≤ LOD"] == 0
+
+    def test_flags_per_measurement_and_blanked_failures(self):
+        import numpy as np
+
+        # S2 has a WARN block on O2 only, and a FAIL on O1 whose value Olink blanked
+        q = compute_qc_summary(self._dataset([["PASS", "PASS"], ["fail", "Warning"]], [[2, 0.5], [np.nan, 4]]))
+        counts = dict(zip(q.categories, q.counts))
+        assert counts["WARN & NPX > LOD"] == 1  # only the flagged block, not the whole sample
+        assert counts["FAIL & no value"] == 1
+        assert counts["PASS & NPX > LOD"] == 1 and counts["PASS & NPX ≤ LOD"] == 1
+
+    def test_render_has_legend_and_one_decimal(self):
+        fig = render_qc_summary(
+            QcLodSummaryData(categories=["PASS & NPX > LOD", "WARN & NPX > LOD"], counts=[56870 - 11043, 0])
+        )
+        assert fig.layout.showlegend is True
+        names = [t.name for t in fig.data]
+        assert names[0] == "PASS & NPX > LOD: 45,827 (100.0%)" and names[1] == "WARN & NPX > LOD: 0 (0.0%)"
+        assert "%{y:.1f}%" in fig.data[0].hovertemplate
+
+
+class TestPlateSignalCorrection:
+    """Issue #49: toggle between deposited and plate-centred signal."""
+
+    @staticmethod
+    def _two_plates(offset=1.0, seed=0):
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        n, p = 20, 30
+        expr = rng.normal(0, 1, (n, p))
+        expr[n // 2 :] += offset  # plate 2 shifted by a constant
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame(
+                {
+                    "SampleID": [f"S{i}" for i in range(n)],
+                    "SampleType": "SAMPLE",
+                    "PlateID": ["P1"] * (n // 2) + ["P2"] * (n // 2),
+                }
+            ),
+            features=pd.DataFrame({"OlinkID": [f"O{j}" for j in range(p)], "UniProt": [f"P{j}" for j in range(p)]}),
+            expression=pd.DataFrame(expr, columns=[f"O{j}" for j in range(p)]),
+            metadata={},
+        )
+
+    def test_centring_removes_a_plate_offset(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_batch_effect
+
+        b = compute_batch_effect(self._two_plates(offset=2.0))
+        raw = [np.median(v) for v in b.plate_sample_medians]
+        centred = [np.median(v) for v in b.corrected_sample_medians]
+        assert raw[1] - raw[0] > 1.5 and abs(centred[1] - centred[0]) < 0.3
+        assert b.plate_r2[0] > 0.5 and b.corrected_plate_r2[0] < 0.2
+
+    def test_render_has_toggle_and_pc1_caption(self):
+        from pyprideap.viz.qc.compute import compute_batch_effect
+        from pyprideap.viz.qc.render import render_plate_signal
+
+        fig = render_plate_signal(compute_batch_effect(self._two_plates(offset=2.0)))
+        buttons = fig.layout.updatemenus[0].buttons
+        assert [b.label for b in buttons] == ["As deposited", "Plate-centred"]
+        assert [t.visible for t in fig.data] == [True, True, False, False]
+        assert buttons[1].args[0]["visible"] == [False, False, True, True]
+        assert "of PC1" in fig.layout.xaxis.title.text and "of PC1" in buttons[1].args[1]["xaxis.title.text"]
+
+
+class TestLodAnalysisControls:
+    """Issue #51: study samples only, negative controls shown separately."""
+
+    @staticmethod
+    def _dataset():
+        import numpy as np
+
+        types = ["SAMPLE"] * 6 + ["PLATE_CONTROL"] * 2 + ["NEGATIVE_CONTROL"] * 2
+        expr = np.array([[5.0, 5.0]] * 8 + [[0.0, 5.0], [0.0, 0.0]])  # one negative control above LOD on O2
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame({"SampleID": [f"S{i}" for i in range(10)], "SampleType": types}),
+            features=pd.DataFrame({"OlinkID": ["O1", "O2"], "UniProt": ["P1", "P2"], "LOD": [1.0, 1.0]}),
+            expression=pd.DataFrame(expr, columns=["O1", "O2"]),
+            metadata={},
+        )
+
+    def test_study_samples_only_and_negatives_separate(self):
+        from pyprideap.viz.qc.compute import compute_lod_analysis
+
+        r = compute_lod_analysis(self._dataset())
+        assert r.above_lod_pct == [100.0, 100.0]  # was 80% with the 2 negative controls included
+        assert r.negative_above_lod_pct == [0.0, 50.0]
+        assert (r.n_study, r.n_negative) == (6, 2)
+
+    def test_render_shows_negative_controls(self):
+        from pyprideap.viz.qc.compute import compute_lod_analysis
+        from pyprideap.viz.qc.render import render_lod_analysis
+
+        fig = render_lod_analysis(compute_lod_analysis(self._dataset()))
+        names = [t.name for t in fig.data]
+        assert any("study samples (n = 6)" in n.lower() for n in names)
+        assert "Negative controls (n = 2)" in names
+        assert "study samples" in fig.layout.yaxis.title.text
+
+    def test_help_texts_have_no_double_percent(self):
+        from pyprideap.viz.qc.report import _HELP_TEXT
+
+        assert not [k for k, v in _HELP_TEXT.items() if "%%" in v]
+
+
+def test_help_texts_state_meaning_before_method_details():
+    """Issue #48: meaning first, scale / group details after."""
+    from pyprideap.viz.qc.report import _HELP_TEXT
+
+    mpi = _HELP_TEXT["mpi"]
+    assert mpi.index("Higher is more consistent") < mpi.index("linear scale") < mpi.index("biological groups")
+    rank = _HELP_TEXT["rank_concordance"]
+    assert rank.rstrip().endswith("comparable between NPX and RFU within a dataset.")
+
+
+class TestColourByOptions:
+    """Issue #48 item 5: colour PCA / t-SNE by sample type, plate or study group."""
+
+    @staticmethod
+    def _dataset():
+        import numpy as np
+
+        rng = np.random.default_rng(3)
+        n = 12
+        samples = pd.DataFrame(
+            {
+                "SampleID": [f"S{i}" for i in range(n)],
+                "SampleType": ["SAMPLE"] * 10 + ["NEGATIVE_CONTROL"] * 2,
+                "PlateID": ["P1"] * 6 + ["P2"] * 6,
+                "disease": ["case"] * 5 + ["control"] * 5 + [None, None],
+            }
+        )
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=samples,
+            features=pd.DataFrame({"OlinkID": [f"O{j}" for j in range(5)], "UniProt": [f"P{j}" for j in range(5)]}),
+            expression=pd.DataFrame(rng.normal(0, 1, (n, 5)), columns=[f"O{j}" for j in range(5)]),
+            metadata={},
+        )
+
+    def test_options_include_plate_and_study_group(self):
+        from pyprideap.viz.qc.compute import compute_pca
+
+        opts = compute_pca(self._dataset()).color_options
+        assert list(opts)[:2] == ["Sample type", "Plate"]
+        group = opts["Study group: disease"]
+        assert group[:5] == ["case"] * 5 and group[-2:] == ["Control samples"] * 2
+
+    def test_single_valued_sample_type_is_not_offered(self):
+        from pyprideap.viz.qc.compute import compute_pca
+
+        ds = self._dataset()
+        ds.samples["SampleType"] = "SAMPLE"
+        assert "Sample type" not in compute_pca(ds).color_options
+
+    def test_render_dropdown_switches_colouring(self):
+        from pyprideap.viz.qc.compute import compute_pca
+        from pyprideap.viz.qc.render import render_pca
+
+        fig = render_pca(compute_pca(self._dataset()))
+        buttons = fig.layout.updatemenus[0].buttons
+        assert [b.label for b in buttons] == [
+            "Colour by: Sample type",
+            "Colour by: Plate",
+            "Colour by: Study group: disease",
+        ]
+        visible_first = [t.name for t in fig.data if t.visible]
+        assert sorted(visible_first) == ["NEGATIVE_CONTROL", "SAMPLE"]
+        plate_vis = buttons[1].args[0]["visible"]
+        assert sorted(t.name for t, v in zip(fig.data, plate_vis) if v) == ["P1", "P2"]
