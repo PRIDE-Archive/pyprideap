@@ -1458,3 +1458,60 @@ def test_help_texts_state_meaning_before_method_details():
     assert mpi.index("Higher is more consistent") < mpi.index("linear scale") < mpi.index("biological groups")
     rank = _HELP_TEXT["rank_concordance"]
     assert rank.rstrip().endswith("comparable between NPX and RFU within a dataset.")
+
+
+class TestColourByOptions:
+    """Issue #48 item 5: colour PCA / t-SNE by sample type, plate or study group."""
+
+    @staticmethod
+    def _dataset():
+        import numpy as np
+
+        rng = np.random.default_rng(3)
+        n = 12
+        samples = pd.DataFrame(
+            {
+                "SampleID": [f"S{i}" for i in range(n)],
+                "SampleType": ["SAMPLE"] * 10 + ["NEGATIVE_CONTROL"] * 2,
+                "PlateID": ["P1"] * 6 + ["P2"] * 6,
+                "disease": ["case"] * 5 + ["control"] * 5 + [None, None],
+            }
+        )
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=samples,
+            features=pd.DataFrame({"OlinkID": [f"O{j}" for j in range(5)], "UniProt": [f"P{j}" for j in range(5)]}),
+            expression=pd.DataFrame(rng.normal(0, 1, (n, 5)), columns=[f"O{j}" for j in range(5)]),
+            metadata={},
+        )
+
+    def test_options_include_plate_and_study_group(self):
+        from pyprideap.viz.qc.compute import compute_pca
+
+        opts = compute_pca(self._dataset()).color_options
+        assert list(opts)[:2] == ["Sample type", "Plate"]
+        group = opts["Study group: disease"]
+        assert group[:5] == ["case"] * 5 and group[-2:] == ["Control samples"] * 2
+
+    def test_single_valued_sample_type_is_not_offered(self):
+        from pyprideap.viz.qc.compute import compute_pca
+
+        ds = self._dataset()
+        ds.samples["SampleType"] = "SAMPLE"
+        assert "Sample type" not in compute_pca(ds).color_options
+
+    def test_render_dropdown_switches_colouring(self):
+        from pyprideap.viz.qc.compute import compute_pca
+        from pyprideap.viz.qc.render import render_pca
+
+        fig = render_pca(compute_pca(self._dataset()))
+        buttons = fig.layout.updatemenus[0].buttons
+        assert [b.label for b in buttons] == [
+            "Colour by: Sample type",
+            "Colour by: Plate",
+            "Colour by: Study group: disease",
+        ]
+        visible_first = [t.name for t in fig.data if t.visible]
+        assert sorted(visible_first) == ["NEGATIVE_CONTROL", "SAMPLE"]
+        plate_vis = buttons[1].args[0]["visible"]
+        assert sorted(t.name for t, v in zip(fig.data, plate_vis) if v) == ["P1", "P2"]

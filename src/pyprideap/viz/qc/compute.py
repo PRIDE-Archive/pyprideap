@@ -59,6 +59,8 @@ class PcaData:
     labels: list[str]
     groups: list[str]
     title: str = "PCA"
+    # Alternative colourings offered in the plot ("Sample type", "Plate", "Study group (...)")
+    color_options: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,6 +70,7 @@ class UmapData:
     labels: list[str]
     groups: list[str]
     title: str = "UMAP"
+    color_options: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -501,6 +504,55 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
     )
 
 
+def _sample_color_options(dataset: AffinityDataset) -> dict[str, list[str]]:
+    """Per-sample labels for colouring sample-relationship plots, first entry the default.
+
+    - "Sample type" (or "QC flag" when all samples share one type): as before
+    - "Plate": when there is more than one plate
+    - "Study group (<column>)": when the SDRF or sample metadata defines biological
+      groups; control samples are labelled as such, unannotated samples as such
+    """
+    from pyprideap.io.readers.sdrf import resolve_biological_groups
+    from pyprideap.processing.filtering import control_sample_mask, filter_controls
+
+    samples = dataset.samples
+    n = len(samples)
+    options: dict[str, list[str]] = {}
+    # Only colourings that separate the samples are offered
+    type_col = next((c for c in ("SampleType", "sample type") if c in samples.columns), None)
+    if type_col is not None and samples[type_col].nunique() > 1:
+        options["Sample type"] = samples[type_col].astype(str).tolist()
+    elif "SampleQC" in samples.columns and samples["SampleQC"].nunique() > 1:
+        options["QC flag"] = samples["SampleQC"].astype(str).tolist()
+
+    plate_col = _plate_column(samples)
+    if plate_col is not None and samples[plate_col].nunique() > 1:
+        options["Plate"] = samples[plate_col].astype(str).tolist()
+
+    try:
+        resolved = resolve_biological_groups(filter_controls(dataset))
+    except Exception:  # group resolution is optional decoration
+        resolved = None
+    if resolved is not None:
+        labels, column = resolved
+        is_control = control_sample_mask(samples).to_numpy()
+        study_labels = iter(labels.tolist())
+        values = []
+        for control in is_control:
+            if control:
+                values.append("Control samples")
+            else:
+                v = next(study_labels, None)
+                values.append("Not annotated" if v is None or pd.isna(v) or str(v).strip() == "" else str(v))
+        factor_columns = dataset.metadata.get("sdrf_factor_columns")
+        is_factor = isinstance(factor_columns, list) and column in factor_columns
+        name = f"factor value[{re.sub(r' [0-9]+$', '', column)}]" if is_factor else column
+        options[f"Study group: {name}"] = values
+    if not options:
+        options["Samples"] = [""] * n
+    return options
+
+
 def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | None:
     logger.debug("Computing PCA...")
     try:
@@ -527,16 +579,8 @@ def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | No
 
     labels = _sample_ids(dataset)
 
-    # Use SampleQC for color if all SampleType values are the same
-    groups: list[str]
-    if "SampleType" in dataset.samples.columns:
-        types = dataset.samples["SampleType"].unique()
-        if len(types) == 1 and "SampleQC" in dataset.samples.columns:
-            groups = dataset.samples["SampleQC"].astype(str).tolist()
-        else:
-            groups = dataset.samples["SampleType"].astype(str).tolist()
-    else:
-        groups = [""] * len(labels)
+    color_options = _sample_color_options(dataset)
+    groups = next(iter(color_options.values()), [""] * len(labels))
 
     return PcaData(
         pc1=np.round(transformed[:, 0], 4).tolist(),
@@ -544,6 +588,7 @@ def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | No
         variance_explained=[round(float(v), 4) for v in pca.explained_variance_ratio_],
         labels=labels,
         groups=groups,
+        color_options=color_options,
     )
 
 
@@ -573,16 +618,8 @@ def compute_tsne(dataset: AffinityDataset) -> UmapData | None:
 
     labels = _sample_ids(dataset)
 
-    # Use SampleQC for color if all SampleType values are the same
-    groups: list[str]
-    if "SampleType" in dataset.samples.columns:
-        types = dataset.samples["SampleType"].unique()
-        if len(types) == 1 and "SampleQC" in dataset.samples.columns:
-            groups = dataset.samples["SampleQC"].astype(str).tolist()
-        else:
-            groups = dataset.samples["SampleType"].astype(str).tolist()
-    else:
-        groups = [""] * len(labels)
+    color_options = _sample_color_options(dataset)
+    groups = next(iter(color_options.values()), [""] * len(labels))
 
     return UmapData(
         x=np.round(transformed[:, 0], 4).tolist(),
@@ -590,6 +627,7 @@ def compute_tsne(dataset: AffinityDataset) -> UmapData | None:
         labels=labels,
         groups=groups,
         title="t-SNE",
+        color_options=color_options,
     )
 
 

@@ -353,49 +353,113 @@ def render_lod_analysis(data: LodAnalysisData) -> Figure:
     return fig
 
 
-def render_pca(data: PcaData) -> Figure:
-    _, px = _import_plotly()
-    import pandas as pd
+def _scatter_by(
+    x: list[float],
+    y: list[float],
+    labels: list[str],
+    options: dict[str, list[str]],
+    *,
+    title: str,
+    x_title: str,
+    y_title: str,
+) -> Figure:
+    """Sample scatter coloured by the first of *options*, with a "Colour by" dropdown.
 
-    df = pd.DataFrame({"PC1": data.pc1, "PC2": data.pc2, "Label": data.labels, "Group": data.groups})
-    ve = data.variance_explained
-    fig = px.scatter(
-        df,
-        x="PC1",
-        y="PC2",
-        color="Group",
-        text="Label",
-        hover_data=["Label"],
-        title=data.title,
-        labels={
-            "PC1": f"PC1 ({ve[0] * 100:.1f}%)" if len(ve) > 0 else "PC1",
-            "PC2": f"PC2 ({ve[1] * 100:.1f}%)" if len(ve) > 1 else "PC2",
-        },
+    One set of traces per colouring; the dropdown shows one set at a time. With a
+    single option there is no dropdown.
+    """
+    go, _ = _import_plotly()
+    from pyprideap.viz.theme import pride_color_discrete
+
+    fig = go.Figure()
+    spans: list[tuple[int, int]] = []
+    for k, (option, values) in enumerate(options.items()):
+        start = len(fig.data)
+        groups = sorted(set(values), key=lambda g: (g in ("Control samples", "Not annotated"), g))
+        colors = pride_color_discrete(len(groups))
+        for group, color in zip(groups, colors):
+            idx = [i for i, v in enumerate(values) if v == group]
+            fig.add_trace(
+                go.Scatter(
+                    x=[x[i] for i in idx],
+                    y=[y[i] for i in idx],
+                    mode="markers",
+                    marker=dict(size=10, color="#bdc3c7" if group in ("Control samples", "Not annotated") else color),
+                    text=[labels[i] for i in idx],
+                    textposition="top center",
+                    name=group or "(none)",
+                    legendgroup=option,
+                    hovertemplate="%{text}<br>" + option + ": " + (group or "(none)") + "<extra></extra>",
+                    visible=k == 0,
+                )
+            )
+        spans.append((start, len(fig.data)))
+
+    first = next(iter(options), "")
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+        legend_title_text=first,
+        legend=dict(orientation="h", yanchor="top", y=-0.18, x=0, xanchor="left"),
+        margin=dict(b=90),
     )
-    fig.update_traces(mode="markers", textposition="top center", marker=dict(size=10))
+    if len(options) > 1:
+        n = len(fig.data)
+        buttons = [
+            dict(
+                label=f"Colour by: {option}",
+                method="update",
+                args=[{"visible": [lo <= t < hi for t in range(n)]}, {"legend.title.text": option}],
+            )
+            for option, (lo, hi) in zip(options, spans)
+        ]
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    type="dropdown",
+                    direction="down",
+                    buttons=buttons,
+                    active=0,
+                    x=1,
+                    xanchor="right",
+                    y=1.02,
+                    yanchor="bottom",
+                    pad=dict(r=0, t=0),
+                    font=dict(size=11),
+                )
+            ]
+        )
     return fig
+
+
+def render_pca(data: PcaData) -> Figure:
+    ve = data.variance_explained
+    options = data.color_options or {"Sample type": data.groups}
+    return _scatter_by(
+        data.pc1,
+        data.pc2,
+        data.labels,
+        options,
+        title=data.title,
+        x_title=f"PC1 ({ve[0] * 100:.1f}%)" if len(ve) > 0 else "PC1",
+        y_title=f"PC2 ({ve[1] * 100:.1f}%)" if len(ve) > 1 else "PC2",
+    )
 
 
 def render_tsne(data: UmapData) -> Figure:
     """Standalone t-SNE scatter plot."""
-    _, px = _import_plotly()
-    import pandas as pd
-
     method = data.title  # "t-SNE" or legacy "UMAP"
-    x_label = f"{method} 1"
-    y_label = f"{method} 2"
-    df = pd.DataFrame({x_label: data.x, y_label: data.y, "Label": data.labels, "Group": data.groups})
-    fig = px.scatter(
-        df,
-        x=x_label,
-        y=y_label,
-        color="Group",
-        text="Label",
-        hover_data=["Label"],
+    options = data.color_options or {"Sample type": data.groups}
+    return _scatter_by(
+        data.x,
+        data.y,
+        data.labels,
+        options,
         title=f"{method} Projection",
+        x_title=f"{method} 1",
+        y_title=f"{method} 2",
     )
-    fig.update_traces(mode="markers", textposition="top center", marker=dict(size=10))
-    return fig
 
 
 # Keep old name for backwards compatibility
