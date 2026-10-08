@@ -1315,3 +1315,44 @@ class TestSweepFixes:
         self._write_long(path, sep=";", npx=("1.25", "PlateID", "-0.75", "3.0"))
         ds = read_olink_csv(path)
         assert ds.expression.isna().to_numpy().tolist() == [[False, True], [False, False]]
+
+
+class TestQcLodSummary:
+    """Issue #50: every category listed, per-measurement flags, readable labels."""
+
+    @staticmethod
+    def _dataset(flags, npx):
+        import numpy as np
+
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame({"SampleID": ["S1", "S2"], "SampleType": "SAMPLE", "SampleQC": ["PASS", "PASS"]}),
+            features=pd.DataFrame({"OlinkID": ["O1", "O2"], "UniProt": ["P1", "P2"], "LOD": [1.0, 1.0]}),
+            expression=pd.DataFrame(np.array(npx, dtype=float), columns=["O1", "O2"]),
+            metadata={"sample_qc_matrix": pd.DataFrame(flags, columns=["O1", "O2"]).astype("string")},
+        )
+
+    def test_empty_categories_are_reported(self):
+        q = compute_qc_summary(self._dataset([["PASS", "PASS"], ["PASS", "PASS"]], [[2, 0.5], [3, 4]]))
+        counts = dict(zip(q.categories, q.counts))
+        assert counts["PASS & NPX > LOD"] == 3 and counts["PASS & NPX ≤ LOD"] == 1
+        assert counts["WARN & NPX > LOD"] == 0 and counts["FAIL & NPX ≤ LOD"] == 0
+
+    def test_flags_per_measurement_and_blanked_failures(self):
+        import numpy as np
+
+        # S2 has a WARN block on O2 only, and a FAIL on O1 whose value Olink blanked
+        q = compute_qc_summary(self._dataset([["PASS", "PASS"], ["fail", "Warning"]], [[2, 0.5], [np.nan, 4]]))
+        counts = dict(zip(q.categories, q.counts))
+        assert counts["WARN & NPX > LOD"] == 1  # only the flagged block, not the whole sample
+        assert counts["FAIL & no value"] == 1
+        assert counts["PASS & NPX > LOD"] == 1 and counts["PASS & NPX ≤ LOD"] == 1
+
+    def test_render_has_legend_and_one_decimal(self):
+        fig = render_qc_summary(
+            QcLodSummaryData(categories=["PASS & NPX > LOD", "WARN & NPX > LOD"], counts=[56870 - 11043, 0])
+        )
+        assert fig.layout.showlegend is True
+        names = [t.name for t in fig.data]
+        assert names[0] == "PASS & NPX > LOD: 45,827 (100.0%)" and names[1] == "WARN & NPX > LOD: 0 (0.0%)"
+        assert "%{y:.1f}%" in fig.data[0].hovertemplate

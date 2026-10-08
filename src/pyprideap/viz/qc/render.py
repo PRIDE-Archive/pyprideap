@@ -60,6 +60,13 @@ _QC_LOD_COLORS = {
     "WARN & RFU ≤ LOD": "#e74c3c",
     "FAIL & RFU > LOD": "#95a5a6",
     "FAIL & RFU ≤ LOD": "#7f8c8d",
+    "PASS & no value": "#d5f5e3",
+    "WARN & no value": "#fdebd0",
+    "FAIL & no value": "#566573",
+    "No QC flag & NPX > LOD": "#bdc3c7",
+    "No QC flag & NPX ≤ LOD": "#dfe6e9",
+    "No QC flag & RFU > LOD": "#bdc3c7",
+    "No QC flag & RFU ≤ LOD": "#dfe6e9",
     # LOD-only summary when SampleQC is absent
     "NPX > LOD": "#2ecc71",
     "NPX ≤ LOD": "#f39c12",
@@ -235,34 +242,35 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
 
 
 def render_qc_summary(data: QcLodSummaryData) -> Figure:
-    """QC × LOD stacked bar or simple QC bar chart."""
+    """QC x LOD stacked bar with a legend listing every category, empty ones included."""
     go, _ = _import_plotly()
 
     total = sum(data.counts)
-    colors = [_QC_LOD_COLORS.get(c, "#3498db") for c in data.categories]
-
     fig = go.Figure()
-    cumulative = 0.0
-    for cat, cnt, color in zip(data.categories, data.counts, colors):
-        pct = cnt / total * 100 if total > 0 else 0
+    for cat, cnt in zip(data.categories, data.counts):
+        pct = cnt / total * 100 if total > 0 else 0.0
         fig.add_trace(
             go.Bar(
-                x=["Samples"],
+                x=["All measurements"],
                 y=[pct],
-                name=f"{cat} {cnt} ({pct:.1f}%)",
-                marker_color=color,
-                text=f"{pct:.1f}%",
+                name=f"{cat}: {cnt:,} ({pct:.1f}%)",
+                marker_color=_QC_LOD_COLORS.get(cat, "#3498db"),
+                text=f"{pct:.1f}%" if pct >= 3 else "",
                 textposition="inside",
+                customdata=[[cat, cnt]],
+                hovertemplate="%{customdata[0]}<br>%{customdata[1]:,} measurements (%{y:.1f}%)<extra></extra>",
             )
         )
-        cumulative += pct
 
     fig.update_layout(
         title=data.title,
         barmode="stack",
-        yaxis_title="% of Measurements",
+        xaxis_title=f"{total:,} sample–protein measurements",
+        yaxis_title="% of measurements",
         yaxis=dict(range=[0, 100], ticksuffix="%"),
-        showlegend=False,
+        showlegend=True,
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", font=dict(size=12)),
+        hoverlabel=dict(namelength=-1),
     )
     return fig
 

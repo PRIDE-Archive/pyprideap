@@ -349,12 +349,36 @@ def compute_distribution(dataset: AffinityDataset) -> DistributionData:
     )
 
 
+def _measurement_qc_flags(dataset: AffinityDataset, numeric: pd.DataFrame) -> pd.DataFrame | None:
+    """Sample QC flag of every measurement (samples x assays), upper-case PASS/WARN/FAIL.
+
+    Olink assigns sample QC per sample and panel block, so the per-measurement
+    flags are used when the reader kept them; otherwise each sample's SampleQC
+    value is applied to all its measurements.
+    """
+    matrix = dataset.metadata.get("sample_qc_matrix")
+    if isinstance(matrix, pd.DataFrame) and matrix.shape == numeric.shape:
+        flags = matrix.copy()
+        flags.columns = numeric.columns
+        flags.index = numeric.index
+    elif "SampleQC" in dataset.samples.columns:
+        per_sample = dataset.samples["SampleQC"].reset_index(drop=True)
+        flags = pd.DataFrame(
+            np.repeat(per_sample.to_numpy(dtype=object)[:, None], numeric.shape[1], axis=1),
+            index=numeric.index,
+            columns=numeric.columns,
+        )
+    else:
+        return None
+    text = flags.astype("string").apply(lambda c: c.str.strip().str.upper())
+    return cast(pd.DataFrame, text.replace({"WARNING": "WARN"}))
+
+
 def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     """QC status × LOD stacked bar. Falls back to simple QC counts if no LOD."""
-    # Some Olink exports (and some PAD uploads) don't include SampleQC.
-    # In that case we can still compute the overall % above/below LOD,
-    # but we can't stratify by PASS/WARN/FAIL.
-    has_sample_qc = "SampleQC" in dataset.samples.columns
+    # Some Olink exports (and some PAD uploads) have no sample QC flags. In that
+    # case we can still compute the overall % above/below LOD, but we can't
+    # stratify by PASS/WARN/FAIL.
 
     from pyprideap.processing.lod import _above_lod_matrix
 
@@ -369,24 +393,29 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
         categories: list[str] = []
         counts: list[int] = []
 
-        if has_sample_qc:
+        qc = _measurement_qc_flags(dataset, numeric)
+        if qc is not None:
+            valid = numeric.notna() & has_lod
+            above_all = above_lod & valid
+            # All PASS / WARN / FAIL categories are reported, including empty ones,
+            # so the plot shows explicitly when there are no WARN or FAIL measurements
             for qc_val in ["PASS", "WARN", "FAIL"]:
-                mask = dataset.samples["SampleQC"] == qc_val
-                if mask.sum() == 0:
-                    continue
-
-                above_subset = above_lod.loc[mask] & has_lod.loc[mask]
-                valid_subset = numeric.loc[mask].notna() & has_lod.loc[mask]
-
-                above = int(above_subset.sum().sum())
-                below = int(valid_subset.sum().sum()) - above
-
-                if above > 0:
-                    categories.append(f"{qc_val} & {unit} > LOD")
-                    counts.append(above)
-                if below > 0:
-                    categories.append(f"{qc_val} & {unit} ≤ LOD")
-                    counts.append(below)
+                in_flag = qc.isin([qc_val]).astype(bool)
+                above = int((above_all & in_flag).to_numpy().sum())
+                below = int((valid & in_flag).to_numpy().sum()) - above
+                categories += [f"{qc_val} & {unit} > LOD", f"{qc_val} & {unit} ≤ LOD"]
+                counts += [above, below]
+                # Olink leaves the value empty for failed measurements: count them too
+                no_value = int((numeric.isna() & in_flag).to_numpy().sum())
+                if no_value:
+                    categories.append(f"{qc_val} & no value")
+                    counts.append(no_value)
+            # Measurements without a recognised flag are shown rather than dropped
+            unflagged = valid & ~qc.isin(["PASS", "WARN", "FAIL"]).fillna(False).astype(bool)
+            if unflagged.to_numpy().any():
+                above = int((above_all & unflagged).to_numpy().sum())
+                categories += [f"No QC flag & {unit} > LOD", f"No QC flag & {unit} ≤ LOD"]
+                counts += [above, int(unflagged.to_numpy().sum()) - above]
         else:
             # No QC flags available: show overall above/below LOD split
             valid = numeric.notna() & has_lod
@@ -399,11 +428,11 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
                 categories.append(f"{unit} ≤ LOD")
                 counts.append(below)
 
-        if categories:
+        if categories and sum(counts) > 0:
             return QcLodSummaryData(categories=categories, counts=counts)
 
     # Fallback: simple QC counts when no LOD is available but SampleQC exists
-    if has_sample_qc:
+    if "SampleQC" in dataset.samples.columns:
         vc = dataset.samples["SampleQC"].value_counts()
         return QcLodSummaryData(categories=vc.index.tolist(), counts=vc.values.tolist())
 

@@ -120,10 +120,14 @@ _HELP_TEXT: dict[str, str] = {
         "(e.g. failed plate, low protein yield)."
     ),
     "qc_summary": (
-        "Stacked bar showing the percentage of sample–protein measurements in each QC category. "
-        "Categories combine the Olink QC flag (PASS / WARN / FAIL) with whether the value is above "
-        "or below the Limit of Detection (LOD). A high proportion of PASS & NPX > LOD (green) "
-        "indicates good data quality. Large WARN or FAIL fractions suggest systematic issues."
+        "Every sample–protein measurement, split by its Olink sample QC flag (PASS / WARN / FAIL, "
+        "assigned per sample and panel block) and by whether the value is above or below the Limit "
+        "of Detection (LOD) used in this report. The legend lists all six categories with their "
+        'counts and percentages, including empty ones: "WARN ... 0 (0.0%)" means no measurement '
+        "was flagged. PASS &amp; above LOD (green) is reliable signal; PASS &amp; at or below LOD (blue) "
+        "is valid data near the detection limit. Large WARN or FAIL fractions suggest systematic "
+        'issues. Measurements without a recognised flag are shown as "No QC flag", and measurements '
+        'whose value is empty (Olink blanks failed measurements) as "&amp; no value".'
     ),
     "lod_analysis": (
         "Proteins ranked by the percentage of samples with signal above the Limit of Detection, "
@@ -1138,7 +1142,8 @@ def _render_summary_table(
         # Share of all measurements above LOD (the QC and LOD Summary bar, as one number)
         qc_lod = plot_data.get("qc_summary")
         if isinstance(qc_lod, QcLodSummaryData) and any("> LOD" in c for c in qc_lod.categories):
-            n_total = sum(qc_lod.counts)
+            # Measurements without a value (e.g. blanked after a FAIL flag) have no LOD status
+            n_total = sum(n for c, n in zip(qc_lod.categories, qc_lod.counts) if "no value" not in c)
             n_above = sum(n for c, n in zip(qc_lod.categories, qc_lod.counts) if "> LOD" in c)
             if n_total > 0:
                 source = f" ({html_mod.escape(str(lod_active))})" if lod_active else ""
