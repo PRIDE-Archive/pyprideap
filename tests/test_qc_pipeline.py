@@ -794,7 +794,10 @@ class TestPreanalyticalDilutionSex:
         keys = [i["key"] for i in technical["items"]]
         assert "preanalytical" in keys and "sex_check" in keys
         summary = (out / "summary.html").read_text()
-        assert "Sex mismatches vs annotation" in summary and "Possible hemolysis" in summary
+        assert (
+            "Sex mismatches vs annotation" in summary
+            and "Samples with possible hemolysis (indicator outliers)" in summary
+        )
 
     def test_sex_check_drops_uninformative_markers_and_ignores_wide_male_range(self):
         """Mirrors PAD000003 (SomaScan): KLK3 informative, EIF1AY reagent not; PSA varies widely in men."""
@@ -1445,3 +1448,13 @@ class TestLodAnalysisControls:
         from pyprideap.viz.qc.report import _HELP_TEXT
 
         assert not [k for k, v in _HELP_TEXT.items() if "%%" in v]
+
+
+def test_help_texts_state_meaning_before_method_details():
+    """Issue #48: meaning first, scale / group details after."""
+    from pyprideap.viz.qc.report import _HELP_TEXT
+
+    mpi = _HELP_TEXT["mpi"]
+    assert mpi.index("Higher is more consistent") < mpi.index("linear scale") < mpi.index("biological groups")
+    rank = _HELP_TEXT["rank_concordance"]
+    assert rank.rstrip().endswith("comparable between NPX and RFU within a dataset.")

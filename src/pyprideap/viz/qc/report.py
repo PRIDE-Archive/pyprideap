@@ -304,14 +304,14 @@ _HELP_TEXT: dict[str, str] = {
     "mpi": (
         "Measurement Precision Index (MPI) per protein: median divided by a robust SD "
         "(1.4826 &times; MAD), i.e. the inverse of a robust CV, across study samples (controls "
-        "excluded). Values are on a linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), "
-        "as for the CV plots, because a ratio to the median is meaningless on log2 NPX. When the "
-        "SDRF or sample metadata defines biological groups (e.g. disease), MPI is computed within "
-        "each group and averaged, so group differences are not counted as imprecision; the label "
-        "on the plot says whether this was possible. Higher is more consistent. It reflects "
-        "biological as well as technical variation and depends on the deposited normalisation, so "
-        "it is a within-dataset view, not an acceptance threshold; see the technical CV for "
-        "replicate precision."
+        "excluded). Higher is more consistent. It reflects biological as well as technical variation "
+        "and depends on the deposited normalisation, so it is a within-dataset view, not an "
+        "acceptance threshold; see the technical CV for replicate precision. Values are on a linear "
+        "scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), as for the CV plots, because a "
+        "ratio to the median is meaningless on log2 NPX. When the SDRF or sample metadata defines "
+        "biological groups (e.g. disease), MPI is computed within each group and averaged, so group "
+        "differences are not counted as imprecision; the label on the plot says whether this was "
+        "possible."
     ),
     "dynamic_range": (
         "Relative spread per protein: interquartile range divided by the median across study "
@@ -322,11 +322,11 @@ _HELP_TEXT: dict[str, str] = {
     ),
     "rank_concordance": (
         "Spearman correlation of protein ranks between pairs of study samples (up to 500 random "
-        "pairs). Ranks do not depend on the measurement scale, so the value is comparable between "
-        "NPX and RFU within a dataset. Biological replicates of similar samples correlate highly; "
-        "mixed cohorts (e.g. cases and controls, or different tissues) correlate less, which "
-        "reflects biology rather than quality. A tail of low values points to individual samples "
-        "that differ from the rest; see the sample correlation heatmap to identify them."
+        "pairs). Biological replicates of similar samples correlate highly; mixed cohorts (e.g. "
+        "cases and controls, or different tissues) correlate less, which reflects biology rather "
+        "than quality. A tail of low values points to individual samples that differ from the "
+        "rest; see the sample correlation heatmap to identify them. Ranks do not depend on the "
+        "measurement scale, so the value is comparable between NPX and RFU within a dataset."
     ),
     "differential_expression": (
         "Volcano plots showing differentially expressed proteins between sample groups defined "
@@ -1287,11 +1287,15 @@ def _render_summary_table(
         rows.append(_summary_group("Pre-analytical &amp; Identity"))
         if isinstance(pre, PreanalyticalData):
             for name, ids in pre.outliers.items():
-                label = "Possible hemolysis" if name == "hemolysis" else "Possible platelet activation"
+                label = (
+                    "Samples with possible hemolysis"
+                    if name == "hemolysis"
+                    else "Samples with possible platelet activation"
+                )
                 rows.append(_summary_row("", f"{label} (indicator outliers)", f"{len(ids)} / {len(pre.sample_ids)}"))
         if isinstance(sex, SexCheckData):
             n_m, n_f = sex.predicted.count("male"), sex.predicted.count("female")
-            rows.append(_summary_row("", "Protein-predicted sex (F / M)", f"{n_f} / {n_m}"))
+            rows.append(_summary_row("", "Samples by protein-predicted sex (F / M)", f"{n_f} / {n_m}"))
             if any(sex.annotated):
                 dot = _status_dot("green") if not sex.mismatches else _status_dot("amber")
                 rows.append(_summary_row(dot, "Sex mismatches vs annotation", str(len(sex.mismatches))))
