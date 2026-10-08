@@ -276,35 +276,74 @@ def render_qc_summary(data: QcLodSummaryData) -> Figure:
 
 
 def render_lod_analysis(data: LodAnalysisData) -> Figure:
+    """Proteins ranked by % of study samples above LOD; negative controls as a dashed line."""
     go, px = _import_plotly()
     import pandas as pd
 
     df = pd.DataFrame({"Assay": data.assay_ids, "% Above LOD": data.above_lod_pct, "Panel": data.panel})
-    df = df.sort_values("% Above LOD", ascending=False).reset_index(drop=True)
+    if data.negative_above_lod_pct:
+        df["% Negatives above LOD"] = data.negative_above_lod_pct
+    df = df.sort_values("% Above LOD", ascending=False, kind="stable").reset_index(drop=True)
     df["Rank"] = range(1, len(df) + 1)
 
     panels = sorted(df["Panel"].unique())
     colors = px.colors.qualitative.Set2
     panel_colors = {p: colors[i % len(colors)] for i, p in enumerate(panels)}
+    study_label = f"study samples (n = {data.n_study})" if data.n_study else "samples"
 
     fig = go.Figure()
     for panel in panels:
         sub = df[df["Panel"] == panel]
+        name = panel or "Study samples"
+        if data.n_study and panel:
+            name = f"{panel} · {study_label}"
+        elif data.n_study:
+            name = study_label[0].upper() + study_label[1:]
         fig.add_trace(
             go.Scatter(
                 x=sub["Rank"],
                 y=sub["% Above LOD"],
                 mode="markers",
                 marker=dict(size=4, color=panel_colors[panel]),
-                name=panel,
+                name=name,
                 text=sub["Assay"],
-                hovertemplate="%{text}<br>%{y:.1f}% above LOD<extra></extra>",
+                hovertemplate="%{text}<br>%{y:.1f}% of " + study_label + " above LOD<extra></extra>",
             ),
         )
 
+    if data.negative_above_lod_pct:
+        # Each protein's value (few controls give few distinct levels) and a running mean
+        # along the ranking, which shows where background signal concentrates
+        window = max(5, len(df) // 40)
+        trend = df["% Negatives above LOD"].rolling(window, center=True, min_periods=1).mean()
+        fig.add_trace(
+            go.Scatter(
+                x=df["Rank"],
+                y=df["% Negatives above LOD"],
+                mode="markers",
+                marker=dict(size=3, color="#95a5a6", opacity=0.45),
+                name=f"Negative controls (n = {data.n_negative})",
+                legendgroup="negatives",
+                text=df["Assay"],
+                hovertemplate="%{text}<br>%{y:.1f}% of negative controls above LOD<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df["Rank"],
+                y=trend,
+                mode="lines",
+                line=dict(color="#2c3e50", dash="dash", width=2),
+                name=f"Negative controls, running mean ({window} proteins)",
+                legendgroup="negatives",
+                hoverinfo="skip",
+            )
+        )
+
     unit = getattr(data, "unit", "NPX")
-    fig.update_xaxes(title_text="Protein Rank (by detectability)")
-    fig.update_yaxes(title_text=f"% Samples with {unit} > LOD")
+    who = "study samples" if data.n_study else "samples"
+    fig.update_xaxes(title_text="Protein rank (by detectability in study samples)")
+    fig.update_yaxes(title_text=f"% {who} with {unit} > LOD", range=[-3, 103])
     fig.update_layout(
         title=data.title,
         height=500,

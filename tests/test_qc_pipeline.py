@@ -1404,3 +1404,44 @@ class TestPlateSignalCorrection:
         assert [t.visible for t in fig.data] == [True, True, False, False]
         assert buttons[1].args[0]["visible"] == [False, False, True, True]
         assert "of PC1" in fig.layout.xaxis.title.text and "of PC1" in buttons[1].args[1]["xaxis.title.text"]
+
+
+class TestLodAnalysisControls:
+    """Issue #51: study samples only, negative controls shown separately."""
+
+    @staticmethod
+    def _dataset():
+        import numpy as np
+
+        types = ["SAMPLE"] * 6 + ["PLATE_CONTROL"] * 2 + ["NEGATIVE_CONTROL"] * 2
+        expr = np.array([[5.0, 5.0]] * 8 + [[0.0, 5.0], [0.0, 0.0]])  # one negative control above LOD on O2
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame({"SampleID": [f"S{i}" for i in range(10)], "SampleType": types}),
+            features=pd.DataFrame({"OlinkID": ["O1", "O2"], "UniProt": ["P1", "P2"], "LOD": [1.0, 1.0]}),
+            expression=pd.DataFrame(expr, columns=["O1", "O2"]),
+            metadata={},
+        )
+
+    def test_study_samples_only_and_negatives_separate(self):
+        from pyprideap.viz.qc.compute import compute_lod_analysis
+
+        r = compute_lod_analysis(self._dataset())
+        assert r.above_lod_pct == [100.0, 100.0]  # was 80% with the 2 negative controls included
+        assert r.negative_above_lod_pct == [0.0, 50.0]
+        assert (r.n_study, r.n_negative) == (6, 2)
+
+    def test_render_shows_negative_controls(self):
+        from pyprideap.viz.qc.compute import compute_lod_analysis
+        from pyprideap.viz.qc.render import render_lod_analysis
+
+        fig = render_lod_analysis(compute_lod_analysis(self._dataset()))
+        names = [t.name for t in fig.data]
+        assert any("study samples (n = 6)" in n.lower() for n in names)
+        assert "Negative controls (n = 2)" in names
+        assert "study samples" in fig.layout.yaxis.title.text
+
+    def test_help_texts_have_no_double_percent(self):
+        from pyprideap.viz.qc.report import _HELP_TEXT
+
+        assert not [k for k, v in _HELP_TEXT.items() if "%%" in v]

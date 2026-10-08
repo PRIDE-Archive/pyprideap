@@ -41,10 +41,14 @@ class QcLodSummaryData:
 @dataclass
 class LodAnalysisData:
     assay_ids: list[str]
-    above_lod_pct: list[float]
+    above_lod_pct: list[float]  # % of study samples above LOD (controls excluded)
     panel: list[str]
     title: str = "LOD Analysis: % Samples Above LOD"
     unit: str = "NPX"  # "NPX" for Olink, "RFU" for SomaScan
+    # % of negative controls / blanks / buffers above LOD for the same assays (empty when none)
+    negative_above_lod_pct: list[float] = field(default_factory=list)
+    n_study: int = 0
+    n_negative: int = 0
 
 
 @dataclass
@@ -439,7 +443,19 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     return None
 
 
+# Sample types that carry no analyte: their signal should stay below LOD
+_NEGATIVE_SAMPLE_TYPES = frozenset({"negative", "negative control", "neg", "buffer", "buffer control", "blank"})
+
+
 def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
+    """Per assay, the % of study samples above LOD, and the % of negative controls above LOD.
+
+    Control samples are excluded from the study-sample percentage, so a fully
+    detected assay reaches 100% whatever the share of controls in the file.
+    Negative controls, blanks and buffers are reported separately: they should
+    stay near 0%; higher values point to contamination or high background.
+    """
+    from pyprideap.processing.filtering import control_sample_mask, normalize_sample_type
     from pyprideap.processing.lod import _above_lod_matrix
 
     lod = _resolve_lod(dataset)
@@ -448,36 +464,41 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     above_lod, has_lod = _above_lod_matrix(numeric, lod)
+    valid = numeric.notna() & has_lod
+    above = above_lod & valid
 
-    assay_ids = []
-    above_lod_pct = []
-    panels = []
+    study = ~control_sample_mask(dataset.samples).to_numpy()
+    negative = np.zeros(len(numeric), dtype=bool)
+    for col in ("SampleType", "sample type"):
+        if col in dataset.samples.columns:
+            negative |= normalize_sample_type(dataset.samples[col]).isin(_NEGATIVE_SAMPLE_TYPES).to_numpy()
+
+    def pct_above(rows: np.ndarray) -> pd.Series:
+        n_valid = valid.loc[rows].sum()
+        return cast(pd.Series, (above.loc[rows].sum() / n_valid.where(n_valid > 0) * 100).fillna(0.0))
+
+    # Assays with a LOD for at least one sample
+    assays = [c for c in numeric.columns if bool(has_lod[c].any())]
+    if not assays or not study.any():
+        return None
+    study_pct = pct_above(study)
+    negative_pct = pct_above(negative) if negative.any() else None
 
     id_col = "OlinkID" if "OlinkID" in dataset.features.columns else dataset.features.columns[0]
     id_to_panel: dict[str, str] = {}
     if "Panel" in dataset.features.columns:
         id_to_panel = dict(zip(dataset.features[id_col].astype(str), dataset.features["Panel"].astype(str)))
 
-    for col in numeric.columns:
-        # Skip assays with no LOD for any sample
-        if not has_lod[col].any():
-            continue
-        vals_valid = numeric[col].notna() & has_lod[col]
-        n_valid = int(vals_valid.sum())
-        if n_valid == 0:
-            pct = 0.0
-        else:
-            pct = float(above_lod.loc[vals_valid, col].sum() / n_valid * 100)
-
-        assay_ids.append(str(col))
-        above_lod_pct.append(round(pct, 2))
-        panels.append(id_to_panel.get(str(col), ""))
-
-    if not assay_ids:
-        return None
-
     unit = "RFU" if dataset.platform == Platform.SOMASCAN else "NPX"
-    return LodAnalysisData(assay_ids=assay_ids, above_lod_pct=above_lod_pct, panel=panels, unit=unit)
+    return LodAnalysisData(
+        assay_ids=[str(c) for c in assays],
+        above_lod_pct=[round(float(study_pct[c]), 2) for c in assays],
+        panel=[id_to_panel.get(str(c), "") for c in assays],
+        unit=unit,
+        negative_above_lod_pct=[round(float(negative_pct[c]), 2) for c in assays] if negative_pct is not None else [],
+        n_study=int(study.sum()),
+        n_negative=int(negative.sum()),
+    )
 
 
 def compute_pca(dataset: AffinityDataset, n_components: int = 2) -> PcaData | None:

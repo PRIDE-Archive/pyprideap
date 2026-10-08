@@ -136,9 +136,14 @@ _HELP_TEXT: dict[str, str] = {
         'whose value is empty (Olink blanks failed measurements) as "&amp; no value".'
     ),
     "lod_analysis": (
-        "Proteins ranked by the percentage of samples with signal above the Limit of Detection, "
-        "coloured by panel. A steep drop-off reveals how many proteins have weak signal. "
-        "Proteins with low %% above LOD are unreliable and may need filtering."
+        "Proteins ranked by the percentage of <strong>study samples</strong> with signal above the "
+        "Limit of Detection, coloured by panel; control samples are excluded, so a fully detected "
+        "protein reaches 100%. A steep drop-off reveals how many proteins have weak signal; proteins "
+        "with a low % above LOD are unreliable and may need filtering. When the file has negative "
+        "controls, blanks or buffers, the dashed line gives the % of them above LOD for the same "
+        "proteins: it should stay near 0%. Proteins where it rises point to contamination or high "
+        "background. When the LOD itself is derived from these controls (e.g. Olink NCLOD), most of them "
+        "fall below it by construction."
     ),
     "pca": (
         "Principal Component Analysis projects the high-dimensional protein expression data onto "
@@ -164,9 +169,9 @@ _HELP_TEXT: dict[str, str] = {
         "(orange, measured but below detection limit). A sample with a large orange fraction may "
         "indicate low protein input or technical issues. "
         "<strong>Bottom:</strong> Missing Frequency distribution — a histogram of per-protein missing rate "
-        "(%% of samples where signal is below LOD). Olink recommends a missing frequency threshold "
-        "of 30%%: proteins above this threshold may be unreliable and should be considered for filtering. "
-        "Proteins clustered near 0%% are reliably detected; those near 100%% may need filtering."
+        "(% of samples where signal is below LOD). Olink recommends a missing frequency threshold "
+        "of 30%: proteins above this threshold may be unreliable and should be considered for filtering. "
+        "Proteins clustered near 0% are reliably detected; those near 100% may need filtering."
     ),
     "sample_completeness": (
         "Per-sample stacked bar showing Above LOD (green, reliable signal) vs Below LOD "
@@ -174,10 +179,10 @@ _HELP_TEXT: dict[str, str] = {
         "A sample with a large orange fraction may indicate low protein input or technical issues."
     ),
     "missing_frequency_distribution": (
-        "Histogram of per-protein missing rate (%% of samples where signal is below LOD). "
-        "Olink recommends a missing frequency threshold of 30%%: proteins above this threshold "
+        "Histogram of per-protein missing rate (% of samples where signal is below LOD). "
+        "Olink recommends a missing frequency threshold of 30%: proteins above this threshold "
         "may be unreliable and should be considered for filtering. "
-        "Proteins clustered near 0%% are reliably detected; those near 100%% may need filtering."
+        "Proteins clustered near 0% are reliably detected; those near 100% may need filtering."
     ),
     "dimreduction": (
         "Dimensionality reduction projects the high-dimensional protein expression data onto two axes. "
@@ -243,7 +248,7 @@ _HELP_TEXT: dict[str, str] = {
         "|x &minus; median(x)| &gt; 6 &times; MAD(x) <strong>and</strong> a fold-change &gt; 5&times; "
         "from the analyte median (matching SomaDataIO's <code>calcOutlierMap()</code>). "
         "Samples with a large number of red cells across many analytes may be technical outliers. "
-        "The default flagging threshold is 5%% of analytes — samples exceeding this are candidates for removal."
+        "The default flagging threshold is 5% of analytes — samples exceeding this are candidates for removal."
     ),
     "row_check": (
         "Summary of sample-level normalization QC (RowCheck). Each sample's normalization scale factors "
@@ -279,7 +284,7 @@ _HELP_TEXT: dict[str, str] = {
     "iqr_median_qc": (
         "Per-panel scatter plot of IQR (Interquartile Range) vs Median NPX per sample, mirroring "
         "OlinkAnalyze's <code>olink_qc_plot()</code>. The IQR (Q3 &minus; Q1) measures the spread of "
-        "the middle 50%% of a sample's protein measurements — a large IQR indicates high variability. "
+        "the middle 50% of a sample's protein measurements — a large IQR indicates high variability. "
         "For each panel, IQR and median are computed per sample. "
         "Outlier thresholds (dashed lines) are set at mean &plusmn; 3 &times; SD on both axes. "
         "Samples outside these bounds on either axis are flagged as outliers (red points). "
@@ -1948,7 +1953,7 @@ def qc_report(
         stat_items.append(f'<span class="stat-item"><strong>Unique Proteins</strong> {n_proteins}</span>')
     if n_proteins_above_lod is not None and n_proteins_above_lod > 0:
         stat_items.append(
-            f'<span class="stat-item" title="Unique proteins where &gt;50%% of samples have signal above LOD">'
+            f'<span class="stat-item" title="Unique proteins where &gt;50% of samples have signal above LOD">'
             f"<strong>Proteins &gt; LOD</strong> {n_proteins_above_lod}</span>"
         )
 
