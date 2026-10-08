@@ -71,7 +71,13 @@ _HELP_TEXT: dict[str, str] = {
     "plate_signal": (
         "Median signal per study sample, grouped by plate. Plates whose box is shifted from the others "
         "indicate a plate-level offset that normalization did not remove, or a plate holding different "
-        "kinds of samples."
+        "kinds of samples. The buttons switch between the values as deposited and after plate median "
+        "centring (each assay's median on each plate moved to its overall median). Centring aligns the "
+        "plate medians by construction, so check the caption below the plot: the share of PC1 explained by "
+        "plate. If it "
+        "stays high after centring, plates differ in more than an offset (residual batch effect, or plates "
+        "holding different sample groups). If study groups are confined to single plates, centring also "
+        "removes real biological differences."
     ),
     "preanalytical": (
         "Indicator scores for pre-analytical handling, computed per study sample as the mean z-score "
@@ -1255,6 +1261,8 @@ def _render_summary_table(
         rows.append(_summary_group("Batch"))
         top = ", ".join(f"{pc} {r2:.0%}" for pc, r2 in zip(batch.pc_labels[:2], batch.plate_r2[:2]))
         rows.append(_summary_row("", "Variance explained by plate", top))
+        if batch.corrected_plate_r2:
+            rows.append(_summary_row("", "After plate median centring (PC1)", f"{batch.corrected_plate_r2[0]:.0%}"))
     bridge = plot_data.get("bridge_agreement")
     if isinstance(bridge, BridgeAgreementData):
         if not (isinstance(batch, BatchEffectData) and batch.plate_r2):

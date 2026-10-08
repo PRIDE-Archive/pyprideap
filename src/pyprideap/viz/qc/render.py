@@ -2051,7 +2051,13 @@ def render_batch_effect(data: BatchEffectData) -> Figure:
 
 
 def render_plate_signal(data: BatchEffectData) -> Figure:
-    """Per-sample median signal by plate (study samples)."""
+    """Per-sample median signal by plate (study samples), as deposited and after plate centring.
+
+    Two buttons switch between the deposited values and plate median centring
+    (each assay's per-plate median moved to its overall median). The x-axis
+    caption gives the share of PC1 explained by plate in each view, which shows
+    residual plate structure that the per-sample medians alone cannot.
+    """
     go, _ = _import_plotly()
     from pyprideap.viz.theme import pride_color_discrete
 
@@ -2059,26 +2065,63 @@ def render_plate_signal(data: BatchEffectData) -> Figure:
     many = len(data.plate_ids) > 12
     # Vendor plate IDs can be long file-like names; use short labels and keep the name on hover
     short = any(len(p) > _MAX_PLATE_LABEL for p in data.plate_ids)
+    views = [("As deposited", data.plate_sample_medians, data.plate_r2)]
+    if data.corrected_sample_medians:
+        views.append(("Plate-centred", data.corrected_sample_medians, data.corrected_plate_r2))
+
     fig = go.Figure()
-    for i, (plate, values, color) in enumerate(zip(data.plate_ids, data.plate_sample_medians, colors), start=1):
-        fig.add_trace(
-            go.Box(
-                y=values,
-                name=f"Plate {i}" if short else plate,
-                marker_color=color,
-                boxpoints="outliers",
-                hovertemplate=f"{plate}<br>%{{y:.2f}}<extra></extra>",
+    for v, (_, medians, _) in enumerate(views):
+        for i, (plate, values, color) in enumerate(zip(data.plate_ids, medians, colors), start=1):
+            fig.add_trace(
+                go.Box(
+                    y=values,
+                    name=f"Plate {i}" if short else plate,
+                    marker_color=color,
+                    boxpoints="outliers",
+                    hovertemplate=f"{plate}<br>%{{y:.2f}}<extra></extra>",
+                    visible=v == 0,
+                )
             )
+
+    def caption(r2: list[float]) -> str:
+        """x-axis caption: plate count and the share of PC1 explained by plate in this view."""
+        parts = [f"{len(data.plate_ids)} plates"]
+        if r2:
+            parts.append(f"plate explains {r2[0]:.0%} of PC1")
+        return " · ".join(parts)
+
+    n = len(data.plate_ids)
+    buttons = [
+        dict(
+            label=label,
+            method="update",
+            args=[{"visible": [k // n == v for k in range(n * len(views))]}, {"xaxis.title.text": caption(r2)}],
         )
+        for v, (label, _, r2) in enumerate(views)
+    ]
     fig.update_layout(
         title="Sample Signal by Plate",
         yaxis_title=data.value_label + " per sample",
-        xaxis=dict(
-            showticklabels=not many,
-            title=f"Plates (n = {len(data.plate_ids)})" if many or short else "",
-        ),
+        xaxis=dict(showticklabels=not many, title=caption(views[0][2])),
         showlegend=False,
     )
+    if len(views) > 1:
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="right",
+                    buttons=buttons,
+                    showactive=True,
+                    x=1,
+                    xanchor="right",
+                    y=1.02,
+                    yanchor="bottom",
+                    pad=dict(r=0, t=0),
+                    font=dict(size=11),
+                )
+            ]
+        )
     return fig
 
 

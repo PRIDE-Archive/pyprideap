@@ -1356,3 +1356,51 @@ class TestQcLodSummary:
         names = [t.name for t in fig.data]
         assert names[0] == "PASS & NPX > LOD: 45,827 (100.0%)" and names[1] == "WARN & NPX > LOD: 0 (0.0%)"
         assert "%{y:.1f}%" in fig.data[0].hovertemplate
+
+
+class TestPlateSignalCorrection:
+    """Issue #49: toggle between deposited and plate-centred signal."""
+
+    @staticmethod
+    def _two_plates(offset=1.0, seed=0):
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        n, p = 20, 30
+        expr = rng.normal(0, 1, (n, p))
+        expr[n // 2 :] += offset  # plate 2 shifted by a constant
+        return AffinityDataset(
+            platform=Platform.OLINK_EXPLORE,
+            samples=pd.DataFrame(
+                {
+                    "SampleID": [f"S{i}" for i in range(n)],
+                    "SampleType": "SAMPLE",
+                    "PlateID": ["P1"] * (n // 2) + ["P2"] * (n // 2),
+                }
+            ),
+            features=pd.DataFrame({"OlinkID": [f"O{j}" for j in range(p)], "UniProt": [f"P{j}" for j in range(p)]}),
+            expression=pd.DataFrame(expr, columns=[f"O{j}" for j in range(p)]),
+            metadata={},
+        )
+
+    def test_centring_removes_a_plate_offset(self):
+        import numpy as np
+
+        from pyprideap.viz.qc.compute import compute_batch_effect
+
+        b = compute_batch_effect(self._two_plates(offset=2.0))
+        raw = [np.median(v) for v in b.plate_sample_medians]
+        centred = [np.median(v) for v in b.corrected_sample_medians]
+        assert raw[1] - raw[0] > 1.5 and abs(centred[1] - centred[0]) < 0.3
+        assert b.plate_r2[0] > 0.5 and b.corrected_plate_r2[0] < 0.2
+
+    def test_render_has_toggle_and_pc1_caption(self):
+        from pyprideap.viz.qc.compute import compute_batch_effect
+        from pyprideap.viz.qc.render import render_plate_signal
+
+        fig = render_plate_signal(compute_batch_effect(self._two_plates(offset=2.0)))
+        buttons = fig.layout.updatemenus[0].buttons
+        assert [b.label for b in buttons] == ["As deposited", "Plate-centred"]
+        assert [t.visible for t in fig.data] == [True, True, False, False]
+        assert buttons[1].args[0]["visible"] == [False, False, True, True]
+        assert "of PC1" in fig.layout.xaxis.title.text and "of PC1" in buttons[1].args[1]["xaxis.title.text"]

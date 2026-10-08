@@ -1515,10 +1515,45 @@ class BatchEffectData:
     plate_sample_medians: list[list[float]]  # per plate: per-sample median signal
     value_label: str
     title: str = "Plate Effect on Principal Components"
+    # Same quantities after plate median centring (each assay's per-plate median moved
+    # to its overall median), to show residual plate structure
+    corrected_sample_medians: list[list[float]] = field(default_factory=list)
+    corrected_plate_r2: list[float] = field(default_factory=list)
 
 
 def _plate_column(samples: pd.DataFrame) -> str | None:
     return next((c for c in ("PlateId", "PlateID") if c in samples.columns), None)
+
+
+def _plate_pca_r2(numeric: pd.DataFrame, plates: pd.Series, n_components: int) -> tuple[list[float], list[float]]:
+    """Variance explained by the top PCs, and the share of each PC explained by plate (eta squared).
+
+    Missing values are median-imputed per assay before the PCA.
+    """
+    filled = numeric.fillna(numeric.median())
+    centered = filled.to_numpy(dtype=float) - filled.to_numpy(dtype=float).mean(axis=0)
+    n_comp = min(n_components, centered.shape[0] - 1, centered.shape[1])
+    try:
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=n_comp, svd_solver="randomized", random_state=0)
+        scores = pca.fit_transform(centered)
+        var_ratio = pca.explained_variance_ratio_
+    except ImportError:
+        u, sv, _ = np.linalg.svd(centered, full_matrices=False)
+        scores = u[:, :n_comp] * sv[:n_comp]
+        var_ratio = (sv**2 / np.sum(sv**2))[:n_comp]
+
+    codes = pd.Categorical(plates).codes
+    r2 = []
+    for k in range(n_comp):
+        pc = scores[:, k]
+        total = float(np.sum((pc - pc.mean()) ** 2))
+        between = sum(
+            float((codes == g).sum()) * float(pc[codes == g].mean() - pc.mean()) ** 2 for g in np.unique(codes)
+        )
+        r2.append(round(between / total, 4) if total > 0 else 0.0)
+    return [float(v) for v in var_ratio], r2
 
 
 def compute_batch_effect(dataset: AffinityDataset, n_components: int = 5) -> BatchEffectData | None:
@@ -1552,39 +1587,24 @@ def compute_batch_effect(dataset: AffinityDataset, n_components: int = 5) -> Bat
     if numeric.shape[1] < 2:
         return None
 
-    filled = numeric.fillna(numeric.median())
-    centered = filled.to_numpy(dtype=float) - filled.to_numpy(dtype=float).mean(axis=0)
-    n_comp = min(n_components, centered.shape[0] - 1, centered.shape[1])
-    try:
-        from sklearn.decomposition import PCA
+    var_ratio, r2 = _plate_pca_r2(numeric, plates, n_components)
 
-        pca = PCA(n_components=n_comp, svd_solver="randomized", random_state=0)
-        scores = pca.fit_transform(centered)
-        var_ratio = pca.explained_variance_ratio_
-    except ImportError:
-        u, sv, _ = np.linalg.svd(centered, full_matrices=False)
-        scores = u[:, :n_comp] * sv[:n_comp]
-        var_ratio = (sv**2 / np.sum(sv**2))[:n_comp]
-
-    codes = pd.Categorical(plates).codes
-    r2 = []
-    for k in range(n_comp):
-        pc = scores[:, k]
-        total = float(np.sum((pc - pc.mean()) ** 2))
-        between = sum(
-            float((codes == g).sum()) * float(pc[codes == g].mean() - pc.mean()) ** 2 for g in np.unique(codes)
-        )
-        r2.append(round(between / total, 4) if total > 0 else 0.0)
+    # Plate median centring: per assay, shift each plate's median to the overall median
+    plate_medians = numeric.groupby(plates.to_numpy()).transform("median")
+    corrected = numeric - plate_medians + numeric.median()
+    _, corrected_r2 = _plate_pca_r2(corrected, plates, n_components)
 
     sample_medians = numeric.median(axis=1)
     plate_ids = sorted(plates.unique(), key=str)
     return BatchEffectData(
-        pc_labels=[f"PC{k + 1}" for k in range(n_comp)],
+        pc_labels=[f"PC{k + 1}" for k in range(len(r2))],
         variance_explained=[round(float(v), 4) for v in var_ratio],
         plate_r2=r2,
         plate_ids=[str(p) for p in plate_ids],
         plate_sample_medians=[sample_medians[plates == p].round(4).tolist() for p in plate_ids],
         value_label=value_label,
+        corrected_sample_medians=[corrected.median(axis=1)[plates == p].round(4).tolist() for p in plate_ids],
+        corrected_plate_r2=corrected_r2,
     )
 
 
