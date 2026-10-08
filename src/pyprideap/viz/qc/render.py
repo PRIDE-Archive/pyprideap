@@ -60,6 +60,13 @@ _QC_LOD_COLORS = {
     "WARN & RFU ≤ LOD": "#e74c3c",
     "FAIL & RFU > LOD": "#95a5a6",
     "FAIL & RFU ≤ LOD": "#7f8c8d",
+    "PASS & no value": "#d5f5e3",
+    "WARN & no value": "#fdebd0",
+    "FAIL & no value": "#566573",
+    "No QC flag & NPX > LOD": "#bdc3c7",
+    "No QC flag & NPX ≤ LOD": "#dfe6e9",
+    "No QC flag & RFU > LOD": "#bdc3c7",
+    "No QC flag & RFU ≤ LOD": "#dfe6e9",
     # LOD-only summary when SampleQC is absent
     "NPX > LOD": "#2ecc71",
     "NPX ≤ LOD": "#f39c12",
@@ -235,68 +242,108 @@ def _render_distribution_summary(data: DistributionData) -> Figure:
 
 
 def render_qc_summary(data: QcLodSummaryData) -> Figure:
-    """QC × LOD stacked bar or simple QC bar chart."""
+    """QC x LOD stacked bar with a legend listing every category, empty ones included."""
     go, _ = _import_plotly()
 
     total = sum(data.counts)
-    colors = [_QC_LOD_COLORS.get(c, "#3498db") for c in data.categories]
-
     fig = go.Figure()
-    cumulative = 0.0
-    for cat, cnt, color in zip(data.categories, data.counts, colors):
-        pct = cnt / total * 100 if total > 0 else 0
+    for cat, cnt in zip(data.categories, data.counts):
+        pct = cnt / total * 100 if total > 0 else 0.0
         fig.add_trace(
             go.Bar(
-                x=["Samples"],
+                x=["All measurements"],
                 y=[pct],
-                name=f"{cat} {cnt} ({pct:.1f}%)",
-                marker_color=color,
-                text=f"{pct:.1f}%",
+                name=f"{cat}: {cnt:,} ({pct:.1f}%)",
+                marker_color=_QC_LOD_COLORS.get(cat, "#3498db"),
+                text=f"{pct:.1f}%" if pct >= 3 else "",
                 textposition="inside",
+                customdata=[[cat, cnt]],
+                hovertemplate="%{customdata[0]}<br>%{customdata[1]:,} measurements (%{y:.1f}%)<extra></extra>",
             )
         )
-        cumulative += pct
 
     fig.update_layout(
         title=data.title,
         barmode="stack",
-        yaxis_title="% of Measurements",
+        xaxis_title=f"{total:,} sample–protein measurements",
+        yaxis_title="% of measurements",
         yaxis=dict(range=[0, 100], ticksuffix="%"),
-        showlegend=False,
+        showlegend=True,
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", font=dict(size=12)),
+        hoverlabel=dict(namelength=-1),
     )
     return fig
 
 
 def render_lod_analysis(data: LodAnalysisData) -> Figure:
+    """Proteins ranked by % of study samples above LOD; negative controls as a dashed line."""
     go, px = _import_plotly()
     import pandas as pd
 
     df = pd.DataFrame({"Assay": data.assay_ids, "% Above LOD": data.above_lod_pct, "Panel": data.panel})
-    df = df.sort_values("% Above LOD", ascending=False).reset_index(drop=True)
+    if data.negative_above_lod_pct:
+        df["% Negatives above LOD"] = data.negative_above_lod_pct
+    df = df.sort_values("% Above LOD", ascending=False, kind="stable").reset_index(drop=True)
     df["Rank"] = range(1, len(df) + 1)
 
     panels = sorted(df["Panel"].unique())
     colors = px.colors.qualitative.Set2
     panel_colors = {p: colors[i % len(colors)] for i, p in enumerate(panels)}
+    study_label = f"study samples (n = {data.n_study})" if data.n_study else "samples"
 
     fig = go.Figure()
     for panel in panels:
         sub = df[df["Panel"] == panel]
+        name = panel or "Study samples"
+        if data.n_study and panel:
+            name = f"{panel} · {study_label}"
+        elif data.n_study:
+            name = study_label[0].upper() + study_label[1:]
         fig.add_trace(
             go.Scatter(
                 x=sub["Rank"],
                 y=sub["% Above LOD"],
                 mode="markers",
                 marker=dict(size=4, color=panel_colors[panel]),
-                name=panel,
+                name=name,
                 text=sub["Assay"],
-                hovertemplate="%{text}<br>%{y:.1f}% above LOD<extra></extra>",
+                hovertemplate="%{text}<br>%{y:.1f}% of " + study_label + " above LOD<extra></extra>",
             ),
         )
 
+    if data.negative_above_lod_pct:
+        # Each protein's value (few controls give few distinct levels) and a running mean
+        # along the ranking, which shows where background signal concentrates
+        window = max(5, len(df) // 40)
+        trend = df["% Negatives above LOD"].rolling(window, center=True, min_periods=1).mean()
+        fig.add_trace(
+            go.Scatter(
+                x=df["Rank"],
+                y=df["% Negatives above LOD"],
+                mode="markers",
+                marker=dict(size=3, color="#95a5a6", opacity=0.45),
+                name=f"Negative controls (n = {data.n_negative})",
+                legendgroup="negatives",
+                text=df["Assay"],
+                hovertemplate="%{text}<br>%{y:.1f}% of negative controls above LOD<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df["Rank"],
+                y=trend,
+                mode="lines",
+                line=dict(color="#2c3e50", dash="dash", width=2),
+                name=f"Negative controls, running mean ({window} proteins)",
+                legendgroup="negatives",
+                hoverinfo="skip",
+            )
+        )
+
     unit = getattr(data, "unit", "NPX")
-    fig.update_xaxes(title_text="Protein Rank (by detectability)")
-    fig.update_yaxes(title_text=f"% Samples with {unit} > LOD")
+    who = "study samples" if data.n_study else "samples"
+    fig.update_xaxes(title_text="Protein rank (by detectability in study samples)")
+    fig.update_yaxes(title_text=f"% {who} with {unit} > LOD", range=[-3, 103])
     fig.update_layout(
         title=data.title,
         height=500,
@@ -306,49 +353,113 @@ def render_lod_analysis(data: LodAnalysisData) -> Figure:
     return fig
 
 
-def render_pca(data: PcaData) -> Figure:
-    _, px = _import_plotly()
-    import pandas as pd
+def _scatter_by(
+    x: list[float],
+    y: list[float],
+    labels: list[str],
+    options: dict[str, list[str]],
+    *,
+    title: str,
+    x_title: str,
+    y_title: str,
+) -> Figure:
+    """Sample scatter coloured by the first of *options*, with a "Colour by" dropdown.
 
-    df = pd.DataFrame({"PC1": data.pc1, "PC2": data.pc2, "Label": data.labels, "Group": data.groups})
-    ve = data.variance_explained
-    fig = px.scatter(
-        df,
-        x="PC1",
-        y="PC2",
-        color="Group",
-        text="Label",
-        hover_data=["Label"],
-        title=data.title,
-        labels={
-            "PC1": f"PC1 ({ve[0] * 100:.1f}%)" if len(ve) > 0 else "PC1",
-            "PC2": f"PC2 ({ve[1] * 100:.1f}%)" if len(ve) > 1 else "PC2",
-        },
+    One set of traces per colouring; the dropdown shows one set at a time. With a
+    single option there is no dropdown.
+    """
+    go, _ = _import_plotly()
+    from pyprideap.viz.theme import pride_color_discrete
+
+    fig = go.Figure()
+    spans: list[tuple[int, int]] = []
+    for k, (option, values) in enumerate(options.items()):
+        start = len(fig.data)
+        groups = sorted(set(values), key=lambda g: (g in ("Control samples", "Not annotated"), g))
+        colors = pride_color_discrete(len(groups))
+        for group, color in zip(groups, colors):
+            idx = [i for i, v in enumerate(values) if v == group]
+            fig.add_trace(
+                go.Scatter(
+                    x=[x[i] for i in idx],
+                    y=[y[i] for i in idx],
+                    mode="markers",
+                    marker=dict(size=10, color="#bdc3c7" if group in ("Control samples", "Not annotated") else color),
+                    text=[labels[i] for i in idx],
+                    textposition="top center",
+                    name=group or "(none)",
+                    legendgroup=option,
+                    hovertemplate="%{text}<br>" + option + ": " + (group or "(none)") + "<extra></extra>",
+                    visible=k == 0,
+                )
+            )
+        spans.append((start, len(fig.data)))
+
+    first = next(iter(options), "")
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+        legend_title_text=first,
+        legend=dict(orientation="h", yanchor="top", y=-0.18, x=0, xanchor="left"),
+        margin=dict(b=90),
     )
-    fig.update_traces(mode="markers", textposition="top center", marker=dict(size=10))
+    if len(options) > 1:
+        n = len(fig.data)
+        buttons = [
+            dict(
+                label=f"Colour by: {option}",
+                method="update",
+                args=[{"visible": [lo <= t < hi for t in range(n)]}, {"legend.title.text": option}],
+            )
+            for option, (lo, hi) in zip(options, spans)
+        ]
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    type="dropdown",
+                    direction="down",
+                    buttons=buttons,
+                    active=0,
+                    x=1,
+                    xanchor="right",
+                    y=1.02,
+                    yanchor="bottom",
+                    pad=dict(r=0, t=0),
+                    font=dict(size=11),
+                )
+            ]
+        )
     return fig
+
+
+def render_pca(data: PcaData) -> Figure:
+    ve = data.variance_explained
+    options = data.color_options or {"Sample type": data.groups}
+    return _scatter_by(
+        data.pc1,
+        data.pc2,
+        data.labels,
+        options,
+        title=data.title,
+        x_title=f"PC1 ({ve[0] * 100:.1f}%)" if len(ve) > 0 else "PC1",
+        y_title=f"PC2 ({ve[1] * 100:.1f}%)" if len(ve) > 1 else "PC2",
+    )
 
 
 def render_tsne(data: UmapData) -> Figure:
     """Standalone t-SNE scatter plot."""
-    _, px = _import_plotly()
-    import pandas as pd
-
     method = data.title  # "t-SNE" or legacy "UMAP"
-    x_label = f"{method} 1"
-    y_label = f"{method} 2"
-    df = pd.DataFrame({x_label: data.x, y_label: data.y, "Label": data.labels, "Group": data.groups})
-    fig = px.scatter(
-        df,
-        x=x_label,
-        y=y_label,
-        color="Group",
-        text="Label",
-        hover_data=["Label"],
+    options = data.color_options or {"Sample type": data.groups}
+    return _scatter_by(
+        data.x,
+        data.y,
+        data.labels,
+        options,
         title=f"{method} Projection",
+        x_title=f"{method} 1",
+        y_title=f"{method} 2",
     )
-    fig.update_traces(mode="markers", textposition="top center", marker=dict(size=10))
-    return fig
 
 
 # Keep old name for backwards compatibility
@@ -2043,7 +2154,13 @@ def render_batch_effect(data: BatchEffectData) -> Figure:
 
 
 def render_plate_signal(data: BatchEffectData) -> Figure:
-    """Per-sample median signal by plate (study samples)."""
+    """Per-sample median signal by plate (study samples), as deposited and after plate centring.
+
+    Two buttons switch between the deposited values and plate median centring
+    (each assay's per-plate median moved to its overall median). The x-axis
+    caption gives the share of PC1 explained by plate in each view, which shows
+    residual plate structure that the per-sample medians alone cannot.
+    """
     go, _ = _import_plotly()
     from pyprideap.viz.theme import pride_color_discrete
 
@@ -2051,26 +2168,63 @@ def render_plate_signal(data: BatchEffectData) -> Figure:
     many = len(data.plate_ids) > 12
     # Vendor plate IDs can be long file-like names; use short labels and keep the name on hover
     short = any(len(p) > _MAX_PLATE_LABEL for p in data.plate_ids)
+    views = [("As deposited", data.plate_sample_medians, data.plate_r2)]
+    if data.corrected_sample_medians:
+        views.append(("Plate-centred", data.corrected_sample_medians, data.corrected_plate_r2))
+
     fig = go.Figure()
-    for i, (plate, values, color) in enumerate(zip(data.plate_ids, data.plate_sample_medians, colors), start=1):
-        fig.add_trace(
-            go.Box(
-                y=values,
-                name=f"Plate {i}" if short else plate,
-                marker_color=color,
-                boxpoints="outliers",
-                hovertemplate=f"{plate}<br>%{{y:.2f}}<extra></extra>",
+    for v, (_, medians, _) in enumerate(views):
+        for i, (plate, values, color) in enumerate(zip(data.plate_ids, medians, colors), start=1):
+            fig.add_trace(
+                go.Box(
+                    y=values,
+                    name=f"Plate {i}" if short else plate,
+                    marker_color=color,
+                    boxpoints="outliers",
+                    hovertemplate=f"{plate}<br>%{{y:.2f}}<extra></extra>",
+                    visible=v == 0,
+                )
             )
+
+    def caption(r2: list[float]) -> str:
+        """x-axis caption: plate count and the share of PC1 explained by plate in this view."""
+        parts = [f"{len(data.plate_ids)} plates"]
+        if r2:
+            parts.append(f"plate explains {r2[0]:.0%} of PC1")
+        return " · ".join(parts)
+
+    n = len(data.plate_ids)
+    buttons = [
+        dict(
+            label=label,
+            method="update",
+            args=[{"visible": [k // n == v for k in range(n * len(views))]}, {"xaxis.title.text": caption(r2)}],
         )
+        for v, (label, _, r2) in enumerate(views)
+    ]
     fig.update_layout(
         title="Sample Signal by Plate",
         yaxis_title=data.value_label + " per sample",
-        xaxis=dict(
-            showticklabels=not many,
-            title=f"Plates (n = {len(data.plate_ids)})" if many or short else "",
-        ),
+        xaxis=dict(showticklabels=not many, title=caption(views[0][2])),
         showlegend=False,
     )
+    if len(views) > 1:
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="right",
+                    buttons=buttons,
+                    showactive=True,
+                    x=1,
+                    xanchor="right",
+                    y=1.02,
+                    yanchor="bottom",
+                    pad=dict(r=0, t=0),
+                    font=dict(size=11),
+                )
+            ]
+        )
     return fig
 
 
