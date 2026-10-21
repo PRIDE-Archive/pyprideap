@@ -7,6 +7,13 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from pyprideap.core import AffinityDataset
+from pyprideap.io.readers.nulisa import (
+    NULISA_LONG_MARKER_COLS,
+    is_nulisa_workbook,
+    is_nulisa_xml,
+    read_nulisa_csv,
+    read_nulisa_xlsx,
+)
 from pyprideap.io.readers.olink_csv import _OLINK_COLUMN_ALIASES, read_olink_csv
 from pyprideap.io.readers.olink_parquet import read_olink_parquet
 from pyprideap.io.readers.olink_xlsx import read_olink_xlsx
@@ -28,6 +35,13 @@ def detect_format(path: str | Path) -> str:
         logger.debug("Format detected: somascan_adat (suffix=%s)", suffix)
         return "somascan_adat"
 
+    if suffix == ".xml" and is_nulisa_xml(path):
+        raise ValueError(
+            f"{path.name} is a NULISAseq instrument XML (raw read counts); QC uses the NPQ export of "
+            "the same run (NPQ long format CSV or NPQ workbook). The XML is read alongside it for "
+            "UniProt IDs and plate QC."
+        )
+
     if suffix == ".parquet":
         schema = pq.read_schema(path)
         cols = {_OLINK_COLUMN_ALIASES.get(c, c) for c in schema.names}
@@ -47,6 +61,9 @@ def detect_format(path: str | Path) -> str:
         if is_somascan_table_csv(path):
             logger.debug("Format detected: somascan table CSV (ADAT table exported as CSV)")
             return "somascan_adat"
+        if NULISA_LONG_MARKER_COLS <= set(pd.read_csv(path, nrows=0, sep=None, engine="python").columns):
+            logger.debug("Format detected: nulisa_csv (NPQ long format)")
+            return "nulisa_csv"
 
     if name.endswith(".npx.csv") or name.endswith(".ct.csv"):
         logger.debug("Format detected: olink_csv (name pattern=%s)", name)
@@ -62,6 +79,10 @@ def detect_format(path: str | Path) -> str:
         if _OLINK_MARKER_COLS.issubset(cols):
             logger.debug("Format detected: olink_csv (column inspection)")
             return "olink_csv"
+
+    if suffix == ".xlsx" and is_nulisa_workbook(path):
+        logger.debug("Format detected: nulisa_xlsx (NPQ workbook)")
+        return "nulisa_xlsx"
 
     if suffix == ".xlsx":
         df_head = pd.read_excel(path, nrows=1)
@@ -81,18 +102,20 @@ def read(path: str | Path, *, platform: str | None = None) -> AffinityDataset:
     path : str or Path
         Path to the data file.
     platform : str or None
-        Force platform type: ``"olink"`` or ``"somascan"``.
+        Force platform type: ``"olink"``, ``"somascan"`` or ``"nulisa"``.
         If *None* (default), the format is auto-detected from the file.
     """
     if platform is not None:
         platform = platform.lower()
-        if platform not in ("olink", "somascan"):
-            raise ValueError(f"platform must be 'olink' or 'somascan', got '{platform}'")
+        if platform not in ("olink", "somascan", "nulisa"):
+            raise ValueError(f"platform must be 'olink', 'somascan' or 'nulisa', got '{platform}'")
 
     if platform is not None:
         path = Path(path)
         suffix = path.suffix.lower()
         logger.debug("Platform forced: %s, suffix=%s", platform, suffix)
+        if platform == "nulisa":
+            return read_nulisa_xlsx(path) if suffix == ".xlsx" else read_nulisa_csv(path)
         if platform == "somascan":
             if suffix == ".adat":
                 return read_somascan_adat(path)
@@ -112,5 +135,7 @@ def read(path: str | Path, *, platform: str | None = None) -> AffinityDataset:
         "olink_csv": read_olink_csv,
         "olink_xlsx": read_olink_xlsx,
         "somascan_csv": read_somascan_csv,
+        "nulisa_csv": read_nulisa_csv,
+        "nulisa_xlsx": read_nulisa_xlsx,
     }
     return readers[fmt](path)

@@ -33,6 +33,11 @@ _CONTROL_SAMPLE_TYPES = frozenset(
         "buffer",
         "buffer control",
         "blank",
+        # NULISAseq: negative, sample and inter-plate controls
+        "nc",
+        "sc",
+        "ipc",
+        "inter plate control",
     }
 )
 

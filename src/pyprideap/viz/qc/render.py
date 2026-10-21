@@ -19,6 +19,7 @@ from pyprideap.viz.qc.compute import (
     LodComparisonData,
     NormScaleBoxplotData,
     NormScaleData,
+    NulisaQcData,
     OutlierMapData,
     PcaData,
     PlateCvData,
@@ -63,6 +64,16 @@ _QC_LOD_COLORS = {
     "PASS & no value": "#d5f5e3",
     "WARN & no value": "#fdebd0",
     "FAIL & no value": "#566573",
+    "PASS & NPQ > LOD": "#2ecc71",
+    "PASS & NPQ ≤ LOD": "#3498db",
+    "WARN & NPQ > LOD": "#f39c12",
+    "WARN & NPQ ≤ LOD": "#e74c3c",
+    "FAIL & NPQ > LOD": "#95a5a6",
+    "FAIL & NPQ ≤ LOD": "#7f8c8d",
+    "No QC flag & NPQ > LOD": "#bdc3c7",
+    "No QC flag & NPQ ≤ LOD": "#dfe6e9",
+    "NPQ > LOD": "#2ecc71",
+    "NPQ ≤ LOD": "#f39c12",
     "No QC flag & NPX > LOD": "#bdc3c7",
     "No QC flag & NPX ≤ LOD": "#dfe6e9",
     "No QC flag & RFU > LOD": "#bdc3c7",
@@ -2409,5 +2420,80 @@ def render_sex_check(data: SexCheckData) -> Figure:
             tickvals=list(range(len(groups))), ticktext=labels, title="Annotated sex" if groups != ["all"] else ""
         ),
         showlegend=False,
+    )
+    return fig
+
+
+def render_nulisa_qc(data: NulisaQcData) -> Figure:
+    """NULISAseq per-sample QC metrics by sample type, with the vendor thresholds."""
+    go, _ = _import_plotly()
+    from plotly.subplots import make_subplots
+
+    metrics = data.metrics
+    cols = 2
+    rows = max(1, (len(metrics) + cols - 1) // cols)
+    fig = make_subplots(rows=rows, cols=cols, subplot_titles=[m.label for m in metrics], vertical_spacing=0.16)
+    order = ["Sample", "SC", "IPC", "NC"]
+    types = sorted(set(data.sample_types), key=lambda t: (order.index(t) if t in order else len(order), t))
+    for k, metric in enumerate(metrics):
+        r, c = k // cols + 1, k % cols + 1
+        for t in types:
+            idx = [i for i, st in enumerate(data.sample_types) if st == t]
+            flagged = [i for i in idx if metric.status and metric.status[i] not in ("PASS", "", "NAN")]
+            fig.add_trace(
+                go.Box(
+                    x=[t] * len(idx),
+                    y=[metric.values[i] for i in idx],
+                    name=t,
+                    boxpoints="all",
+                    jitter=0.4,
+                    pointpos=0,
+                    fillcolor="rgba(0,0,0,0)",
+                    line=dict(color="#95a5a6", width=1),
+                    marker=dict(size=6, color="#3498db"),
+                    text=[data.sample_ids[i] for i in idx],
+                    hovertemplate="%{text}<br>" + metric.label + ": %{y:,.4g}<extra></extra>",
+                    showlegend=False,
+                ),
+                row=r,
+                col=c,
+            )
+            if flagged:
+                # Samples flagged by the NULISAseq software, drawn over their box
+                fig.add_trace(
+                    go.Scatter(
+                        x=[t] * len(flagged),
+                        y=[metric.values[i] for i in flagged],
+                        mode="markers",
+                        marker=dict(size=9, color="#e74c3c", line=dict(color="white", width=1)),
+                        text=[f"{data.sample_ids[i]} ({metric.status[i]})" for i in flagged],
+                        hovertemplate="%{text}<br>" + metric.label + ": %{y:,.4g}<extra></extra>",
+                        showlegend=False,
+                    ),
+                    row=r,
+                    col=c,
+                )
+        for limit in metric.thresholds:
+            fig.add_hline(y=limit, line_dash="dash", line_color="#e74c3c", line_width=1.5, row=r, col=c)
+        if metric.key in ("QC_Reads", "QC_ICReads"):
+            fig.update_yaxes(type="log", row=r, col=c)
+    fig.update_layout(
+        title=data.title,
+        height=300 * rows + 80,
+        showlegend=False,
+        margin=dict(t=90),
+        annotations=[
+            *fig.layout.annotations,
+            dict(
+                text="red points: samples flagged WARN by the NULISAseq software · dashed lines: thresholds",
+                xref="paper",
+                yref="paper",
+                x=0,
+                y=1.12,
+                showarrow=False,
+                xanchor="left",
+                font=dict(size=11, color="#7f8c8d"),
+            ),
+        ],
     )
     return fig

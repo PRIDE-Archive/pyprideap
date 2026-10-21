@@ -25,6 +25,7 @@ from pyprideap.viz.qc.compute import (
     LodAnalysisData,
     LodComparisonData,
     NormScaleData,
+    NulisaQcData,
     PcaData,
     PlateCvData,
     PreanalyticalData,
@@ -43,6 +44,16 @@ from pyprideap.viz.qc.compute import (
 logger = logging.getLogger(__name__)
 
 _HELP_TEXT: dict[str, str] = {
+    "nulisa_qc": (
+        "Sample QC metrics reported by the NULISAseq software, per sample and by sample type "
+        "(study samples, sample controls SC, inter-plate controls IPC, negative controls NC), "
+        "with the vendor thresholds as dashed lines: total reads per sample (minimum 500,000), "
+        "internal control (IC, mCherry) reads (minimum 1,000), IC reads relative to the plate "
+        "median (within &plusmn;40%), and detectability (share of targets above LOD; "
+        "informational). Samples flagged WARN by the software are shown in red. Thresholds are "
+        "read from the instrument XML when it was deposited next to the data. The plate (run) QC "
+        "metrics are listed in the summary table."
+    ),
     "readiness": (
         "Whether the information needed to interpret this QC and to reproduce the published analyses "
         "is present in the data file or a linked SDRF: sample types (controls), plates, limit of "
@@ -354,7 +365,7 @@ _SECTION_ORDER = [
     ("Sample Relationships", ["dimreduction", "correlation", "rank_concordance", "heatmap"]),
     ("Normalization QC", ["norm_scale"]),
     ("Variability", ["cv_distribution", "replicate_cv", "mpi", "dynamic_range", "plate_cv"]),
-    ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags"]),
+    ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags", "nulisa_qc"]),
     ("Pre-analytical & Sample Identity", ["preanalytical", "sex_check"]),
     ("Dilution QC", ["dilution_cv", "dilution_norm_scale"]),
     ("Assay QC", ["iqr_median_qc", "uniprot_duplicates"]),
@@ -791,6 +802,19 @@ def _lod_source_info(dataset: AffinityDataset) -> dict[str, Any]:
                     "detail": "No buffer samples (SampleType = 'Buffer') found for eLOD computation",
                 }
             )
+    elif dataset.platform == Platform.NULISA:
+        # NULISA: one LOD per target, computed by the NULISAseq software from the
+        # negative controls (in NPQ); there is no alternative source
+        has_lod = get_reported_lod(dataset) is not None
+        sources.append(
+            {
+                "name": "Reported LOD",
+                "status": "available" if has_lod else "unavailable",
+                "detail": "Target LOD in NPQ from the NULISAseq export (derived from negative controls)"
+                if has_lod
+                else "No LOD column in the NULISAseq export",
+            }
+        )
     else:
         # Olink: Reported LOD, NCLOD, and FixedLOD
         # 1. Reported LOD
@@ -1325,6 +1349,30 @@ def _render_summary_table(
                 _summary_row("", "Median rank concordance", f"{rc_data.median:.2f} ({rc_data.n_pairs} sample pairs)")
             )
 
+    # --- NULISA run (plate) QC, as reported by the NULISAseq software ---
+    nulisa = plot_data.get("nulisa_qc")
+    if isinstance(nulisa, NulisaQcData) and nulisa.plate_qc:
+        rows.append(_summary_group("NULISA Run QC"))
+        for plate in nulisa.plate_qc:
+            prefix = f"{html_mod.escape(str(plate.get('plate', '')))[:40]}: " if len(nulisa.plate_qc) > 1 else ""
+            plate_metrics = plate.get("metrics", [])
+            for m in plate_metrics if isinstance(plate_metrics, list) else []:
+                value = float(m["value"])
+                shown = f"{value:.1%}" if m.get("format") == "percentage" else f"{value:,.0f}"
+                limit = str(m.get("threshold", ""))
+                op = str(m.get("operator", ""))
+                if op and op != "none" and limit:
+                    try:
+                        t = float(limit.split(",")[0])
+                        bound = f"{t:.0%}" if m.get("format") == "percentage" else f"{t:,.0f}"
+                        shown += f" (limit {'≤' if op == '>' else '≥'} {bound})"
+                    except ValueError:
+                        pass
+                    dot = _status_dot("green" if m.get("passed") else "red")
+                else:
+                    dot = ""
+                rows.append(_summary_row(dot, f"{prefix}{html_mod.escape(str(m.get('label', m.get('name'))))}", shown))
+
     # --- QC Status (Olink only) ---
     qc_flags = plot_data.get("qc_flags")
     worst = qc_flags.sample_worst if isinstance(qc_flags, QcFlagData) else {}
@@ -1335,8 +1383,12 @@ def _render_summary_table(
             qc_counts = pd.Series(worst)
             qc_label = "PASS / WARN / FAIL (study samples, worst block)"
         else:
-            qc_counts = samples["SampleQC"].value_counts()
-            qc_label = "PASS / WARN / FAIL"
+            # Controls (e.g. NULISA negative controls, which have no read metrics) are excluded
+            from pyprideap.processing.filtering import control_sample_mask
+
+            study_rows = ~control_sample_mask(samples).to_numpy()
+            qc_counts = samples.loc[study_rows, "SampleQC"].astype(str).str.upper().value_counts()
+            qc_label = "PASS / WARN / FAIL (study samples)"
         n_pass = int(qc_counts.get("PASS", 0))
         n_warn = int(qc_counts.get("WARN", 0))
         n_fail = int(qc_counts.get("FAIL", 0))
@@ -1701,6 +1753,7 @@ def qc_report(
         "batch_effect": (BatchEffectData, R.render_batch_effect),
         "plate_signal": (BatchEffectData, R.render_plate_signal),
         "qc_flags": (QcFlagData, R.render_qc_flags),
+        "nulisa_qc": (NulisaQcData, R.render_nulisa_qc),
         "preanalytical": (PreanalyticalData, R.render_preanalytical),
         "dilution_cv": (DilutionQcData, R.render_dilution_cv),
         "dilution_norm_scale": (DilutionQcData, R.render_dilution_norm_scale),
@@ -2050,6 +2103,7 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("batch_effect", "half"),
             ("plate_signal", "half"),
             ("qc_flags", "full"),
+            ("nulisa_qc", "full"),
             ("preanalytical", "half"),
             ("sex_check", "half"),
             ("dilution_cv", "half"),
@@ -2255,6 +2309,7 @@ def qc_report_split(
         "batch_effect": (BatchEffectData, R.render_batch_effect),
         "plate_signal": (BatchEffectData, R.render_plate_signal),
         "qc_flags": (QcFlagData, R.render_qc_flags),
+        "nulisa_qc": (NulisaQcData, R.render_nulisa_qc),
         "preanalytical": (PreanalyticalData, R.render_preanalytical),
         "dilution_cv": (DilutionQcData, R.render_dilution_cv),
         "dilution_norm_scale": (DilutionQcData, R.render_dilution_norm_scale),

@@ -828,6 +828,10 @@ def resolve_lod_with_source(dataset: AffinityDataset) -> tuple[pd.DataFrame | pd
         except (ValueError, KeyError):
             return None, None
 
+    # NULISA reports its own per-target LOD; the Olink fallbacks do not apply
+    if dataset.platform == Platform.NULISA:
+        return None, None
+
     try:
         return compute_nclod(dataset, plate_adjusted=True), "NCLOD"
     except (ValueError, KeyError):
