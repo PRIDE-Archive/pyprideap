@@ -181,3 +181,90 @@ class TestNulisaQc:
         qc_report(ds, tmp_path / "full.html")
         full = (tmp_path / "full.html").read_text()
         assert 'id="nulisa_qc"' in full and "NULISA Sample" in full
+
+
+class TestReviewFixes:
+    """Copilot / CodeRabbit review of #59."""
+
+    def test_named_plate_never_takes_another_runs_xml(self, tmp_path):
+        from pyprideap.io.readers.nulisa import read_nulisa_csv
+
+        path = _write_long(tmp_path, with_xml=False)
+        (tmp_path / "other_run.xml").write_text(_XML)  # a different run's XML in the same folder
+        ds = read_nulisa_csv(path)
+        assert ds.features["UniProt"].isna().all() and "nulisa_plate_qc" not in ds.metadata
+
+    def test_without_xml_protein_count_and_report_do_not_crash(self, tmp_path):
+        from pyprideap.processing.lod import get_proteins_above_lod
+        from pyprideap.viz.qc.report import qc_report_split
+
+        ds = __import__("pyprideap").read(_write_long(tmp_path, with_xml=False))
+        assert get_proteins_above_lod(ds) == []
+        assert (qc_report_split(ds, tmp_path / "split") / "summary.html").exists()
+
+    def test_sample_on_two_plates_keeps_both_runs(self, tmp_path):
+        from pyprideap.io.readers.nulisa import read_nulisa_csv
+
+        path = _write_long(tmp_path, with_xml=False)
+        df = pd.read_csv(path)
+        rerun = df[(df["SampleName"] == "S0") & (df["Target"] != "mCherry")].assign(PlateID="second_plate.xml", NPQ=1.0)
+        pd.concat([df, rerun]).to_csv(path, index=False)
+        ds = read_nulisa_csv(path)
+        runs = ds.samples[ds.samples["SampleID"] == "S0"]
+        assert len(runs) == 2 and runs["SampleRun"].is_unique
+        values = ds.expression.loc[runs.index, "t1"].tolist()
+        assert 1.0 in values and any(v > 5 for v in values)  # both runs kept, not merged
+
+    def test_filtering_keeps_read_counts_aligned(self, tmp_path):
+        from pyprideap.processing.filtering import filter_controls
+
+        ds = filter_controls(__import__("pyprideap").read(_write_long(tmp_path)))
+        assert ds.metadata["read_count_matrix"].shape == ds.expression.shape
+
+    def test_csv_without_target_ids_is_rekeyed_after_annotation(self, tmp_path):
+        from pyprideap.io.readers.nulisa import read_nulisa_csv
+        from pyprideap.processing.lod import get_proteins_above_lod
+
+        path = _write_long(tmp_path)
+        pd.read_csv(path).drop(columns=["AlamarTargetID"]).to_csv(path, index=False)
+        ds = read_nulisa_csv(path)
+        assert ds.expression.columns.tolist() == [t for t, _, _ in _TARGETS]
+        assert ds.metadata["lod_matrix"].columns.tolist() == ds.expression.columns.tolist()
+        assert get_proteins_above_lod(ds) == sorted(u for _, _, u in _TARGETS)
+
+    def test_xml_without_target_ids_does_not_crash(self, tmp_path):
+        from pyprideap.io.readers.nulisa import read_nulisa_csv
+
+        path = _write_long(tmp_path)
+        (tmp_path / _PLATE).write_text('<?xml version="1.0"?><NULISAseq><Barcodes/></NULISAseq>')
+        assert read_nulisa_csv(path).features["UniProt"].isna().all()
+
+    def test_workbook_without_target_name_gives_clear_error(self, tmp_path):
+        from pyprideap.io.readers.nulisa import read_nulisa_xlsx
+
+        path = tmp_path / "bad.xlsx"
+        with pd.ExcelWriter(path) as xw:
+            pd.DataFrame({"name": ["AGER"], "S1": [1.0]}).to_excel(xw, sheet_name="NPQ", index=False)
+            pd.DataFrame({"name": ["AGER"]}).to_excel(xw, sheet_name="Annotation-Targets", index=False)
+        with pytest.raises(ValueError, match="targetName"):
+            read_nulisa_xlsx(path)
+
+    def test_forced_platform_on_xml_gives_clear_error(self, tmp_path):
+        from pyprideap.io.readers.registry import read
+
+        xml = tmp_path / _PLATE
+        xml.write_text(_XML)
+        with pytest.raises(ValueError, match="NPQ export"):
+            read(xml, platform="nulisa")
+
+    def test_incomplete_xml_range_threshold_falls_back_to_default(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_nulisa_qc
+
+        ds = __import__("pyprideap").read(_write_long(tmp_path))
+        ds.samples["QC_ICMedian"] = 0.0
+        ds.metadata["nulisa_sample_qc_thresholds"] = {
+            "IC_Median": {"thresholds": "0.5"},
+            "ICReads": {"thresholds": "nan"},
+        }
+        metrics = {m.key: m.thresholds for m in compute_nulisa_qc(ds).metrics}
+        assert metrics["QC_ICMedian"] == [-0.4, 0.4] and metrics["QC_ICReads"] == [1000.0]

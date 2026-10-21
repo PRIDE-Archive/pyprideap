@@ -14,7 +14,7 @@ from pyprideap.io.readers.nulisa import (
     read_nulisa_csv,
     read_nulisa_xlsx,
 )
-from pyprideap.io.readers.olink_csv import _OLINK_COLUMN_ALIASES, read_olink_csv
+from pyprideap.io.readers.olink_csv import _OLINK_COLUMN_ALIASES, _sniff_delimiter, read_olink_csv
 from pyprideap.io.readers.olink_parquet import read_olink_parquet
 from pyprideap.io.readers.olink_xlsx import read_olink_xlsx
 from pyprideap.io.readers.somascan_adat import is_somascan_table_csv, read_somascan_adat
@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 _OLINK_MARKER_COLS = {"OlinkID", "NPX", "SampleID"}
 _SOMASCAN_MARKER_COLS = {"SeqId", "SomaId"}
+
+
+def _nulisa_xml_message(path: Path) -> str:
+    return (
+        f"{path.name} is a NULISAseq instrument XML (raw read counts); QC uses the NPQ export of "
+        "the same run (NPQ long format CSV or NPQ workbook). The XML is read alongside it for "
+        "UniProt IDs and plate QC."
+    )
 
 
 def detect_format(path: str | Path) -> str:
@@ -36,11 +44,7 @@ def detect_format(path: str | Path) -> str:
         return "somascan_adat"
 
     if suffix == ".xml" and is_nulisa_xml(path):
-        raise ValueError(
-            f"{path.name} is a NULISAseq instrument XML (raw read counts); QC uses the NPQ export of "
-            "the same run (NPQ long format CSV or NPQ workbook). The XML is read alongside it for "
-            "UniProt IDs and plate QC."
-        )
+        raise ValueError(_nulisa_xml_message(path))
 
     if suffix == ".parquet":
         schema = pq.read_schema(path)
@@ -61,7 +65,11 @@ def detect_format(path: str | Path) -> str:
         if is_somascan_table_csv(path):
             logger.debug("Format detected: somascan table CSV (ADAT table exported as CSV)")
             return "somascan_adat"
-        if NULISA_LONG_MARKER_COLS <= set(pd.read_csv(path, nrows=0, sep=None, engine="python").columns):
+        try:
+            header_cols = set(pd.read_csv(path, nrows=0, sep=_sniff_delimiter(path) or ",").columns)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError):
+            header_cols = set()
+        if NULISA_LONG_MARKER_COLS <= header_cols:
             logger.debug("Format detected: nulisa_csv (NPQ long format)")
             return "nulisa_csv"
 
@@ -115,6 +123,8 @@ def read(path: str | Path, *, platform: str | None = None) -> AffinityDataset:
         suffix = path.suffix.lower()
         logger.debug("Platform forced: %s, suffix=%s", platform, suffix)
         if platform == "nulisa":
+            if suffix == ".xml" and is_nulisa_xml(path):
+                raise ValueError(_nulisa_xml_message(path))
             return read_nulisa_xlsx(path) if suffix == ".xlsx" else read_nulisa_csv(path)
         if platform == "somascan":
             if suffix == ".adat":

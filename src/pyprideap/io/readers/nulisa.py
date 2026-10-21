@@ -25,7 +25,13 @@ import numpy as np
 import pandas as pd
 
 from pyprideap.core import AffinityDataset, Platform
-from pyprideap.io.readers.olink_csv import _long_to_wide, _plain, _sniff_delimiter, _warn_data_quality
+from pyprideap.io.readers.olink_csv import (
+    _long_to_wide,
+    _plain,
+    _sample_run_key,
+    _sniff_delimiter,
+    _warn_data_quality,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +78,9 @@ def read_nulisa_xml_annotation(path: str | Path) -> tuple[pd.DataFrame, list[dic
         if target_id and target_id not in targets:
             targets[target_id] = {
                 "AlamarTargetID": target_id,
-                "Target": (barcode.text or "").strip() or pd.NA,  # gene symbol
-                "UniProt": barcode.get("UniProtID") or pd.NA,
-                "ProteinName": barcode.get("ProteinName") or pd.NA,
+                "Target": (barcode.text or "").strip() or np.nan,  # gene symbol
+                "UniProt": barcode.get("UniProtID") or np.nan,
+                "ProteinName": barcode.get("ProteinName") or np.nan,
             }
 
     thresholds: dict[str, dict[str, str]] = {}
@@ -109,7 +115,8 @@ def read_nulisa_xml_annotation(path: str | Path) -> tuple[pd.DataFrame, list[dic
                 "passed": str(flag.get("set", "")).upper() != "TRUE",
             }
         )
-    return pd.DataFrame(list(targets.values())), plate_qc_rows
+    columns = ["AlamarTargetID", "Target", "UniProt", "ProteinName"]
+    return pd.DataFrame(list(targets.values()), columns=columns), plate_qc_rows
 
 
 def read_nulisa_sample_qc_thresholds(path: str | Path) -> dict[str, dict[str, str]]:
@@ -124,10 +131,14 @@ def read_nulisa_sample_qc_thresholds(path: str | Path) -> dict[str, dict[str, st
 
 
 def _find_xml(path: Path, plate_ids: list[str]) -> list[Path]:
-    """Instrument XMLs next to *path*: those named in PlateID, else any NULISAseq XML."""
-    named = [path.parent / p for p in plate_ids if p and (path.parent / p).is_file()]
-    if named:
-        return named
+    """Instrument XMLs next to *path* for this run.
+
+    When the export names its plates (PlateID = XML file name), only those files
+    are used: another run's XML must never annotate this one. Without plate IDs,
+    any NULISAseq XML in the folder is used.
+    """
+    if any(plate_ids):
+        return [path.parent / p for p in plate_ids if p and (path.parent / p).is_file()]
     return [p for p in sorted(path.parent.glob("*.xml")) if is_nulisa_xml(p)]
 
 
@@ -150,7 +161,7 @@ def _annotate(features: pd.DataFrame, metadata: dict[str, object], xmls: list[Pa
         metadata["nulisa_plate_qc"] = plate_qc
     if not annotations:
         if "UniProt" not in features.columns:
-            features["UniProt"] = pd.Series(pd.NA, index=features.index, dtype="object")
+            features["UniProt"] = pd.Series(np.nan, index=features.index, dtype="object")
         return features
     ann = pd.concat(annotations).drop_duplicates("AlamarTargetID")
     by_id = ann.set_index("AlamarTargetID")
@@ -165,6 +176,22 @@ def _annotate(features: pd.DataFrame, metadata: dict[str, object], xmls: list[Pa
         features[col] = features[col].fillna(mapped) if col in features.columns else mapped
     metadata["nulisa_annotation_source"] = [x.name for x in xmls]
     return features
+
+
+def _rekey(expression: pd.DataFrame, metadata: dict[str, object], features: pd.DataFrame) -> pd.DataFrame:
+    """Key the expression and per-sample matrices by the (annotated) AlamarTargetID.
+
+    *features* is aligned with the expression columns; the XML can replace gene
+    symbols by target IDs when the export has no AlamarTargetID column.
+    """
+    new_ids = features["AlamarTargetID"].astype(str).tolist()
+    if new_ids != [str(c) for c in expression.columns]:
+        expression = expression.set_axis(new_ids, axis=1)
+        for key in ("lod_matrix", "read_count_matrix"):
+            matrix = metadata.get(key)
+            if isinstance(matrix, pd.DataFrame) and matrix.shape[1] == len(new_ids):
+                metadata[key] = matrix.set_axis(new_ids, axis=1)
+    return expression
 
 
 def read_nulisa_csv(path: str | Path) -> AffinityDataset:
@@ -184,15 +211,20 @@ def read_nulisa_csv(path: str | Path) -> AffinityDataset:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    sample_key = "SampleName"
-    sample_cols = [sample_key, *[c for c in (*_SAMPLE_META_COLUMNS, *_SAMPLE_QC_COLUMNS) if c in df.columns]]
+    df["SampleName"] = df["SampleName"].astype(str)
+    # A sample run on several plates keeps one row per plate run (SampleRun),
+    # with SampleID = SampleName for the sample's identity
+    df, sample_key = _sample_run_key(df, "SampleName")
+    sample_cols = ["SampleName", *[c for c in (*_SAMPLE_META_COLUMNS, *_SAMPLE_QC_COLUMNS) if c in df.columns]]
+    if sample_key != "SampleName":
+        sample_cols.append(sample_key)
     if "AUTO_WELLPOSITION" in df.columns:
         sample_cols.append("AUTO_WELLPOSITION")
     samples = _plain(df[sample_cols].drop_duplicates(subset=[sample_key]).reset_index(drop=True))
     samples = samples.rename(
         columns={**_SAMPLE_QC_COLUMNS, "AUTO_WELLPOSITION": "WellID", "SAMPLE_MATRIX": "SampleMatrix"}
     )
-    samples.insert(0, "SampleID", samples[sample_key].astype(str))
+    samples.insert(0, "SampleID", samples["SampleName"].astype(str))
 
     feature_cols = ["AlamarTargetID", "Target", *[c for c in ("Panel", "PanelLotNumber") if c in df.columns]]
     features = df[feature_cols].drop_duplicates(subset=["AlamarTargetID"]).rename(columns={"Target": "Assay"})
@@ -213,6 +245,7 @@ def read_nulisa_csv(path: str | Path) -> AffinityDataset:
     features = features.rename(columns={"index": "AlamarTargetID"})
     plate_ids = sorted(df["PlateID"].dropna().astype(str).unique()) if "PlateID" in df.columns else []
     features = _annotate(features, metadata, _find_xml(path, plate_ids))
+    expression = _rekey(expression, metadata, features)
 
     dataset = AffinityDataset(
         platform=Platform.NULISA, samples=samples, features=features, expression=expression, metadata=metadata
@@ -236,8 +269,12 @@ def read_nulisa_xlsx(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
     book = pd.ExcelFile(path)
-    npq = book.parse("NPQ").set_index("targetName")
+    npq = book.parse("NPQ")
     targets = book.parse("Annotation-Targets")
+    for sheet, frame in (("NPQ", npq), ("Annotation-Targets", targets)):
+        if "targetName" not in frame.columns:
+            raise ValueError(f"Missing required column 'targetName' in sheet {sheet!r} of {path.name}")
+    npq = npq.set_index("targetName")
     sample_ann = book.parse("Annotation-Samples") if "Annotation-Samples" in book.sheet_names else pd.DataFrame()
 
     sample_names = [str(c) for c in npq.columns]
@@ -268,11 +305,7 @@ def read_nulisa_xlsx(path: str | Path) -> AffinityDataset:
     plate_ids = sorted(samples["PlateID"].dropna().astype(str).unique()) if "PlateID" in samples.columns else []
     features = _annotate(features, metadata, _find_xml(path, plate_ids))
     # Expression and LOD columns keyed by AlamarTargetID, as in the long format
-    expression.columns = features["AlamarTargetID"].tolist()
-    if "lod_matrix" in metadata:
-        lod_matrix = metadata["lod_matrix"]
-        assert isinstance(lod_matrix, pd.DataFrame)
-        lod_matrix.columns = expression.columns
+    expression = _rekey(expression, metadata, features)
 
     dataset = AffinityDataset(
         platform=Platform.NULISA, samples=samples, features=features, expression=expression, metadata=metadata

@@ -137,10 +137,17 @@ def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Pat
         logger.debug("URL: %s -> %s", url, dest)
         import urllib.request
 
+        if name in aux_urls:
+            # Annotation files only: a failed download must not stop the report
+            try:
+                urllib.request.urlretrieve(url, dest)
+            except OSError as exc:
+                logger.warning("Could not download auxiliary file %s: %s", name, exc)
+            continue
         urllib.request.urlretrieve(url, dest)
         if _is_sdrf_filename(name):
             sdrf_files.append(dest)
-        elif name not in aux_urls:
+        else:
             downloaded.append(dest)
 
     sdrf_path = None

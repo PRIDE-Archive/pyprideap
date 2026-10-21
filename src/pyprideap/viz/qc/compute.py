@@ -2513,8 +2513,11 @@ def compute_nulisa_qc(dataset: AffinityDataset) -> NulisaQcData | None:
         thresholds = list(default)
         spec = declared.get(xml_name)
         if isinstance(spec, dict) and spec.get("thresholds") and direction != "info":
+            # Use the declared thresholds only when complete (a range needs both bounds) and finite
             try:
-                thresholds = [float(t) for t in str(spec["thresholds"]).split(",")]
+                parsed = [float(t) for t in str(spec["thresholds"]).split(",")]
+                if len(parsed) == len(default) and all(np.isfinite(parsed)):
+                    thresholds = parsed
             except ValueError:
                 pass
         status_col = f"{col}_Status"
