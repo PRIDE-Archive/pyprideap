@@ -828,6 +828,10 @@ def resolve_lod_with_source(dataset: AffinityDataset) -> tuple[pd.DataFrame | pd
         except (ValueError, KeyError):
             return None, None
 
+    # NULISA reports its own per-target LOD; the Olink fallbacks do not apply
+    if dataset.platform == Platform.NULISA:
+        return None, None
+
     try:
         return compute_nclod(dataset, plate_adjusted=True), "NCLOD"
     except (ValueError, KeyError):
@@ -929,7 +933,7 @@ def get_proteins_above_lod(
         pct = float(above_lod.loc[valid, col].sum() / n * 100)
         if pct >= threshold:
             up = id_to_uniprot.get(col)
-            if up and pd.notna(up) and str(up).strip() not in ("", "nan", "NA"):
+            if pd.notna(up) and str(up).strip() not in ("", "nan", "NA", "<NA>"):
                 proteins.add(str(up))
 
     logger.debug("proteins above LOD: %d unique UniProt accessions", len(proteins))

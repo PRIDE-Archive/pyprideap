@@ -175,7 +175,9 @@ def _first_per_cell(rows: np.ndarray, cols: np.ndarray, n_cols: int) -> np.ndarr
     return cast(np.ndarray, np.logical_not(duplicated))
 
 
-def _long_to_wide(df: pd.DataFrame, sample_key: str, sample_order: pd.Index, value_col: str) -> pd.DataFrame:
+def _long_to_wide(
+    df: pd.DataFrame, sample_key: str, sample_order: pd.Index, value_col: str, assay_col: str = "OlinkID"
+) -> pd.DataFrame:
     """Samples x assays matrix of *value_col*, equivalent to
     ``pivot_table(index=sample_key, columns="OlinkID", aggfunc="first")`` reindexed to
     *sample_order*: first non-missing value per cell, assays sorted, assays without
@@ -183,7 +185,7 @@ def _long_to_wide(df: pd.DataFrame, sample_key: str, sample_order: pd.Index, val
     pivot_table on multi-million-row exports.
     """
     values = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
-    assay_ids = df["OlinkID"]
+    assay_ids = df[assay_col]
     labels = pd.Index(
         sorted(assay_ids.cat.categories.astype(str))
         if isinstance(assay_ids.dtype, pd.CategoricalDtype)
@@ -198,7 +200,7 @@ def _long_to_wide(df: pd.DataFrame, sample_key: str, sample_order: pd.Index, val
     matrix[r[first], c[first]] = v[first]
     keep = np.zeros(len(labels), dtype=bool)
     keep[np.unique(c)] = True
-    wide = pd.DataFrame(matrix[:, keep], columns=pd.Index(labels[keep], name="OlinkID"))
+    wide = pd.DataFrame(matrix[:, keep], columns=pd.Index(labels[keep], name=assay_col))
     return cast(pd.DataFrame, wide)
 
 

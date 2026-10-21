@@ -12,6 +12,16 @@ class Platform(Enum):
     OLINK_REVEAL = "olink_reveal"
     OLINK_TARGET = "olink_target"
     SOMASCAN = "somascan"
+    NULISA = "nulisa"
+
+
+def value_unit(platform: Platform) -> str:
+    """Unit of the deposited values: SomaScan RFU, NULISA NPQ (log2), Olink NPX (log2)."""
+    if platform == Platform.SOMASCAN:
+        return "RFU"
+    if platform == Platform.NULISA:
+        return "NPQ"
+    return "NPX"
 
 
 class Level(Enum):

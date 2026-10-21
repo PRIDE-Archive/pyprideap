@@ -111,6 +111,11 @@ def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Pat
         if any(name.lower().endswith(ext) for ext in data_extensions) and "checksum" not in name.lower()
     }
     sdrf_urls = {name: url for name, url in urls.items() if _is_sdrf_filename(name) and "checksum" not in name.lower()}
+    # Instrument XMLs are not QC'd themselves but annotate data files next to them
+    # (NULISAseq: UniProt IDs and plate QC for the NPQ exports)
+    aux_urls = {
+        name: url for name, url in urls.items() if name.lower().endswith(".xml") and "checksum" not in name.lower()
+    }
 
     if not data_urls:
         click.echo(f"Error: No supported data files found for {accession}", err=True)
@@ -123,7 +128,7 @@ def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Pat
 
     downloaded: list[Path] = []
     sdrf_files: list[Path] = []
-    for name, url in {**data_urls, **sdrf_urls}.items():
+    for name, url in {**data_urls, **sdrf_urls, **aux_urls}.items():
         dest = dest_dir / Path(name).name  # sanitize: strip directory components
         # Convert FTP URLs to HTTPS for broader compatibility
         if url.startswith("ftp://ftp.pride.ebi.ac.uk/"):
@@ -132,6 +137,13 @@ def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Pat
         logger.debug("URL: %s -> %s", url, dest)
         import urllib.request
 
+        if name in aux_urls:
+            # Annotation files only: a failed download must not stop the report
+            try:
+                urllib.request.urlretrieve(url, dest)
+            except OSError as exc:
+                logger.warning("Could not download auxiliary file %s: %s", name, exc)
+            continue
         urllib.request.urlretrieve(url, dest)
         if _is_sdrf_filename(name):
             sdrf_files.append(dest)
@@ -213,7 +225,7 @@ def main() -> None:
 @click.option(
     "-p",
     "--platform",
-    type=click.Choice(["olink", "somascan"], case_sensitive=False),
+    type=click.Choice(["olink", "somascan", "nulisa"], case_sensitive=False),
     default=None,
     help="Force platform type (default: auto-detect).",
 )
@@ -308,7 +320,7 @@ def report(
 @click.option(
     "-p",
     "--platform",
-    type=click.Choice(["olink", "somascan"], case_sensitive=False),
+    type=click.Choice(["olink", "somascan", "nulisa"], case_sensitive=False),
     default=None,
     help="Force platform type (default: auto-detect).",
 )
@@ -394,7 +406,7 @@ def proteins_above_lod(
 @click.option(
     "-p",
     "--platform",
-    type=click.Choice(["olink", "somascan"], case_sensitive=False),
+    type=click.Choice(["olink", "somascan", "nulisa"], case_sensitive=False),
     default=None,
     help="Force platform type (default: auto-detect).",
 )

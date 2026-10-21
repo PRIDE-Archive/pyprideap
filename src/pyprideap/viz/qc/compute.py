@@ -10,7 +10,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset, Platform, value_unit
 from pyprideap.processing.lod import resolve_lod_with_source
 from pyprideap.viz.qc.agnostic import compute_agnostic_qc
 
@@ -344,8 +344,9 @@ def compute_distribution(dataset: AffinityDataset) -> DistributionData:
         xlabel = "log10(RFU)"
         title = "RFU Distribution (log10)"
     else:
-        xlabel = "NPX Value"
-        title = "NPX Distribution"
+        unit = value_unit(dataset.platform)
+        xlabel = f"{unit} Value"
+        title = f"{unit} Distribution"
 
     return DistributionData(
         sample_ids=sample_ids,
@@ -396,7 +397,7 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
     if lod is not None and (isinstance(lod, pd.DataFrame) or len(lod) > 0):
         above_lod, has_lod = _above_lod_matrix(numeric, lod)
 
-        unit = "RFU" if dataset.platform == Platform.SOMASCAN else "NPX"
+        unit = value_unit(dataset.platform)
         categories: list[str] = []
         counts: list[int] = []
 
@@ -447,7 +448,7 @@ def compute_qc_summary(dataset: AffinityDataset) -> QcLodSummaryData | None:
 
 
 # Sample types that carry no analyte: their signal should stay below LOD
-_NEGATIVE_SAMPLE_TYPES = frozenset({"negative", "negative control", "neg", "buffer", "buffer control", "blank"})
+_NEGATIVE_SAMPLE_TYPES = frozenset({"negative", "negative control", "neg", "nc", "buffer", "buffer control", "blank"})
 
 
 def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
@@ -492,7 +493,7 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
     if "Panel" in dataset.features.columns:
         id_to_panel = dict(zip(dataset.features[id_col].astype(str), dataset.features["Panel"].astype(str)))
 
-    unit = "RFU" if dataset.platform == Platform.SOMASCAN else "NPX"
+    unit = value_unit(dataset.platform)
     return LodAnalysisData(
         assay_ids=[str(c) for c in assays],
         above_lod_pct=[round(float(study_pct[c]), 2) for c in assays],
@@ -991,7 +992,13 @@ def compute_norm_scale(dataset: AffinityDataset) -> NormScaleData | None:
 
 
 def compute_lod_comparison(dataset: AffinityDataset) -> LodComparisonData | None:
-    """Compute pairwise LOD comparisons across all available LOD sources."""
+    """Compute pairwise LOD comparisons across all available LOD sources.
+
+    NULISA reports one LOD per target (from its negative controls) and has no
+    alternative source to compare with.
+    """
+    if dataset.platform == Platform.NULISA:
+        return None
     from pyprideap.processing.lod import (
         compute_nclod,
         compute_soma_elod,
@@ -1068,7 +1075,7 @@ def compute_lod_comparison(dataset: AffinityDataset) -> LodComparisonData | None
     if not pairs:
         return None
 
-    unit = "RFU" if dataset.platform == Platform.SOMASCAN else "NPX"
+    unit = value_unit(dataset.platform)
     return LodComparisonData(pairs=pairs, unit=unit)
 
 
@@ -1496,6 +1503,7 @@ def compute_bridgeability(
 _TECHNICAL_REPLICATE_TYPES = {
     "olink": ("sample control", "Sample controls"),
     "somascan": ("qc", "QC samples"),
+    "nulisa": ("sc", "Sample controls"),
 }
 _MIN_REPLICATES = 3
 
@@ -1525,7 +1533,7 @@ def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
 
     if "SampleType" not in dataset.samples.columns:
         return None
-    family = "somascan" if dataset.platform == Platform.SOMASCAN else "olink"
+    family = {Platform.SOMASCAN: "somascan", Platform.NULISA: "nulisa"}.get(dataset.platform, "olink")
     control_type, label = _TECHNICAL_REPLICATE_TYPES[family]
     is_rep = (normalize_sample_type(dataset.samples["SampleType"]) == control_type).to_numpy()
     n_rep = int(is_rep.sum())
@@ -1534,7 +1542,7 @@ def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     controls = numeric.loc[is_rep]
-    linear = np.power(2, controls) if family == "olink" else controls
+    linear = controls if family == "somascan" else np.power(2, controls)
     cv = (linear.std() / linear.mean()).replace([np.inf, -np.inf], np.nan)
 
     lod = _resolve_lod(dataset)
@@ -1641,7 +1649,7 @@ def compute_batch_effect(dataset: AffinityDataset, n_components: int = 5) -> Bat
         numeric = np.log10(numeric.where(numeric > 0))
         value_label = "Median log10 RFU"
     else:
-        value_label = "Median NPX"
+        value_label = f"Median {value_unit(dataset.platform)}"
     numeric = numeric.loc[:, numeric.isna().mean() <= 0.5].reset_index(drop=True)
     if numeric.shape[1] < 2:
         return None
@@ -2157,7 +2165,7 @@ def compute_bridge_agreement(dataset: AffinityDataset) -> BridgeAgreementData | 
         numeric = np.log10(numeric.where(numeric > 0))
         value_label = "log10 RFU"
     else:
-        value_label = "NPX"
+        value_label = value_unit(dataset.platform)
 
     diffs: list[pd.Series] = []
     correlations: list[float] = []
@@ -2446,6 +2454,105 @@ def compute_readiness(dataset: AffinityDataset, results: dict[str, object] | Non
     return ReadinessData(items=items)
 
 
+# ---------------------------------------------------------------------------
+# NULISAseq sample and run QC
+# ---------------------------------------------------------------------------
+
+# (metric column, label, XML threshold name, default thresholds, direction)
+# direction: "min" = value must be >= threshold; "range" = within [lo, hi];
+# "info" = informational only (no pass/warning), as in the Alamar QC report
+_NULISA_SAMPLE_METRICS = (
+    ("QC_Reads", "Reads per sample", "NumReads", (5e5,), "min"),
+    ("QC_ICReads", "Internal control reads", "ICReads", (1000.0,), "min"),
+    ("QC_ICMedian", "IC reads vs plate median", "IC_Median", (-0.4, 0.4), "range"),
+    ("QC_Detectability", "Detectability (targets > LOD)", "Detectability_plasma", (), "info"),
+)
+
+
+@dataclass
+class NulisaMetric:
+    key: str
+    label: str
+    values: list[float]
+    status: list[str]  # vendor status per sample (PASS / WARN), "" when absent
+    thresholds: list[float]
+    direction: str  # "min", "range" or "info"
+
+
+@dataclass
+class NulisaQcData:
+    """NULISAseq vendor QC: per-sample metrics with thresholds, and plate (run) QC."""
+
+    sample_ids: list[str]
+    sample_types: list[str]
+    metrics: list[NulisaMetric]
+    sample_status: dict[str, int]  # overall Sample_QC_Status counts (study samples)
+    plate_qc: list[dict[str, object]]  # per plate: {"plate", "metrics": [{label, value, threshold, passed, ...}]}
+    title: str = "NULISA Sample & Run QC"
+
+
+def compute_nulisa_qc(dataset: AffinityDataset) -> NulisaQcData | None:
+    """Per-sample QC metrics reported by the NULISAseq software, with their thresholds.
+
+    Thresholds come from the instrument XML when it was read alongside the data,
+    otherwise the documented defaults (reads >= 500,000; IC reads >= 1,000; IC
+    median within +/-40% of the plate median; detectability informational).
+    """
+    from pyprideap.processing.filtering import control_sample_mask
+
+    if dataset.platform != Platform.NULISA:
+        return None
+    samples = dataset.samples
+    declared = dataset.metadata.get("nulisa_sample_qc_thresholds")
+    declared = declared if isinstance(declared, dict) else {}
+
+    metrics: list[NulisaMetric] = []
+    for col, label, xml_name, default, direction in _NULISA_SAMPLE_METRICS:
+        if col not in samples.columns:
+            continue
+        thresholds = list(default)
+        spec = declared.get(xml_name)
+        if isinstance(spec, dict) and spec.get("thresholds") and direction != "info":
+            # Use the declared thresholds only when complete (a range needs both bounds) and finite
+            try:
+                parsed = [float(t) for t in str(spec["thresholds"]).split(",")]
+                if len(parsed) == len(default) and all(np.isfinite(parsed)):
+                    thresholds = parsed
+            except ValueError:
+                pass
+        status_col = f"{col}_Status"
+        status = samples[status_col].astype(str).str.upper().tolist() if status_col in samples.columns else []
+        metrics.append(
+            NulisaMetric(
+                key=col,
+                label=label,
+                values=pd.to_numeric(samples[col], errors="coerce").round(6).tolist(),
+                status=status,
+                thresholds=thresholds,
+                direction=direction,
+            )
+        )
+    plate_qc = dataset.metadata.get("nulisa_plate_qc")
+    plate_qc = plate_qc if isinstance(plate_qc, list) else []
+    if not metrics and not plate_qc:
+        return None
+
+    status_counts: dict[str, int] = {}
+    if "SampleQC" in samples.columns:
+        study = ~control_sample_mask(samples).to_numpy()
+        counts = samples.loc[study, "SampleQC"].astype(str).str.upper().value_counts()
+        status_counts = {str(k): int(v) for k, v in counts.items()}
+
+    types = samples["SampleType"].astype(str).tolist() if "SampleType" in samples.columns else [""] * len(samples)
+    return NulisaQcData(
+        sample_ids=_sample_ids(dataset),
+        sample_types=types,
+        metrics=metrics,
+        sample_status=status_counts,
+        plate_qc=plate_qc,
+    )
+
+
 def compute_all(dataset: AffinityDataset) -> dict[str, object]:
     """Compute all applicable QC plot data for the dataset."""
     logger.debug(
@@ -2480,8 +2587,12 @@ def compute_all(dataset: AffinityDataset) -> dict[str, object]:
         results["norm_scale_boxplot"] = compute_norm_scale_boxplot(dataset)
 
     # Olink-specific QC
-    if dataset.platform != Platform.SOMASCAN:
+    if dataset.platform not in (Platform.SOMASCAN, Platform.NULISA):
         results["iqr_median_qc"] = compute_iqr_median_qc(dataset)
+
+    # NULISA-specific QC (vendor sample and run QC metrics with their thresholds)
+    if dataset.platform == Platform.NULISA:
+        results["nulisa_qc"] = compute_nulisa_qc(dataset)
 
     # UniProt duplicate detection (Olink and SomaScan when feature table has UniProt)
     results["uniprot_duplicates"] = compute_uniprot_duplicates(dataset)

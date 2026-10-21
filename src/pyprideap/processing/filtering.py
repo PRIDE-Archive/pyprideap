@@ -33,11 +33,23 @@ _CONTROL_SAMPLE_TYPES = frozenset(
         "buffer",
         "buffer control",
         "blank",
+        # NULISAseq: negative, sample and inter-plate controls
+        "nc",
+        "sc",
+        "ipc",
+        "inter plate control",
     }
 )
 
 # Sample x assay matrices in metadata that must be subset together with samples
-_PER_SAMPLE_METADATA = ("lod_matrix", "count_matrix", "ext_count", "assay_qc_matrix", "sample_qc_matrix")
+_PER_SAMPLE_METADATA = (
+    "lod_matrix",
+    "count_matrix",
+    "ext_count",
+    "assay_qc_matrix",
+    "sample_qc_matrix",
+    "read_count_matrix",  # NULISA raw read counts
+)
 
 # SDRF characteristics[sample type] after read_sdrf() shortens the column name
 _SDRF_SAMPLE_TYPE_COLUMN = "sample type"
