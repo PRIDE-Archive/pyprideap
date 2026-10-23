@@ -1515,3 +1515,28 @@ class TestColourByOptions:
         assert sorted(visible_first) == ["NEGATIVE_CONTROL", "SAMPLE"]
         plate_vis = buttons[1].args[0]["visible"]
         assert sorted(t.name for t, v in zip(fig.data, plate_vis) if v) == ["P1", "P2"]
+
+
+def test_sdrf_merge_uses_assay_name_when_it_matches_more_samples():
+    """Repeated measurements of one individual share a source name; assay name identifies each run."""
+    import numpy as np
+
+    from pyprideap.io.readers.sdrf import merge_sdrf
+
+    ds = AffinityDataset(
+        platform=Platform.OLINK_EXPLORE,
+        samples=pd.DataFrame({"SampleID": ["P1", "P1_b", "P2", "P2_b"]}),
+        features=pd.DataFrame({"OlinkID": ["O1"], "UniProt": ["U1"]}),
+        expression=pd.DataFrame({"O1": np.arange(4.0)}),
+        metadata={},
+    )
+    sdrf = pd.DataFrame(
+        {
+            "source name": ["P1", "P1", "P2", "P2"],
+            "assay name": ["P1", "P1_b", "P2", "P2_b"],
+            "factor value[disease]": ["a", "a", "b", "b"],
+        }
+    )
+    merged = merge_sdrf(ds, sdrf)
+    assert merged.metadata["sdrf_merge"] == {"matched": 4, "total": 4}
+    assert merged.samples["factor value[disease]"].tolist() == ["a", "a", "b", "b"]
