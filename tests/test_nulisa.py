@@ -268,3 +268,14 @@ class TestReviewFixes:
         }
         metrics = {m.key: m.thresholds for m in compute_nulisa_qc(ds).metrics}
         assert metrics["QC_ICMedian"] == [-0.4, 0.4] and metrics["QC_ICReads"] == [1000.0]
+
+
+def test_renamed_xml_without_spaces_is_still_found(tmp_path):
+    """Files renamed for deposition (spaces -> underscores) still match PlateID."""
+    from pyprideap.io.readers.nulisa import read_nulisa_csv
+
+    path = _write_long(tmp_path)
+    renamed = tmp_path / "20250515_Bay1_Inflammation_Panel_250_V2_.xml"
+    (tmp_path / _PLATE).rename(renamed)
+    ds = read_nulisa_csv(path)
+    assert ds.features["UniProt"].tolist() == [u for _, _, u in _TARGETS]

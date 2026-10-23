@@ -18,6 +18,7 @@ metrics with their thresholds.
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -138,8 +139,17 @@ def _find_xml(path: Path, plate_ids: list[str]) -> list[Path]:
     any NULISAseq XML in the folder is used.
     """
     if any(plate_ids):
-        return [path.parent / p for p in plate_ids if p and (path.parent / p).is_file()]
+        # Match ignoring whitespace vs underscores: files are often renamed to remove
+        # spaces before deposition, while PlateID keeps the original name
+        candidates = {_normalise_name(p.name): p for p in sorted(path.parent.glob("*.xml"))}
+        found = [candidates.get(_normalise_name(pid)) for pid in plate_ids if pid]
+        return [p for p in found if p is not None]
     return [p for p in sorted(path.parent.glob("*.xml")) if is_nulisa_xml(p)]
+
+
+def _normalise_name(name: str) -> str:
+    """File name with runs of whitespace and underscores collapsed to one underscore, lower case."""
+    return re.sub(r"[\s_]+", "_", name.strip()).lower()
 
 
 def _annotate(features: pd.DataFrame, metadata: dict[str, object], xmls: list[Path]) -> pd.DataFrame:
