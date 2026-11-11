@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, numeric_frame
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +218,7 @@ def preprocess_somascan(
 
     # 5. Log10 transform
     if log10:
-        numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+        numeric = numeric_frame(ds.expression)
         # Clip to avoid log(0)
         numeric = numeric.clip(lower=1e-10)
         log_expr = np.log10(numeric)
@@ -227,7 +227,7 @@ def preprocess_somascan(
 
     # 6. Center and scale (Z-score per analyte)
     if center_scale:
-        numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+        numeric = numeric_frame(ds.expression)
         means = numeric.mean()
         centered = numeric - means
         stds = centered.std().replace(0, 1)

@@ -165,7 +165,10 @@ def _positions(values: pd.Series, labels: pd.Index) -> np.ndarray:
         codes = values.cat.codes.to_numpy()
         return np.where(codes >= 0, lookup[codes], -1)
     if as_text:
-        values = values.map(lambda v: v if pd.isna(v) else str(v))
+        # One str() per distinct value, not per row
+        codes, uniques = pd.factorize(values)
+        lookup = labels.get_indexer(pd.Index([str(u) for u in uniques], dtype=object))
+        return cast(np.ndarray, np.where(codes >= 0, lookup[codes] if len(lookup) else -1, -1))
     return np.asarray(labels.get_indexer(pd.Index(values)))
 
 
@@ -235,7 +238,9 @@ def _qc_flag_matrices(df: pd.DataFrame, sample_key: str, sample_order: object, a
         first = _first_per_cell(r, c, len(assays))
         coded[r[first], c[first]] = v[first]
         lookup = np.array([*labels.astype(object).where(labels.notna(), None), None], dtype=object)
-        matrices[key] = pd.DataFrame(lookup[coded], columns=assays).astype("string")
+        # One object block (None = no flag); thousands of Arrow string columns make
+        # row selection and per-cell access slow
+        matrices[key] = pd.DataFrame(lookup[coded], columns=assays, dtype=object)
     return matrices
 
 

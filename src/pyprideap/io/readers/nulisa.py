@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset, Platform, numeric_frame
 from pyprideap.io.readers.olink_csv import (
     _long_to_wide,
     _plain,
@@ -288,7 +288,7 @@ def read_nulisa_xlsx(path: str | Path) -> AffinityDataset:
     sample_ann = book.parse("Annotation-Samples") if "Annotation-Samples" in book.sheet_names else pd.DataFrame()
 
     sample_names = [str(c) for c in npq.columns]
-    expression = npq.T.apply(pd.to_numeric, errors="coerce").reset_index(drop=True)
+    expression = numeric_frame(npq.T).reset_index(drop=True)
     expression.columns = [str(c) for c in npq.index]
 
     samples = pd.DataFrame({"SampleID": sample_names, "SampleName": sample_names})

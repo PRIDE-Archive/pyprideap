@@ -8,9 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import pandas as pd
-
-from pyprideap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset, Platform, numeric_frame
 
 if TYPE_CHECKING:
     from plotly.graph_objects import Figure
@@ -48,7 +46,7 @@ def boxplot(
     """
     go = _import_plotly()
 
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(dataset.expression)
 
     # Select proteins
     if proteins is not None:

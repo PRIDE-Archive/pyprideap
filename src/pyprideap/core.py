@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TypeVar, cast
+from functools import wraps
+from typing import Any, TypeVar, cast
 
 import pandas as pd
 
@@ -26,6 +30,73 @@ def value_unit(platform: Platform) -> str:
 
 
 _FrameOrSeries = TypeVar("_FrameOrSeries", pd.DataFrame, pd.Series)
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+# Per-report cache of results derived from one dataset (control filtering, LOD,
+# linear values). Active only inside ``dataset_cache()``; elsewhere every call
+# computes afresh, so results never outlive the report that produced them.
+_DATASET_CACHE: ContextVar[dict[tuple[str, int], tuple[object, object]] | None] = ContextVar(
+    "pyprideap_dataset_cache", default=None
+)
+
+
+@contextmanager
+def dataset_cache() -> Iterator[None]:
+    """Reuse ``cached_per_dataset`` results while computing one report."""
+    if _DATASET_CACHE.get() is not None:  # nested: keep the outer cache
+        yield
+        return
+    token = _DATASET_CACHE.set({})
+    try:
+        yield
+    finally:
+        _DATASET_CACHE.reset(token)
+
+
+def with_dataset_cache(fn: _F) -> _F:
+    """Run ``fn`` inside ``dataset_cache()``."""
+
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with dataset_cache():
+            return fn(*args, **kwargs)
+
+    return cast(_F, wrapper)
+
+
+def cached_per_dataset(fn: _F) -> _F:
+    """Cache ``fn(dataset)`` inside ``dataset_cache()``, keyed by the dataset object.
+
+    Only calls with the dataset as the sole argument are cached. Results are
+    shared between callers, so they must be treated as read-only.
+    """
+
+    @wraps(fn)
+    def wrapper(dataset: object, *args: Any, **kwargs: Any) -> Any:
+        cache = _DATASET_CACHE.get()
+        if cache is None or args or kwargs:
+            return fn(dataset, *args, **kwargs)
+        key = (fn.__qualname__, id(dataset))
+        hit = cache.get(key)
+        if hit is not None and hit[0] is dataset:
+            return hit[1]
+        result = fn(dataset)
+        cache[key] = (dataset, result)  # holding the dataset keeps its id unique
+        return result
+
+    return cast(_F, wrapper)
+
+
+def numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """``df.apply(pd.to_numeric, errors="coerce")`` without the per-column cost.
+
+    Expression matrices are normally numeric already; only columns that are not
+    are converted. Always returns a new frame, like ``apply`` did.
+    """
+    out = df.copy()
+    for col in [c for c, dt in zip(df.columns, df.dtypes) if not pd.api.types.is_numeric_dtype(dt)]:
+        out[col] = pd.to_numeric(df[col], errors="coerce")
+    return cast(pd.DataFrame, out)
 
 
 def linearize(values: _FrameOrSeries, platform: Platform) -> _FrameOrSeries:

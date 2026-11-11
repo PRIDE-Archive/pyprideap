@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from pyprideap.core import AffinityDataset, Platform, linear_scale_label, value_unit
+from pyprideap.core import AffinityDataset, Platform, linear_scale_label, numeric_frame, value_unit, with_dataset_cache
 from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
     BatchEffectData,
@@ -1283,7 +1283,7 @@ def _render_summary_table(
         rows.append(_summary_row("", "Panels", str(len(panel_counts))))
         rows.append(_summary_row("", "Assays per panel", ", ".join(parts)))
 
-    numeric = expr.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(expr)
     proteins_per_sample = numeric.notna().sum(axis=1)
     median_per_sample = float(proteins_per_sample.median())
     rows.append(_summary_row("", "Proteins per sample (median)", f"{median_per_sample:.0f}"))
@@ -1787,6 +1787,7 @@ def _prepare_qc_dataset(
         return replace(dataset, metadata={**dataset.metadata, "sdrf_merge": failure})
 
 
+@with_dataset_cache
 def qc_report(
     dataset: AffinityDataset,
     output: str | Path,
@@ -2331,6 +2332,7 @@ def _wrap_standalone_html(
     )
 
 
+@with_dataset_cache
 def qc_report_split(
     dataset: AffinityDataset,
     output_dir: str | Path,

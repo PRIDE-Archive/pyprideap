@@ -24,7 +24,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, numeric_frame
 
 
 @dataclass
@@ -92,7 +92,7 @@ def compute_iqr_median_outliers(
     IqrMedianOutlierResult
         Per-sample, per-panel outlier flags and thresholds.
     """
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(dataset.expression)
 
     # Build per-protein panel mapping
     protein_to_panel: dict[str, str] = {}
