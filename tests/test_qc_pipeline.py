@@ -660,7 +660,10 @@ class TestTechnicalQc:
         summary = (out / "summary.html").read_text()
         assert "PASS / WARN / FAIL (study samples, worst block)" in summary
         assert "15 / 0 / 1" in summary
-        assert "Technical CV, median (sample controls, n=8)" in summary
+        # Two plates: intra-plate precision first, then inter-plate, each with IQR and range
+        assert "Technical CV, intra-plate (sample controls, n=8)" in summary
+        assert "Technical CV, inter-plate (2 plates)" in summary
+        assert summary.index("Technical CV, intra-plate") < summary.index("Median CV across study samples")
         manifest = json.loads((out / "manifest.json").read_text())
         technical = next(t for t in manifest["tabs"] if t["id"] == "technical")
         assert [i["key"] for i in technical["items"]][:3] == ["batch_effect", "plate_signal", "qc_flags"]
@@ -1455,9 +1458,9 @@ def test_help_texts_state_meaning_before_method_details():
     from pyprideap.viz.qc.report import _HELP_TEXT
 
     mpi = _HELP_TEXT["mpi"]
-    assert mpi.index("Higher is more consistent") < mpi.index("linear scale") < mpi.index("biological groups")
+    assert mpi.index("A high MPI means") < mpi.index("linear scale") < mpi.index("biological groups")
     rank = _HELP_TEXT["rank_concordance"]
-    assert rank.rstrip().endswith("comparable between NPX and RFU within a dataset.")
+    assert rank.rstrip().endswith("comparable between NPX, NPQ and RFU within a dataset.")
 
 
 class TestColourByOptions:

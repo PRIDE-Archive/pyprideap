@@ -279,3 +279,121 @@ def test_renamed_xml_without_spaces_is_still_found(tmp_path):
     (tmp_path / _PLATE).rename(renamed)
     ds = read_nulisa_csv(path)
     assert ds.features["UniProt"].tolist() == [u for _, _, u in _TARGETS]
+
+
+def _read_long(tmp_path, *, plates: int = 1, plate_shift: float = 0.0):
+    """Long-format NULISA dataset; with ``plates=2`` a second plate is appended whose
+    NPQ values are shifted by ``plate_shift`` (a between-plate offset)."""
+    from pyprideap.io.readers.registry import read
+
+    path = _write_long(tmp_path)
+    if plates > 1:
+        df = pd.read_csv(path)
+        second = df.copy()
+        second["PlateID"] = "plate2.xml"
+        second["SampleName"] = second["SampleName"] + "_p2"
+        second["NPQ"] = second["NPQ"] + plate_shift
+        pd.concat([df, second]).to_csv(path, index=False)
+    return read(path)
+
+
+class TestNulisaAlamarFeedback:
+    """QC conventions requested by Alamar for NULISAseq (NPQ = log2(x + 1))."""
+
+    def test_linearize_per_platform(self):
+        from pyprideap.core import linearize
+
+        values = pd.Series([0.0, 1.0, 3.0])
+        assert linearize(values, Platform.NULISA).tolist() == [0.0, 1.0, 7.0]
+        assert linearize(values, Platform.OLINK_EXPLORE).tolist() == [1.0, 2.0, 8.0]
+        assert linearize(values, Platform.SOMASCAN).tolist() == [0.0, 1.0, 3.0]
+
+    def test_cv_inverts_the_plus_one(self, tmp_path):
+        from dataclasses import replace
+
+        from pyprideap.processing.filtering import filter_controls
+        from pyprideap.viz.qc.compute import compute_cv_distribution
+
+        # At low NPQ (~2) the "+1" matters: 2^NPQ and 2^NPQ - 1 give clearly different CVs
+        ds = _read_long(tmp_path)
+        ds = replace(ds, expression=ds.expression - 10.0)
+        study = filter_controls(ds).expression
+        linear = np.power(2, study) - 1
+        expected = (linear.std() / linear.mean()).round(4).tolist()
+        wrong = (np.power(2, study).std() / np.power(2, study).mean()).round(4).tolist()
+        assert not np.allclose(sorted(expected), sorted(wrong), atol=1e-3)
+        cv = compute_cv_distribution(ds)
+        assert cv is not None
+        assert np.allclose(sorted(cv.cv_values), sorted(expected), atol=1e-4)
+
+    def test_technical_cv_single_plate_is_intra_plate(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_replicate_cv
+
+        data = compute_replicate_cv(_read_long(tmp_path))
+        assert data is not None
+        assert data.n_plates == 1
+        assert data.plate_resolved
+        assert data.technical_cv
+        assert data.inter_plate_cv == []
+
+    def test_technical_cv_split_intra_and_inter_plate(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_replicate_cv
+
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        same = compute_replicate_cv(_read_long(tmp_path / "a", plates=2, plate_shift=0.0))
+        shifted = compute_replicate_cv(_read_long(tmp_path / "b", plates=2, plate_shift=1.0))
+        assert same is not None and shifted is not None
+        assert shifted.n_plates == 2 and shifted.inter_plate_cv
+        # A between-plate offset leaves intra-plate CV unchanged and inflates inter-plate CV
+        assert np.allclose(shifted.technical_cv, same.technical_cv, atol=1e-4)
+        assert np.median(shifted.inter_plate_cv) > 1.5 * np.median(same.inter_plate_cv)
+
+    def test_detectability_view_for_nulisa(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_data_completeness
+        from pyprideap.viz.qc.render import render_missing_frequency
+
+        data = compute_data_completeness(_read_long(tmp_path))
+        assert data is not None and data.unit == "NPQ"
+        fig = render_missing_frequency(data)
+        assert fig.layout.title.text == "Target Detectability"
+        assert "above LOD" in fig.layout.xaxis.title.text
+
+    def test_lod_analysis_omits_negative_controls_that_define_the_lod(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_lod_analysis
+
+        data = compute_lod_analysis(_read_long(tmp_path))
+        assert data is not None
+        assert data.negative_above_lod_pct == []
+
+    def test_help_text_uses_npq(self):
+        from pyprideap.viz.qc.report import _help_text
+
+        assert "NPQ value" in _help_text("distribution", Platform.NULISA)
+        assert "NPX value" in _help_text("distribution", Platform.OLINK_EXPLORE)
+        for key in ("cv_distribution", "replicate_cv", "mpi", "dynamic_range", "plate_cv"):
+            assert "2<sup>NPQ</sup> &minus; 1" in _help_text(key, Platform.NULISA), key
+        assert "detectability" in _help_text("missing_frequency_distribution", Platform.NULISA).lower()
+        assert "missing" not in _help_text("missing_frequency_distribution", Platform.NULISA).lower()
+
+    def test_summary_reports_detectability_and_panels(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_all
+        from pyprideap.viz.qc.report import _lod_source_info, _render_summary_table
+
+        ds = _read_long(tmp_path)
+        html = _render_summary_table(ds, compute_all(ds), _lod_source_info(ds))
+        assert "MissingFreq" not in html
+        assert "detected in &ge;50% of study samples" in html
+        assert "Assays per panel" in html
+        assert html.index("Technical CV") < html.index("Median CV")
+
+    def test_correlation_on_scaled_targets(self, tmp_path):
+        from pyprideap.viz.qc.compute import compute_correlation
+
+        ds = _read_long(tmp_path)
+        data = compute_correlation(ds)
+        numeric = ds.expression
+        z = (numeric - numeric.mean()) / numeric.std()
+        expected = sorted(np.round(z.T.corr().to_numpy().ravel(), 3))
+        got = sorted(v for row in data.matrix for v in row if v is not None)
+        assert np.allclose(got, expected, atol=1e-3)
