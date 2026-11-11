@@ -85,8 +85,8 @@ def test_download_pad_files_parallel(monkeypatch, tmp_path: Path):
     urls = {n: base + n for n in ("NPQ_Long_Format.csv", "run.xml", "study.sdrf.tsv", "notes.pdf")}
 
     class FakeClient:
-        def get_download_urls(self, accession):
-            return urls
+        def get_download_files(self, accession):
+            return {n: (u, None) for n, u in urls.items()}
 
     monkeypatch.setattr("pyprideap.api.pride.PrideClient", FakeClient)
 
@@ -105,10 +105,48 @@ def test_download_pad_files_parallel(monkeypatch, tmp_path: Path):
 
 def test_download_pad_files_data_failure_raises(monkeypatch, tmp_path: Path):
     class FakeClient:
-        def get_download_urls(self, accession):
-            return {"a.csv": "ftp://ftp.pride.ebi.ac.uk/pride/data/archive/a.csv"}
+        def get_download_files(self, accession):
+            return {"a.csv": ("ftp://ftp.pride.ebi.ac.uk/pride/data/archive/a.csv", "RESULT")}
 
     monkeypatch.setattr("pyprideap.api.pride.PrideClient", FakeClient)
     monkeypatch.setattr(cli, "_fetch", lambda url, dest: (_ for _ in ()).throw(OSError("boom")))
     with pytest.raises(OSError):
         cli._download_pad_files("PAD000068", tmp_path)
+
+
+def test_select_data_files_keeps_result_and_raw():
+    files = {
+        "NPQ_Long_Format.csv": ("u1", "RESULT"),
+        "NPQ_Values.xlsx": ("u2", "OTHER"),
+        "run.adat": ("u3", "RAW"),
+        "dep_analysis.csv": ("u4", "SEARCH"),
+    }
+    assert cli._select_data_files(files) == {"NPQ_Long_Format.csv": "u1", "run.adat": "u3"}
+
+
+def test_select_data_files_untyped_keeps_all():
+    files = {"a.npx.csv": ("u1", "OTHER"), "b.xlsx": ("u2", None)}
+    assert cli._select_data_files(files) == {"a.npx.csv": "u1", "b.xlsx": "u2"}
+
+
+def test_download_pad_files_skips_other_copies(monkeypatch, tmp_path: Path):
+    base = "ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2026/10/PAD000068/"
+
+    class FakeClient:
+        def get_download_files(self, accession):
+            return {
+                "NPQ_Long_Format.csv": (base + "NPQ_Long_Format.csv", "RESULT"),
+                "NPQ_Values.xlsx": (base + "NPQ_Values.xlsx", "OTHER"),
+                "study.sdrf.tsv": (base + "study.sdrf.tsv", "EXPERIMENTAL DESIGN"),
+            }
+
+    monkeypatch.setattr("pyprideap.api.pride.PrideClient", FakeClient)
+
+    def fake_fetch(url, dest):
+        dest.write_text("x")
+        return dest
+
+    monkeypatch.setattr(cli, "_fetch", fake_fetch)
+    files, sdrf = cli._download_pad_files("PAD000068", tmp_path)
+    assert [f.name for f in files] == ["NPQ_Long_Format.csv"]
+    assert sdrf is not None and sdrf.name == "study.sdrf.tsv"

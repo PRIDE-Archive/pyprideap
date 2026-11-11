@@ -50,6 +50,7 @@ class TestPrideClient:
         mock_response.json.return_value = [
             {
                 "fileName": "olink_npx.csv",
+                "fileCategory": {"value": "RESULT"},
                 "publicFileLocations": [
                     {
                         "name": "FTP Protocol",
@@ -63,3 +64,5 @@ class TestPrideClient:
             urls = client.get_download_urls("PAD000001")
             assert "olink_npx.csv" in urls
             assert "ftp://" in urls["olink_npx.csv"]
+            files = client.get_download_files("PAD000001")
+            assert files["olink_npx.csv"][1] == "RESULT"
