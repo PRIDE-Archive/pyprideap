@@ -368,7 +368,26 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    df = _apply_olink_aliases(_read_delimited(path))
+    from pyprideap.io.readers.olink_wide import is_olink_wide_csv, read_olink_wide
+
+    if is_olink_wide_csv(path):
+        # NPX Manager / NPX Signature "NPX data" export: one column per assay
+        return olink_long_to_dataset(read_olink_wide(path), path)
+    return olink_long_to_dataset(_apply_olink_aliases(_read_delimited(path)), path)
+
+
+def read_olink_wide_dataset(path: str | Path) -> AffinityDataset:
+    """Wide NPX export (CSV, or every wide sheet of a workbook)."""
+    from pyprideap.io.readers.olink_wide import read_olink_wide
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    return olink_long_to_dataset(read_olink_wide(path), path)
+
+
+def olink_long_to_dataset(df: pd.DataFrame, path: Path) -> AffinityDataset:
+    """Build the dataset from a long Olink table (one row per sample x assay)."""
     missing = _REQUIRED_COLS - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")

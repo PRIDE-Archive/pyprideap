@@ -14,8 +14,14 @@ from pyprideap.io.readers.nulisa import (
     read_nulisa_csv,
     read_nulisa_xlsx,
 )
-from pyprideap.io.readers.olink_csv import _OLINK_COLUMN_ALIASES, _sniff_delimiter, read_olink_csv
+from pyprideap.io.readers.olink_csv import (
+    _OLINK_COLUMN_ALIASES,
+    _sniff_delimiter,
+    read_olink_csv,
+    read_olink_wide_dataset,
+)
 from pyprideap.io.readers.olink_parquet import read_olink_parquet
+from pyprideap.io.readers.olink_wide import is_olink_wide_csv, olink_wide_sheets
 from pyprideap.io.readers.olink_xlsx import read_olink_xlsx
 from pyprideap.io.readers.somascan_adat import is_somascan_table_csv, read_somascan_adat
 from pyprideap.io.readers.somascan_csv import read_somascan_csv
@@ -73,6 +79,10 @@ def detect_format(path: str | Path) -> str:
             logger.debug("Format detected: nulisa_csv (NPQ long format)")
             return "nulisa_csv"
 
+    if suffix == ".csv" and is_olink_wide_csv(path):
+        logger.debug("Format detected: olink_wide (NPX data grid, one column per assay)")
+        return "olink_wide"
+
     if name.endswith(".npx.csv") or name.endswith(".ct.csv"):
         logger.debug("Format detected: olink_csv (name pattern=%s)", name)
         return "olink_csv"
@@ -91,6 +101,10 @@ def detect_format(path: str | Path) -> str:
     if suffix == ".xlsx" and is_nulisa_workbook(path):
         logger.debug("Format detected: nulisa_xlsx (NPQ workbook)")
         return "nulisa_xlsx"
+
+    if suffix == ".xlsx" and olink_wide_sheets(path):
+        logger.debug("Format detected: olink_wide (NPX data workbook)")
+        return "olink_wide"
 
     if suffix == ".xlsx":
         df_head = pd.read_excel(path, nrows=1)
@@ -134,7 +148,7 @@ def read(path: str | Path, *, platform: str | None = None) -> AffinityDataset:
             if suffix == ".parquet":
                 return read_olink_parquet(path)
             if suffix == ".xlsx":
-                return read_olink_xlsx(path)
+                return read_olink_wide_dataset(path) if olink_wide_sheets(path) else read_olink_xlsx(path)
             return read_olink_csv(path)
 
     fmt = detect_format(path)
@@ -144,6 +158,7 @@ def read(path: str | Path, *, platform: str | None = None) -> AffinityDataset:
         "olink_parquet": read_olink_parquet,
         "olink_csv": read_olink_csv,
         "olink_xlsx": read_olink_xlsx,
+        "olink_wide": read_olink_wide_dataset,
         "somascan_csv": read_somascan_csv,
         "nulisa_csv": read_nulisa_csv,
         "nulisa_xlsx": read_nulisa_xlsx,
