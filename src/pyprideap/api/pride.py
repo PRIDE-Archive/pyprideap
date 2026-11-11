@@ -43,15 +43,19 @@ class PrideClient:
         logger.debug("Files found: %d for %s", len(files), accession)
         return files  # type: ignore[no-any-return]
 
-    def get_download_urls(self, accession: str) -> dict[str, str]:
+    def get_download_files(self, accession: str) -> dict[str, tuple[str, str | None]]:
+        """File name -> (FTP URL, file category such as RESULT, RAW or OTHER)."""
         files = self.list_files(accession)
-        urls = {}
+        out: dict[str, tuple[str, str | None]] = {}
         for f in files:
             name = f.get("fileName", "")
-            locations = f.get("publicFileLocations", [])
-            for loc in locations:
+            category = (f.get("fileCategory") or {}).get("value")
+            for loc in f.get("publicFileLocations", []):
                 if loc.get("name") == "FTP Protocol":
-                    urls[name] = loc["value"]
+                    out[name] = (loc["value"], category.upper() if isinstance(category, str) else None)
                     break
-        logger.debug("Download URLs extracted: %d FTP links", len(urls))
-        return urls
+        logger.debug("Download URLs extracted: %d FTP links", len(out))
+        return out
+
+    def get_download_urls(self, accession: str) -> dict[str, str]:
+        return {name: url for name, (url, _category) in self.get_download_files(accession).items()}

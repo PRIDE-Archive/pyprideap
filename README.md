@@ -142,6 +142,10 @@ With `-a PAD…` the dataset files are downloaded in parallel from the EBI FIRE 
 | `PYPRIDEAP_FIRE_URL` | `https://hh.fire.sdo.ebi.ac.uk` | FIRE endpoint (use the internal one inside EBI) |
 | `PYPRIDEAP_DOWNLOAD_WORKERS` | `8` | Parallel downloads |
 
+Only data files typed **RESULT** or **RAW** in PRIDE are read; files typed OTHER or SEARCH
+(the same data in another layout, sample sheets, analysis outputs) are skipped. When a dataset
+has no RESULT or RAW data file, every data file is read.
+
 ### Verbose mode
 
 Use `-v` / `--verbose` to enable detailed debug logging. This shows progress through each processing stage:

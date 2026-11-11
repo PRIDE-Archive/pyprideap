@@ -164,22 +164,44 @@ def _fetch(url: str, dest: Path) -> Path:
     return dest
 
 
+# Files the submitter typed as RESULT or RAW hold the measurements; OTHER and
+# SEARCH files next to them are usually the same data in another layout, sample
+# sheets or analysis outputs, and would add duplicate or failing reports.
+_QC_FILE_CATEGORIES = ("RESULT", "RAW")
+
+
+def _select_data_files(files: dict[str, tuple[str, str | None]]) -> dict[str, str]:
+    """Data files to QC: those typed RESULT or RAW, or all of them when none is."""
+    typed = {name: url for name, (url, category) in files.items() if category in _QC_FILE_CATEGORIES}
+    if typed:
+        skipped = sorted(set(files) - set(typed))
+        if skipped:
+            logger.debug("Skipping data files not typed RESULT/RAW: %s", skipped)
+        return typed
+    return {name: url for name, (url, _category) in files.items()}
+
+
 def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Path | None]:
     """Download NPX/ADAT files (and SDRF if present) from PRIDE for a PAD accession."""
     from pyprideap.api.pride import PrideClient
 
     client = PrideClient()
     logger.debug("Fetching file list for %s from PRIDE API...", accession)
-    urls = client.get_download_urls(accession)
+    files = client.get_download_files(accession)
+    urls = {name: url for name, (url, _category) in files.items()}
 
     # Filter for supported data files
     data_extensions = {".csv", ".parquet", ".xlsx", ".adat"}
-    data_urls = {
-        name: url
-        for name, url in urls.items()
-        if any(name.lower().endswith(ext) for ext in data_extensions) and "checksum" not in name.lower()
-    }
     sdrf_urls = {name: url for name, url in urls.items() if _is_sdrf_filename(name) and "checksum" not in name.lower()}
+    data_urls = _select_data_files(
+        {
+            name: entry
+            for name, entry in files.items()
+            if any(name.lower().endswith(ext) for ext in data_extensions)
+            and "checksum" not in name.lower()
+            and name not in sdrf_urls
+        }
+    )
     # Instrument XMLs are not QC'd themselves but annotate data files next to them
     # (NULISAseq: UniProt IDs and plate QC for the NPQ exports)
     aux_urls = {
@@ -197,7 +219,7 @@ def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Pat
 
     jobs = [(name, url, dest_dir / Path(name).name) for name, url in {**data_urls, **sdrf_urls, **aux_urls}.items()]
     for name, _url, _dest in jobs:
-        click.echo(f"Downloading {name}...")
+        click.echo(f"Downloading {name}...", err=True)
 
     # The PRIDE HTTPS gateway takes ~10 s before the first byte of every file, so
     # downloading one file after another dominates the run time. Fetch in parallel.
