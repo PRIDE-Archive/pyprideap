@@ -7,7 +7,7 @@ from typing import cast
 
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, cached_per_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ def control_sample_mask(samples: pd.DataFrame) -> pd.Series:
     return cast(pd.Series, mask)
 
 
+@cached_per_dataset
 def filter_controls(dataset: AffinityDataset) -> AffinityDataset:
     """Remove control samples based on the SampleType (or SDRF sample type) column.
 

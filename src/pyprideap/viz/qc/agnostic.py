@@ -25,7 +25,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, numeric_frame
 from pyprideap.io.readers.sdrf import resolve_biological_groups
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class RankConcordanceData:
 
 
 def _numeric_expression(dataset: AffinityDataset) -> pd.DataFrame:
-    return cast(pd.DataFrame, dataset.expression.apply(pd.to_numeric, errors="coerce"))
+    return cast(pd.DataFrame, numeric_frame(dataset.expression))
 
 
 def _study_mask(dataset: AffinityDataset) -> np.ndarray:

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, numeric_frame
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +243,7 @@ def _filter_by_lod(
     if lod is None:
         return dataset, 0
 
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(dataset.expression)
 
     if isinstance(lod, pd.DataFrame):
         above = numeric.gt(lod.reindex(columns=numeric.columns))
@@ -304,7 +304,7 @@ def _prep_for_dimred(
     2. Drop assays with >10% missingness (>5% if <=88 samples)
     3. Impute remaining missing values by assay median
     """
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(dataset.expression)
     n_samples = len(numeric)
 
     # Determine missingness cutoff

@@ -47,7 +47,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset, Platform
+from pyprideap.core import AffinityDataset, Platform, cached_per_dataset, numeric_frame
 from pyprideap.processing.filtering import _CONTROL_SAMPLE_TYPES, normalize_sample_type
 
 logger = logging.getLogger(__name__)
@@ -159,7 +159,7 @@ def _nclod_base(dataset: AffinityDataset) -> pd.Series:
             f"for LOD calculation, found {control_mask.sum()}"
         )
 
-    numeric_expr = dataset.expression[control_mask].apply(pd.to_numeric, errors="coerce")
+    numeric_expr = numeric_frame(dataset.expression[control_mask])
 
     medians = numeric_expr.median()
     stds = numeric_expr.std()
@@ -232,7 +232,7 @@ def compute_nc_lod_detailed(
     if control_mask.sum() < _MIN_CONTROLS_FOR_LOD:
         raise ValueError(f"Need at least {_MIN_CONTROLS_FOR_LOD} PASS negative controls, found {control_mask.sum()}")
 
-    numeric_expr = dataset.expression[control_mask].apply(pd.to_numeric, errors="coerce")
+    numeric_expr = numeric_frame(dataset.expression[control_mask])
 
     # LODNPX: median + max(0.2, 3*SD) — uses PCNormalizedNPX if available,
     # otherwise falls back to NPX
@@ -243,9 +243,9 @@ def compute_nc_lod_detailed(
     # Count-based LOD — requires a count matrix in metadata
     count_matrix = dataset.metadata.get("count_matrix")
     if count_matrix is not None and isinstance(count_matrix, pd.DataFrame):
-        nc_counts = count_matrix[control_mask].apply(pd.to_numeric, errors="coerce")
+        nc_counts = numeric_frame(count_matrix[control_mask])
         max_counts = nc_counts.max()
-        lod_count = np.maximum(_LOD_COUNT_FLOOR, _LOD_COUNT_MULTIPLIER * max_counts)
+        lod_count = cast(pd.Series, np.maximum(_LOD_COUNT_FLOOR, _LOD_COUNT_MULTIPLIER * max_counts))
         lod_method: pd.Series = pd.Series(
             np.where(max_counts > _LOD_COUNT_FLOOR, "lod_npx", "lod_count"),
             index=lod_npx.index,
@@ -330,7 +330,7 @@ def compute_pc_normalized_lod(
         "Normalization" in dataset.samples.columns
         and (dataset.samples["Normalization"].astype(str).str.strip() == "Intensity").any()
     ):
-        numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+        numeric = numeric_frame(dataset.expression)
         # Per-plate median NPX of SAMPLE rows
         if "PlateID" in dataset.samples.columns:
             st = dataset.samples.get("SampleType")
@@ -381,6 +381,7 @@ def _find_buffer_samples(dataset: AffinityDataset) -> pd.Series:
     return is_buffer
 
 
+@cached_per_dataset
 def compute_soma_elod(dataset: AffinityDataset) -> pd.Series:
     """Compute SomaScan estimated LOD (eLOD) from buffer samples.
 
@@ -400,7 +401,7 @@ def compute_soma_elod(dataset: AffinityDataset) -> pd.Series:
         If no buffer samples are found in the dataset.
     """
     buffer_mask = _find_buffer_samples(dataset)
-    numeric_expr = dataset.expression[buffer_mask].apply(pd.to_numeric, errors="coerce")
+    numeric_expr = numeric_frame(dataset.expression[buffer_mask])
 
     medians = numeric_expr.median()
     # scipy.stats.median_abs_deviation uses scale=1.4826 by default,
@@ -432,7 +433,7 @@ def _intensity_adjustment(
     else:
         is_ext_ctrl = pd.Series(False, index=dataset.samples.index)
 
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(dataset.expression)
     plates = dataset.samples["PlateID"]
 
     # Global median across all non-control samples (reference)
@@ -559,6 +560,7 @@ def get_bundled_fixed_lod_path(platform: Platform | str) -> Path | None:
     return path if path.exists() else None
 
 
+@cached_per_dataset
 def load_fixed_lod(
     dataset: AffinityDataset,
     lod_file_path: str | Path | None = None,
@@ -749,7 +751,7 @@ def compute_lod_stats(
     n_assays_total = len(dataset.expression.columns)
 
     # Compute above-LOD matrix
-    expr_numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    expr_numeric = numeric_frame(dataset.expression)
     above_lod, has_lod = _above_lod_matrix(expr_numeric, lod)
 
     # Count assays that have any LOD value
@@ -807,6 +809,7 @@ def compute_lod_stats(
     )
 
 
+@cached_per_dataset
 def resolve_lod_with_source(dataset: AffinityDataset) -> tuple[pd.DataFrame | pd.Series | None, str | None]:
     """Resolve the LOD used for QC reports and protein counts, and name its source.
 
@@ -905,7 +908,7 @@ def get_proteins_above_lod(
     if lod is None:
         return []
 
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(dataset.expression)
     above_lod, has_lod = _above_lod_matrix(numeric, lod)
     study = ~control_sample_mask(dataset.samples).to_numpy()
     numeric, above_lod, has_lod = numeric.loc[study], above_lod.loc[study], has_lod.loc[study]
@@ -973,10 +976,10 @@ def get_valid_proteins(
         try:
             lod = compute_lod_from_controls(dataset)
         except ValueError:
-            expr_numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+            expr_numeric = numeric_frame(ds.expression)
             return sorted(expr_numeric.columns[expr_numeric.notna().any()].tolist())
 
-    expr_numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
+    expr_numeric = numeric_frame(ds.expression)
     # Align LOD rows to filtered expression when LOD is a DataFrame
     if isinstance(lod, pd.DataFrame):
         lod = lod.reindex(expr_numeric.index)
