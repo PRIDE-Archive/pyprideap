@@ -131,6 +131,17 @@ Or via `python -m`:
 python -m pyprideap report data.npx.csv
 ```
 
+### Download from PRIDE
+
+With `-a PAD…` the dataset files are downloaded in parallel from the EBI FIRE object store
+(`https://hh.fire.sdo.ebi.ac.uk`, bucket `pride-public`), falling back to `https://ftp.pride.ebi.ac.uk`.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PYPRIDEAP_DOWNLOAD_PROTOCOL` | `fire` | `fire`, `ftp` or `https` — first mirror to try |
+| `PYPRIDEAP_FIRE_URL` | `https://hh.fire.sdo.ebi.ac.uk` | FIRE endpoint (use the internal one inside EBI) |
+| `PYPRIDEAP_DOWNLOAD_WORKERS` | `8` | Parallel downloads |
+
 ### Verbose mode
 
 Use `-v` / `--verbose` to enable detailed debug logging. This shows progress through each processing stage:
