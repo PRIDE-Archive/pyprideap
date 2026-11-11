@@ -10,7 +10,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset, Platform, value_unit
+from pyprideap.core import AffinityDataset, Platform, linearize, value_unit
 from pyprideap.processing.lod import resolve_lod_with_source
 from pyprideap.viz.qc.agnostic import compute_agnostic_qc
 
@@ -102,6 +102,9 @@ class DataCompletenessData:
     protein_ids: list[str] = field(default_factory=list)  # per-protein identifiers
     missing_freq: list[float] = field(default_factory=list)  # per-protein fraction below LOD (0-1)
     title: str = "Sample Completeness"
+    # NPQ (NULISA) exports have no missing values: below-LOD values are kept, so the
+    # per-protein view is shown as detectability (% of samples above LOD) instead
+    unit: str = "NPX"
 
 
 @dataclass
@@ -458,13 +461,18 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
     detected assay reaches 100% whatever the share of controls in the file.
     Negative controls, blanks and buffers are reported separately: they should
     stay near 0%; higher values point to contamination or high background.
+
+    They are not reported when the LOD was itself derived from those controls
+    (NULISA: mean + 3 SD of the plate's negative controls; Olink NCLOD), because
+    they then fall below it by construction and the trace carries no information.
     """
     from pyprideap.processing.filtering import control_sample_mask, normalize_sample_type
     from pyprideap.processing.lod import _above_lod_matrix
 
-    lod = _resolve_lod(dataset)
+    lod, lod_source = resolve_lod_with_source(dataset)
     if lod is None:
         return None
+    lod_from_negatives = dataset.platform == Platform.NULISA or lod_source == "NCLOD"
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     above_lod, has_lod = _above_lod_matrix(numeric, lod)
@@ -486,7 +494,7 @@ def compute_lod_analysis(dataset: AffinityDataset) -> LodAnalysisData | None:
     if not assays or not study.any():
         return None
     study_pct = pct_above(study)
-    negative_pct = pct_above(negative) if negative.any() else None
+    negative_pct = pct_above(negative) if negative.any() and not lod_from_negatives else None
 
     id_col = "OlinkID" if "OlinkID" in dataset.features.columns else dataset.features.columns[0]
     id_to_panel: dict[str, str] = {}
@@ -712,8 +720,15 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
     if numeric.shape[0] > max_samples:
         numeric = numeric.sample(n=max_samples, random_state=42)
 
+    # Centre and scale each protein across samples before correlating samples. Without
+    # this, the shared abundance profile (some proteins are always high, others low)
+    # makes almost every pair correlate near 1 and hides the clustering structure.
+    std = numeric.std()
+    scaled = (numeric - numeric.mean()) / std.where(std > 0)
+    scaled = scaled.loc[:, std.gt(0)]
+
     # Compute correlation (samples x samples)
-    corr = numeric.T.corr()
+    corr = scaled.T.corr()
 
     # Reorder samples by similarity (hierarchical clustering on correlation distance)
     # If scipy isn't available, fall back to a metadata-based ordering so the plot is stable.
@@ -741,7 +756,7 @@ def compute_correlation(dataset: AffinityDataset, max_samples: int = 50) -> Corr
         if sort_cols:
             ordered_idx = dataset.samples.loc[numeric.index].sort_values(sort_cols).index
             numeric = numeric.loc[ordered_idx]
-            corr = numeric.T.corr()
+            corr = scaled.loc[ordered_idx].T.corr()
             order = list(range(len(corr)))
 
     if order and len(order) == len(corr):
@@ -854,23 +869,22 @@ def compute_data_completeness(dataset: AffinityDataset) -> DataCompletenessData 
         below_lod_rate=below_lod_rate,
         protein_ids=protein_ids,
         missing_freq=missing_freq_values,
+        unit=value_unit(dataset.platform),
     )
 
 
 def _linear_study_samples(dataset: AffinityDataset) -> AffinityDataset:
     """Study samples only, with values on a linear scale for CV = SD / mean.
 
-    Control samples are dropped. Olink NPX is log2, so it is converted to
-    2^NPX (SD / mean is meaningless on log data); SomaScan RFU is already
-    linear and is used as deposited.
+    Control samples are dropped. Log2 units are converted with
+    :func:`pyprideap.core.linearize` (Olink 2^NPX, NULISA 2^NPQ - 1), because
+    SD / mean is meaningless on log data; SomaScan RFU is used as deposited.
     """
     from pyprideap.processing.filtering import filter_controls
 
     ds = filter_controls(dataset)
     numeric = ds.expression.apply(pd.to_numeric, errors="coerce")
-    if ds.platform != Platform.SOMASCAN:
-        numeric = np.power(2, numeric)
-    return replace(ds, expression=numeric)
+    return replace(ds, expression=linearize(numeric, ds.platform))
 
 
 def compute_cv_distribution(dataset: AffinityDataset) -> CvDistributionData | None:
@@ -1514,20 +1528,34 @@ class ReplicateCvData:
 
     control_label: str
     n_replicates: int
-    technical_cv: list[float]
+    technical_cv: list[float]  # intra-plate CV per assay (pooled when plates are unknown)
     study_cv: list[float]
     n_assays_total: int
-    lod_filtered: bool  # technical_cv excludes assays below LOD in the controls (where LOD is known)
+    lod_filtered: bool  # technical CVs exclude assays below LOD in the controls (where LOD is known)
+    inter_plate_cv: list[float] = field(default_factory=list)  # all replicates across plates; >= 2 plates only
+    n_plates: int = 0  # plates with >= 2 replicates (0 when the file has no plate column)
+    plate_resolved: bool = False  # technical_cv is per plate (True) or pooled over unknown plates (False)
     title: str = "Technical vs Study-Sample CV"
 
 
+def _cv(frame: pd.DataFrame) -> pd.Series:
+    return cast(pd.Series, (frame.std() / frame.mean()).replace([np.inf, -np.inf], np.nan))
+
+
 def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
-    """CV of each assay across replicate control samples (Olink sample controls, SomaScan QC samples).
+    """CV of each assay across replicate control samples (Olink and NULISA sample controls, SomaScan QC samples).
 
     Values are linearized the same way as :func:`compute_cv_distribution`
-    (Olink 2^NPX, SomaScan RFU as deposited). When an LOD is available only
-    assays whose median control value is above LOD are kept, because CVs of
-    assays at noise level are not meaningful.
+    (Olink 2^NPX, NULISA 2^NPQ - 1, SomaScan RFU as deposited). When an LOD
+    is available only assays whose median control value is above LOD are
+    kept, because CVs of assays at noise level are not meaningful.
+
+    When the file has a plate column, precision is split as NULISAseq and Olink
+    report it: the intra-plate CV of an assay is the mean of its CVs within
+    each plate (plates with >= 2 replicates), and the inter-plate CV is its CV
+    across all replicates of all plates, so it also contains the between-plate
+    variation. Without a plate column only the pooled CV is available, which
+    mixes the two when the file spans several plates.
     """
     from pyprideap.processing.filtering import normalize_sample_type
 
@@ -1542,8 +1570,26 @@ def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
 
     numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
     controls = numeric.loc[is_rep]
-    linear = controls if family == "somascan" else np.power(2, controls)
-    cv = (linear.std() / linear.mean()).replace([np.inf, -np.inf], np.nan)
+    linear = linearize(controls, dataset.platform)
+    pooled = _cv(linear)
+
+    plate_col = _plate_column(dataset.samples)
+    plate_resolved = plate_col is not None
+    inter: pd.Series | None = None
+    n_plates = 0
+    if plate_col is not None:
+        plates = dataset.samples.loc[is_rep, plate_col].astype(str).to_numpy()
+        per_plate = [_cv(linear.loc[plates == p]) for p in pd.unique(plates) if int((plates == p).sum()) >= 2]
+        n_plates = len(per_plate)
+        if n_plates == 0:
+            plate_resolved = False
+            cv = pooled
+        else:
+            cv = cast(pd.Series, pd.concat(per_plate, axis=1).mean(axis=1))
+            if n_plates >= 2:
+                inter = pooled
+    else:
+        cv = pooled
 
     lod = _resolve_lod(dataset)
     lod_filtered = lod is not None
@@ -1556,6 +1602,8 @@ def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
         lod_filtered = bool(lod_ctrl.notna().any())
         detected = (controls.median() > lod_ctrl) | lod_ctrl.isna()
         cv = cv[detected]
+        if inter is not None:
+            inter = inter[detected]
     cv = cv.dropna()
     if cv.empty:
         return None
@@ -1568,6 +1616,9 @@ def compute_replicate_cv(dataset: AffinityDataset) -> ReplicateCvData | None:
         study_cv=study.cv_values if study is not None else [],
         n_assays_total=int(numeric.shape[1]),
         lod_filtered=lod_filtered,
+        inter_plate_cv=inter.dropna().round(4).tolist() if inter is not None else [],
+        n_plates=n_plates,
+        plate_resolved=plate_resolved,
     )
 
 
@@ -2465,7 +2516,7 @@ _NULISA_SAMPLE_METRICS = (
     ("QC_Reads", "Reads per sample", "NumReads", (5e5,), "min"),
     ("QC_ICReads", "Internal control reads", "ICReads", (1000.0,), "min"),
     ("QC_ICMedian", "IC reads vs plate median", "IC_Median", (-0.4, 0.4), "range"),
-    ("QC_Detectability", "Detectability (targets > LOD)", "Detectability_plasma", (), "info"),
+    ("QC_Detectability", "Detectability (informational)", "Detectability_plasma", (), "info"),
 )
 
 
