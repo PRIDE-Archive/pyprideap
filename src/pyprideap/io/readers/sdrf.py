@@ -324,9 +324,11 @@ def merge_sdrf(
     if not new_cols:
         return dataset
 
-    sdrf_join_col = sdrf_col
-    if sdrf_join_col not in sdrf.columns and "assay name" in sdrf.columns:
-        sdrf_join_col = "assay name"
+    # SDRF columns to join on: source name identifies the biological source (shared
+    # by repeated measurements of one individual), assay name each measurement.
+    # Both are tried and the one matching the most samples is used.
+    sdrf_join_cols = [c for c in dict.fromkeys([sdrf_col, "assay name"]) if c in sdrf.columns]
+    sdrf_join_col = sdrf_join_cols[0]
 
     # An SDRF often describes several data files; use only the rows for this one
     source_file = dataset.metadata.get("source_file")
@@ -338,7 +340,7 @@ def merge_sdrf(
             )
             sdrf = sdrf[own]
 
-    sdrf_subset = sdrf[[sdrf_join_col] + new_cols].copy()
+    sdrf_subset = sdrf[sdrf_join_cols + new_cols].copy()
     left = dataset.samples.copy()
 
     # Join keys, tried in order; the one matching the most samples wins:
@@ -351,24 +353,33 @@ def merge_sdrf(
         _loose_sample_id,
     )
     merged, matched, sample_col = left, -1, sample_cols[0]
-    for col in sample_cols:
-        for key_fn in key_functions:
-            lk, rk = left[col].map(key_fn), sdrf_subset[sdrf_join_col].map(key_fn)
-            # SDRF allows several rows per source name (e.g. one per assay); keep one
-            # so the merge stays 1:1 and samples stay aligned with the expression matrix.
-            right = sdrf_subset.assign(_prideap_key=rk).drop_duplicates(subset=["_prideap_key"], keep="first")
-            attempt = left.assign(_prideap_key=lk).merge(right, on="_prideap_key", how="left")
-            n = int(attempt[new_cols[0]].notna().sum())
-            if n > matched:
-                merged, matched, sample_col = attempt.drop(columns=["_prideap_key"]), n, col
+    for join_col in sdrf_join_cols:
+        for col in sample_cols:
+            for key_fn in key_functions:
+                lk, rk = left[col].map(key_fn), sdrf_subset[join_col].map(key_fn)
+                # SDRF allows several rows per source name (e.g. one per assay); keep one
+                # so the merge stays 1:1 and samples stay aligned with the expression matrix.
+                right = (
+                    sdrf_subset.drop(columns=sdrf_join_cols)
+                    .assign(_prideap_key=rk)
+                    .drop_duplicates(subset=["_prideap_key"], keep="first")
+                )
+                attempt = left.assign(_prideap_key=lk).merge(right, on="_prideap_key", how="left")
+                n = int(attempt[new_cols[0]].notna().sum())
+                if n > matched:
+                    merged, matched, sample_col, sdrf_join_col = (
+                        attempt.drop(columns=["_prideap_key"]),
+                        n,
+                        col,
+                        join_col,
+                    )
+                if matched == len(left):
+                    break
             if matched == len(left):
                 break
         if matched == len(left):
             break
-    logger.debug("SDRF merge: %d of %d samples matched on %s", matched, len(left), sample_col)
-
-    if sdrf_join_col != sample_col and sdrf_join_col in merged.columns:
-        merged = merged.drop(columns=[sdrf_join_col])
+    logger.debug("SDRF merge: %d of %d samples matched on %s -> %s", matched, len(left), sample_col, sdrf_join_col)
 
     if len(merged) != len(left):
         logger.warning("SDRF merge would change the number of samples; SDRF not merged")
