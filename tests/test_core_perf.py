@@ -26,7 +26,7 @@ def test_cache_only_inside_scope():
     calls = []
 
     @cached_per_dataset
-    def work(ds):
+    def work(ds, extra=None):
         calls.append(ds)
         return len(calls)
 
