@@ -6,7 +6,7 @@ or platform-specific acceptance rules, and they do not re-normalise vendor
 outputs.
 
 MPI and relative spread divide by the median, so they are computed on a linear
-scale (Olink 2^NPX, SomaScan RFU as deposited), the same convention as the CV
+scale (Olink 2^NPX, NULISA 2^NPQ - 1, SomaScan RFU as deposited), the same convention as the CV
 plots: on log2 NPX, which is centred near 0 and often negative, a ratio to the
 median depends on the arbitrary NPX reference rather than on precision.
 Rank concordance uses ranks, which do not depend on the scale.
@@ -66,7 +66,7 @@ class DynamicRangeData:
     group_counts: dict[str, int] = field(default_factory=dict)
     n_proteins: int = 0
     title: str = "Relative Spread"
-    xlabel: str = "Relative IQR (IQR / median, linear scale)"
+    xlabel: str = "Relative IQR (IQR / median)"
     ylabel: str = "Number of proteins"
 
 
@@ -96,7 +96,7 @@ def _study_mask(dataset: AffinityDataset) -> np.ndarray:
 
 
 def _linear_study_values(dataset: AffinityDataset) -> pd.DataFrame:
-    """Study-sample matrix on a linear scale (Olink 2^NPX, SomaScan RFU as deposited)."""
+    """Study-sample matrix on a linear scale (Olink 2^NPX, NULISA 2^NPQ - 1, SomaScan RFU)."""
     from pyprideap.viz.qc.compute import _linear_study_samples
 
     return _linear_study_samples(dataset).expression
@@ -120,7 +120,7 @@ def _clean_group_labels(labels: pd.Series) -> pd.Series:
 
 
 def _mpi_from_matrix(numeric: pd.DataFrame) -> pd.Series:
-    """Vectorised MPI = 1 / (1.4826 × MAD / |median|) per protein."""
+    """Vectorised MPI = |median| / (1.4826 × MAD) per protein, i.e. the inverse of a robust CV."""
     n = numeric.notna().sum(axis=0)
     median = numeric.median(axis=0)
     mad = (numeric - median).abs().median(axis=0)

@@ -345,7 +345,7 @@ def render_lod_analysis(data: LodAnalysisData) -> Figure:
                 y=trend,
                 mode="lines",
                 line=dict(color="#2c3e50", dash="dash", width=2),
-                name=f"Negative controls, running mean ({window} proteins)",
+                name=f"Negative controls, rolling mean over {window} ranked proteins",
                 legendgroup="negatives",
                 hoverinfo="skip",
             )
@@ -850,9 +850,63 @@ def render_sample_completeness(data: DataCompletenessData) -> Figure:
     return fig
 
 
-def render_missing_frequency(data: DataCompletenessData) -> Figure:
-    """Per-protein missing frequency histogram as standalone plot."""
+def _render_detectability(data: DataCompletenessData) -> Figure:
+    """Per-target detectability (% of study samples above LOD), the NULISAseq convention.
+
+    NPQ exports keep below-LOD values (they are low, noisier measurements, not
+    missing ones), and Alamar flags targets detected in fewer than 50% of samples.
+    """
     go, _ = _import_plotly()
+
+    fig = go.Figure()
+    if data.missing_freq:
+        detect_pct = [(1.0 - f) * 100 for f in data.missing_freq]
+        fig.add_trace(
+            go.Histogram(
+                x=detect_pct,
+                xbins=dict(start=0, end=100, size=4),
+                marker_color="#27ae60",
+                showlegend=False,
+                hovertemplate="%{x}% of samples above LOD<br>%{y} targets<extra></extra>",
+            ),
+        )
+        n_ok = sum(1 for p in detect_pct if p >= 50.0)
+        fig.add_annotation(
+            text=f"{n_ok / len(detect_pct):.1%} of targets detected in &ge;50% of samples",
+            xref="paper",
+            yref="paper",
+            x=0.02,
+            y=0.98,
+            xanchor="left",
+            yanchor="top",
+            showarrow=False,
+            font=dict(size=12),
+            bgcolor="rgba(255,255,255,0.8)",
+        )
+        fig.add_vline(
+            x=50,
+            line_dash="dash",
+            line_color="#e67e22",
+            line_width=2,
+            annotation_text="50% detectability",
+            annotation_position="top left",
+            annotation_font_color="#e67e22",
+        )
+    fig.update_xaxes(title_text="Detectability (% of samples above LOD)", range=[0, 100], ticksuffix="%")
+    fig.update_yaxes(title_text="Number of proteins")
+    fig.update_layout(title="Target Detectability", height=500, margin=dict(b=100))
+    return fig
+
+
+def render_missing_frequency(data: DataCompletenessData) -> Figure:
+    """Per-protein missing frequency histogram as standalone plot.
+
+    For NULISA (NPQ) data the same information is shown as target detectability.
+    """
+    go, _ = _import_plotly()
+
+    if getattr(data, "unit", "NPX") == "NPQ":
+        return _render_detectability(data)
 
     fig = go.Figure()
     if data.missing_freq:
@@ -889,7 +943,7 @@ def render_missing_frequency(data: DataCompletenessData) -> Figure:
             annotation_font_color="#e67e22",
         )
     fig.update_xaxes(title_text="Missing Frequency (% Samples Below LOD)", range=[0, 100])
-    fig.update_yaxes(title_text="Number of Proteins")
+    fig.update_yaxes(title_text="Number of proteins")
     fig.update_layout(
         title="Missing Frequency Distribution",
         height=500,
@@ -900,17 +954,24 @@ def render_missing_frequency(data: DataCompletenessData) -> Figure:
 
 def render_cv_distribution(data: CvDistributionData) -> Figure:
     go, _ = _import_plotly()
-    fig = go.Figure(data=[go.Histogram(x=data.cv_values, nbinsx=50)])
+    fig = go.Figure(
+        data=[go.Histogram(x=data.cv_values, nbinsx=50, hovertemplate="CV %{x}<br>%{y} proteins<extra></extra>")]
+    )
     fig.add_vline(
         x=0.2,
         line_dash="dash",
         line_color="#27ae60",
         line_width=2,
-        annotation_text="guide: CV = 0.2",
+        annotation_text="guide: CV = 20%",
         annotation_position="top right",
         annotation_font_color="#27ae60",
     )
-    fig.update_layout(title=data.title, xaxis_title="Coefficient of Variation", yaxis_title="Number of Proteins")
+    fig.update_layout(
+        title=data.title,
+        xaxis_title="CV across study samples (%)",
+        yaxis_title="Number of proteins",
+        xaxis=dict(tickformat=".0%"),
+    )
     return fig
 
 
@@ -973,7 +1034,7 @@ def render_plate_cv(data: PlateCvData) -> Figure:
         fig.add_annotation(
             x="All analytes",
             y=median_val,
-            text=f"median: {median_val:.3f}",
+            text=f"median: {median_val:.1%}",
             showarrow=True,
             arrowhead=2,
             font=dict(size=11, color="#333"),
@@ -982,8 +1043,8 @@ def render_plate_cv(data: PlateCvData) -> Figure:
             col=1,
         )
 
-    fig.update_yaxes(title_text="CV (SD / Mean)", row=1, col=1)
-    fig.update_yaxes(title_text="CV (SD / Mean)", row=2, col=1)
+    fig.update_yaxes(title_text="CV (%)", tickformat=".0%", row=1, col=1)
+    fig.update_yaxes(title_text="CV (%)", tickformat=".0%", row=2, col=1)
     fig.update_layout(
         title=data.title,
         height=800,
@@ -1895,11 +1956,13 @@ def _render_median_histogram(
         annotation_position="top right",
     )
     n_hidden = int(arr.size - shown.size)
-    note = f" ({n_hidden} beyond the 0.5–99.5th percentile not shown)" if n_hidden else ""
+    # The note goes under the title, not into the axis label: long axis labels are
+    # clipped in the half-width cards of the split report.
+    note = f"<br><sup>{n_hidden} proteins beyond the 0.5–99.5th percentile not shown</sup>" if n_hidden else ""
     fig.update_layout(
-        title=title,
-        xaxis_title=xlabel + note,
-        yaxis_title=ylabel,
+        title=title + note,
+        xaxis=dict(title=dict(text=xlabel), automargin=True),
+        yaxis=dict(title=dict(text=ylabel), automargin=True),
         bargap=0.05,
     )
     fig.add_annotation(_case_control_annotation(has_case_control))
@@ -1910,7 +1973,7 @@ def render_mpi(data: MpiData) -> Figure:
     return _render_median_histogram(
         data.values,
         title=data.title,
-        xlabel=data.xlabel + " (median / robust SD, linear scale)",
+        xlabel=data.xlabel + " (median / robust SD)",
         ylabel=data.ylabel,
         bar_color="#3498db",
         median_value=data.median,
@@ -2096,6 +2159,7 @@ def render_bridgeability(data: BridgeabilityData) -> Figure:
 
 _STUDY_COLOR = "#3498db"
 _TECH_COLOR = "#e67e22"
+_INTER_COLOR = "#8e44ad"
 _MAX_PLATE_LABEL = 18
 _QC_STATUS_COLORS = {"PASS": "#2ecc71", "WARN": "#f39c12", "FAIL": "#e74c3c", "NA": "#bdc3c7"}
 
@@ -2105,7 +2169,8 @@ def render_replicate_cv(data: ReplicateCvData) -> Figure:
     go, _ = _import_plotly()
     import numpy as np
 
-    upper = float(np.nanpercentile(data.study_cv + data.technical_cv, 98)) if data.study_cv else 2.0
+    inter = getattr(data, "inter_plate_cv", []) or []
+    upper = float(np.nanpercentile(data.study_cv + data.technical_cv + inter, 98)) if data.study_cv else 2.0
     bins = dict(start=0, end=upper, size=upper / 60)
     fig = go.Figure()
     if data.study_cv:
@@ -2113,18 +2178,31 @@ def render_replicate_cv(data: ReplicateCvData) -> Figure:
             go.Histogram(
                 x=data.study_cv,
                 xbins=bins,
-                histnorm="percent",
                 name=f"Study samples (median {np.median(data.study_cv):.0%})",
                 marker_color=_STUDY_COLOR,
-                opacity=0.55,
+                opacity=0.45,
             )
         )
+    if inter:
+        fig.add_trace(
+            go.Histogram(
+                x=inter,
+                xbins=bins,
+                name=f"{data.control_label}, inter-plate (median {np.median(inter):.0%})",
+                marker_color=_INTER_COLOR,
+                opacity=0.6,
+            )
+        )
+    if getattr(data, "plate_resolved", False):
+        n_plates = getattr(data, "n_plates", 0)
+        scope = "intra-plate" if n_plates != 1 else "intra-plate, 1 plate"
+    else:
+        scope = "pooled, plates unknown"
     fig.add_trace(
         go.Histogram(
             x=data.technical_cv,
             xbins=bins,
-            histnorm="percent",
-            name=f"{data.control_label}, n={data.n_replicates} (median {np.median(data.technical_cv):.0%})",
+            name=(f"{data.control_label}, {scope}, n={data.n_replicates} (median {np.median(data.technical_cv):.0%})"),
             marker_color=_TECH_COLOR,
             opacity=0.75,
         )
@@ -2132,8 +2210,8 @@ def render_replicate_cv(data: ReplicateCvData) -> Figure:
     fig.update_layout(
         title=data.title,
         barmode="overlay",
-        xaxis_title="Coefficient of Variation (linear scale)",
-        yaxis_title="% of Assays",
+        xaxis_title="CV (%)",
+        yaxis_title="Number of proteins",
         xaxis=dict(range=[0, upper], tickformat=".0%"),
         legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
         margin=dict(b=90),
@@ -2437,6 +2515,7 @@ def render_nulisa_qc(data: NulisaQcData) -> Figure:
     types = sorted(set(data.sample_types), key=lambda t: (order.index(t) if t in order else len(order), t))
     for k, metric in enumerate(metrics):
         r, c = k // cols + 1, k % cols + 1
+        y_fmt = "%{y:.1%}" if metric.key in ("QC_ICMedian", "QC_Detectability") else "%{y:,.4g}"
         for t in types:
             idx = [i for i, st in enumerate(data.sample_types) if st == t]
             flagged = [i for i in idx if metric.status and metric.status[i] not in ("PASS", "", "NAN")]
@@ -2452,7 +2531,7 @@ def render_nulisa_qc(data: NulisaQcData) -> Figure:
                     line=dict(color="#95a5a6", width=1),
                     marker=dict(size=6, color="#3498db"),
                     text=[data.sample_ids[i] for i in idx],
-                    hovertemplate="%{text}<br>" + metric.label + ": %{y:,.4g}<extra></extra>",
+                    hovertemplate="%{text}<br>" + metric.label + ": " + y_fmt + "<extra></extra>",
                     showlegend=False,
                 ),
                 row=r,
@@ -2467,7 +2546,7 @@ def render_nulisa_qc(data: NulisaQcData) -> Figure:
                         mode="markers",
                         marker=dict(size=9, color="#e74c3c", line=dict(color="white", width=1)),
                         text=[f"{data.sample_ids[i]} ({metric.status[i]})" for i in flagged],
-                        hovertemplate="%{text}<br>" + metric.label + ": %{y:,.4g}<extra></extra>",
+                        hovertemplate="%{text}<br>" + metric.label + ": " + y_fmt + "<extra></extra>",
                         showlegend=False,
                     ),
                     row=r,
@@ -2476,7 +2555,12 @@ def render_nulisa_qc(data: NulisaQcData) -> Figure:
         for limit in metric.thresholds:
             fig.add_hline(y=limit, line_dash="dash", line_color="#e74c3c", line_width=1.5, row=r, col=c)
         if metric.key in ("QC_Reads", "QC_ICReads"):
-            fig.update_yaxes(type="log", row=r, col=c)
+            fig.update_yaxes(type="log", title_text="Reads (log scale)", row=r, col=c)
+        elif metric.key == "QC_ICMedian":
+            # Stored as a fraction of the plate median; shown in percent like the vendor report
+            fig.update_yaxes(tickformat=".0%", title_text="Deviation from plate median (%)", row=r, col=c)
+        elif metric.key == "QC_Detectability":
+            fig.update_yaxes(tickformat=".0%", title_text="Targets above LOD (%)", row=r, col=c)
     fig.update_layout(
         title=data.title,
         height=300 * rows + 80,

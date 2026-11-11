@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, Platform, linear_scale_label, value_unit
 from pyprideap.viz.qc.agnostic import DynamicRangeData, MpiData, RankConcordanceData
 from pyprideap.viz.qc.compute import (
     BatchEffectData,
@@ -48,11 +48,14 @@ _HELP_TEXT: dict[str, str] = {
         "Sample QC metrics reported by the NULISAseq software, per sample and by sample type "
         "(study samples, sample controls SC, inter-plate controls IPC, negative controls NC), "
         "with the vendor thresholds as dashed lines: total reads per sample (minimum 500,000), "
-        "internal control (IC, mCherry) reads (minimum 1,000), IC reads relative to the plate "
-        "median (within &plusmn;40%), and detectability (share of targets above LOD; "
-        "informational). Samples flagged WARN by the software are shown in red. Thresholds are "
-        "read from the instrument XML when it was deposited next to the data. The plate (run) QC "
-        "metrics are listed in the summary table."
+        "internal control (IC, mCherry) reads (minimum 1,000) and the deviation of the IC reads from "
+        "the plate median, in percent (within &plusmn;40%). Detectability (share of targets above LOD) "
+        "is shown for information only: current NULISAseq software no longer uses it as a sample QC "
+        "criterion. Samples flagged WARN by the software are shown in red. A warning does not mean a "
+        "sample should be excluded; it marks data to examine in the context of the study. Thresholds "
+        "are read from the instrument XML when it was deposited with the data. The run (plate) QC "
+        "metrics (IC CV, inter-plate control CV, total reads) are listed in the Dataset Summary under "
+        "&ldquo;NULISA Run QC&rdquo;; they are only available when the instrument XML was deposited."
     ),
     "readiness": (
         "Whether the information needed to interpret this QC and to reproduce the published analyses "
@@ -63,16 +66,24 @@ _HELP_TEXT: dict[str, str] = {
         "items marked partial are present for some samples or were inferred."
     ),
     "replicate_cv": (
-        "Technical precision from replicate controls of a single material: Olink sample controls or "
-        "SomaScan QC samples. Plate controls and calibrators are not used because they feed the vendor "
-        "normalization or calibration, which would make their CVs look artificially small. CVs are on a "
-        "linear scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited) and, when an LOD is available, "
-        "only assays detected above LOD in the controls are included. The study-sample CV (blue) adds "
-        "biological variation between participants, so it is expected to be much larger. Both depend on "
-        "the normalization applied to the deposited file."
+        "Technical precision from replicate controls of a single material: Olink and NULISA sample "
+        "controls (SC) or SomaScan QC samples. This is the CV that measures assay precision, so small "
+        "values are better. Plate controls (e.g. NULISA inter-plate controls) and calibrators are not "
+        "used because they feed the vendor normalization or calibration, which would make their CVs "
+        "look artificially small. CVs are in percent on a linear scale ({linear}) and, when an LOD is "
+        "available, only assays detected above LOD in the controls are included. When the file has a "
+        "plate column, the orange histogram is the <strong>intra-plate CV</strong> (each assay's CV "
+        "within each plate, averaged over plates) and, with two or more plates, the purple histogram "
+        "is the <strong>inter-plate CV</strong> (all replicates across plates, so it adds the "
+        "variation between plates). Intra-plate CV changes little with intensity or bridge "
+        "normalization, because a shift common to a plate cancels in SD / mean; inter-plate CV "
+        "depends on it. Without a plate column the replicates are pooled. The study-sample CV (blue) "
+        "is not a precision metric: it adds biological variation between participants, so it is "
+        "expected to be much larger."
     ),
     "batch_effect": (
-        "Principal component analysis of study samples (Olink NPX, SomaScan log10 RFU). Each bar is the "
+        "Principal component analysis of study samples (Olink NPX, NULISA NPQ, SomaScan log10 RFU). "
+        "Each bar is the "
         "share of that component's variance explained by plate (η², between-plate over total sum of "
         "squares); the label gives the component's share of total variance. A high value on a major "
         "component suggests a plate/batch effect. It can also be legitimate when plates were not "
@@ -130,9 +141,10 @@ _HELP_TEXT: dict[str, str] = {
         "NA means the vendor did not assess that measurement."
     ),
     "distribution": (
-        "Shows the intensity distribution of expression values for each sample as overlaid histograms. "
-        "Each protein (assay) produces one NPX value per sample, so this plot shows how all protein "
-        "measurements are distributed within each sample. All samples should have similar shapes and "
+        "Shows how the {unit} values of all proteins are distributed within each sample. Each protein "
+        "(assay) produces one {unit} value per sample. With up to 10 samples each sample is drawn as its "
+        "own overlaid histogram; with more samples the plot summarises them as the median and the "
+        "percentile bands of the per-sample distributions. All samples should have similar shapes and "
         "ranges. A sample with a shifted or bimodal distribution may indicate a technical issue "
         "(e.g. failed plate, low protein yield)."
     ),
@@ -153,8 +165,8 @@ _HELP_TEXT: dict[str, str] = {
         "with a low % above LOD are unreliable and may need filtering. When the file has negative "
         "controls, blanks or buffers, the dashed line gives the % of them above LOD for the same "
         "proteins: it should stay near 0%. Proteins where it rises point to contamination or high "
-        "background. When the LOD itself is derived from these controls (e.g. Olink NCLOD), most of them "
-        "fall below it by construction."
+        "background. The line is not shown when the LOD itself is derived from these controls (Olink "
+        "NCLOD, NULISA), because they then fall below it by construction."
     ),
     "pca": (
         "Principal Component Analysis projects the high-dimensional protein expression data onto "
@@ -164,13 +176,14 @@ _HELP_TEXT: dict[str, str] = {
         "component explains."
     ),  # kept for standalone use; report uses 'dimreduction' instead
     "correlation": (
-        "Heatmap of pairwise Pearson correlations between samples based on their protein expression "
-        "profiles. Samples are grouped by sample type so that controls, biological samples, etc. cluster "
-        "together. Values range from \u22121 (inverse) to +1 (perfect correlation). In a well-behaved "
-        "experiment most biological sample pairs should show high positive correlation (warm colours). "
-        "Control samples (e.g. plate controls, negative controls) are expected to have low correlation "
-        "with biological samples. A biological sample with consistently low correlation against all others "
-        "is a potential outlier."
+        "Heatmap of pairwise Pearson correlations between samples (up to 50). Each protein is first "
+        "centred and scaled across samples (z-score), so the abundance profile shared by all samples "
+        "(some proteins are always high, others low) does not make every pair correlate near +1; the "
+        "correlations then show which samples resemble each other. Samples are ordered by hierarchical "
+        "clustering (average linkage on 1 &minus; r), so groups of similar samples appear as warm blocks "
+        "along the diagonal. Values range from \u22121 to +1, and unrelated samples are near 0. Control "
+        "samples (e.g. plate controls, negative controls) usually form their own blocks. A biological "
+        "sample that correlates poorly with all others is a potential outlier."
     ),
     "data_completeness": (
         "Two stacked panels showing data completeness based on the Limit of Detection. "
@@ -214,12 +227,13 @@ _HELP_TEXT: dict[str, str] = {
         "Blocks of correlated colour reveal co-regulated protein groups or sample batches."
     ),
     "cv_distribution": (
-        "Histogram of the coefficient of variation (CV = standard deviation / mean) of each protein across "
-        "study samples (controls excluded). It reflects biological plus technical variability, not "
-        "replicate reproducibility. Olink NPX is converted to linear scale (2<sup>NPX</sup>) before the CV "
-        "is computed; SomaScan RFU is used as deposited, so its CVs depend on the normalization applied "
-        "to the submitted file (e.g. ANML can compress apparent CVs). The dashed line at CV = 0.2 is a "
-        "visual guide within this dataset only, not a pass/fail threshold or a cross-platform comparison."
+        "Histogram of the coefficient of variation (CV = standard deviation / mean, in percent) of each "
+        "protein across study samples (controls excluded). This is total variability, biological plus "
+        "technical, and not assay precision: for the precision of replicate controls see Technical vs "
+        "Study-Sample CV. Values are put on a linear scale ({linear}) before the CV is computed. "
+        "SomaScan RFU is used as deposited, so its CVs depend on the normalization applied to the "
+        "submitted file (e.g. ANML can compress apparent CVs). The dashed line at 20% is a visual guide "
+        "within this dataset only, not a pass/fail threshold or a cross-platform comparison."
     ),
     "norm_scale": (
         "Shows the hybridization control normalization scale factor (HybControlNormScale) per sample, "
@@ -230,9 +244,10 @@ _HELP_TEXT: dict[str, str] = {
         "Samples failing this check should be flagged for potential exclusion."
     ),
     "plate_cv": (
-        "Two-panel view of plate-level variability. "
-        "CVs use the same definition as the CV distribution (study samples only; Olink NPX on linear "
-        "scale, SomaScan RFU as deposited). "
+        "Two-panel view of plate-level variability of the study samples. "
+        "CVs, in percent, use the same definition as the CV distribution (study samples only, linear "
+        "scale: {linear}), so they include biological variation; the precision of replicate controls "
+        "within and across plates is in Technical vs Study-Sample CV. "
         "<strong>Top — Intra-plate CV:</strong> for each plate, the CV (SD / mean) is computed "
         "per analyte across samples within that plate. Each violin shows the distribution of "
         "these CVs; a plate with a notably higher distribution may indicate a plate effect. "
@@ -313,21 +328,23 @@ _HELP_TEXT: dict[str, str] = {
         "may inflate counts unless handled (e.g. by averaging or selecting the best-performing assay)."
     ),
     "mpi": (
-        "Measurement Precision Index (MPI) per protein: median divided by a robust SD "
-        "(1.4826 &times; MAD), i.e. the inverse of a robust CV, across study samples (controls "
-        "excluded). Higher is more consistent. It reflects biological as well as technical variation "
-        "and depends on the deposited normalisation, so it is a within-dataset view, not an "
-        "acceptance threshold; see the technical CV for replicate precision. Values are on a linear "
-        "scale (Olink 2<sup>NPX</sup>, SomaScan RFU as deposited), as for the CV plots, because a "
-        "ratio to the median is meaningless on log2 NPX. When the SDRF or sample metadata defines "
-        "biological groups (e.g. disease), MPI is computed within each group and averaged, so group "
-        "differences are not counted as imprecision; the label on the plot says whether this was "
-        "possible."
+        "Measurement Precision Index (MPI) per protein: |median| / robust SD (1.4826 &times; MAD), "
+        "i.e. the inverse of a robust CV, across study samples (controls excluded). A high MPI means "
+        "the protein's values lie close together relative to its level; a low MPI means they are "
+        "spread out. Because it is computed on study samples, it mixes biological and technical "
+        "variation: a low MPI is not a defect in itself, since real differences between participants "
+        "are what an analysis wants to detect, and it is not a measure of assay precision (for that, "
+        "see the technical CV of replicate controls). It depends on the deposited normalisation, so it "
+        "is a within-dataset view, not an acceptance threshold. Values are on a linear scale "
+        "({linear}), as for the CV plots, because a ratio to the median is meaningless on log2 data. "
+        "When the SDRF or sample metadata defines biological groups (e.g. disease), MPI is computed "
+        "within each group and averaged, so differences between groups are not counted as spread; "
+        "the label on the plot says whether this was possible."
     ),
     "dynamic_range": (
         "Relative spread per protein: interquartile range divided by the median across study "
-        "samples, on a linear scale. It shows how much each protein varies between samples; it is "
-        "not the assay's concentration dynamic range, which NPX or RFU distributions cannot show. "
+        "samples, on a linear scale ({linear}). It shows how much each protein varies between samples; it is "
+        "not the assay's concentration dynamic range, which NPX, NPQ or RFU distributions cannot show. "
         "Low values mean a protein varies little in this cohort (naturally stable, or close to "
         "the detection limit); high values mean it differs strongly between samples."
     ),
@@ -337,18 +354,67 @@ _HELP_TEXT: dict[str, str] = {
         "cases and controls, or different tissues) correlate less, which reflects biology rather "
         "than quality. A tail of low values points to individual samples that differ from the "
         "rest; see the sample correlation heatmap to identify them. Ranks do not depend on the "
-        "measurement scale, so the value is comparable between NPX and RFU within a dataset."
+        "measurement scale, so the value is comparable between NPX, NPQ and RFU within a dataset."
     ),
     "differential_expression": (
         "Volcano plots showing differentially expressed proteins between sample groups defined "
         "in the SDRF metadata file. Each dot is a protein; the x-axis shows fold change "
-        "(log2 scale for Olink, log2-RFU for SomaScan) and the y-axis shows statistical "
+        "(log2 scale for Olink NPX and NULISA NPQ, log2-RFU for SomaScan) and the y-axis shows statistical "
         "significance (-log10 adjusted p-value). Coloured dots are significant (|FC| &ge; 1 "
         "and adj. p &lt; 0.05). Use the <strong>dropdown</strong> to switch between different "
         "characteristics or factor values. For variables with exactly 2 groups a Welch t-test "
         "is used; for variables with 3-10 groups every pairwise comparison is shown."
     ),
 }
+
+# NULISAseq wording where it differs from the Olink / SomaScan text. NPQ exports
+# report a value for every target and sample; values below LOD are low, noisier
+# measurements and are kept, so QC is framed as detectability, not missingness.
+_HELP_TEXT_NULISA: dict[str, str] = {
+    "lod_analysis": (
+        "Targets ranked by detectability: the percentage of <strong>study samples</strong> with NPQ "
+        "above the target LOD, coloured by panel. Control samples are excluded, so a fully detected "
+        "target reaches 100%. The NULISAseq software computes the LOD per target and plate as the "
+        "mean + 3 SD of the negative controls (after removing at most one outlier per target), so the "
+        "negative controls are not drawn: they fall below the LOD by construction. Alamar recommends "
+        "excluding targets detected in fewer than 50% of samples from differential abundance analysis, "
+        "or analysing them separately. Values below LOD are kept in the data: they are measured at low "
+        "levels with more noise."
+    ),
+    "sample_completeness": (
+        "Per-sample share of targets with NPQ above LOD (green) and below LOD (orange); control samples "
+        "are excluded. Below-LOD values are kept in the data: they are low, noisier measurements. A "
+        "sample with an unusually large orange fraction compared with the rest of the cohort may "
+        "indicate low input or a technical issue; current NULISAseq software reports this for "
+        "information only and does not use it as a sample QC criterion."
+    ),
+    "missing_frequency_distribution": (
+        "Histogram of target detectability: the percentage of study samples in which each target is "
+        "above its LOD. NULISAseq exports report an NPQ value for every target and sample; values below "
+        "LOD are kept as low, noisier measurements, so detectability describes these data. Alamar "
+        "recommends considering targets with detectability below 50% (dashed line) for exclusion from "
+        "differential abundance analysis, or analysing them separately. Targets near 100% are detected "
+        "in almost every sample."
+    ),
+}
+
+
+def _help_text(key: str, platform: Platform | None = None) -> str:
+    """Help text for plot *key*, worded for *platform* (unit and linear scale filled in)."""
+    text = (_HELP_TEXT_NULISA.get(key) if platform == Platform.NULISA else None) or _HELP_TEXT.get(key, "")
+    if platform is None:
+        return text.replace("{unit}", "NPX / NPQ / RFU").replace(
+            "{linear}", "Olink 2<sup>NPX</sup>, NULISA 2<sup>NPQ</sup> &minus; 1, SomaScan RFU as deposited"
+        )
+    return text.replace("{unit}", value_unit(platform)).replace("{linear}", linear_scale_label(platform))
+
+
+def _plot_title(key: str, default: str, platform: Platform | None) -> str:
+    """Card title; NULISA shows the per-protein LOD view as detectability."""
+    if key == "missing_frequency_distribution" and platform == Platform.NULISA:
+        return "Target Detectability"
+    return default
+
 
 # Titles for plots rendered from another plot's data (see _DATA_KEY_MAP)
 _DERIVED_PLOT_TITLES = {
@@ -364,7 +430,7 @@ _SECTION_ORDER = [
     ("Missing Frequency Distribution", ["missing_frequency_distribution"]),
     ("Sample Relationships", ["dimreduction", "correlation", "rank_concordance", "heatmap"]),
     ("Normalization QC", ["norm_scale"]),
-    ("Variability", ["cv_distribution", "replicate_cv", "mpi", "dynamic_range", "plate_cv"]),
+    ("Variability", ["replicate_cv", "cv_distribution", "plate_cv", "mpi", "dynamic_range"]),
     ("Batch & Vendor QC", ["batch_effect", "plate_signal", "qc_flags", "nulisa_qc"]),
     ("Pre-analytical & Sample Identity", ["preanalytical", "sex_check"]),
     ("Dilution QC", ["dilution_cv", "dilution_norm_scale"]),
@@ -1012,6 +1078,13 @@ def _status_dot(level: str) -> str:
     return ""
 
 
+def _cv_spread(values: list[float], scope: str) -> str:
+    """Median CV with its IQR and range, e.g. ``4.2% (IQR 3.1–6.0%, range 0.8–19.5%; 240 assays)``."""
+    arr = np.asarray(values, dtype=float)
+    q1, med, q3 = np.percentile(arr, [25, 50, 75])
+    return f"median {med:.1%} (IQR {q1:.1%}–{q3:.1%}, range {arr.min():.1%}–{arr.max():.1%}; {scope})"
+
+
 def _summary_row(dot: str, name: str, value: str) -> str:
     return (
         f"<tr>"
@@ -1146,17 +1219,29 @@ def _render_summary_table(
             active_tag = " <strong>(active)</strong>" if src["name"] == lod_info.get("active") else ""
             rows.append(_summary_row(icon, src["name"] + str(active_tag), src["detail"]))
 
-        # Match the "Missing Frequency distribution" metric (Olink-recommended 30% missing threshold):
-        # Missing frequency = fraction of samples below LOD, so <30% missing ⇔ >70% above LOD.
+        # Match the per-protein LOD plot. Olink: missing frequency (fraction of samples below
+        # LOD) under 30%, i.e. > 70% above LOD. NULISA: Alamar's detectability criterion,
+        # >= 50% of samples above LOD; NPQ exports keep below-LOD values, so they are not "missing".
+        is_nulisa = dataset.platform == Platform.NULISA
+        max_below = 0.50 if is_nulisa else 0.30
         n_pass_mf = None
         n_total_mf = None
         if isinstance(data_completeness, DataCompletenessData) and len(data_completeness.missing_freq) > 0:
             mf = [float(x) for x in data_completeness.missing_freq if x is not None]
             n_total_mf = len(mf)
-            n_pass_mf = sum(1 for x in mf if x < 0.30)
+            n_pass_mf = sum(1 for x in mf if (x <= max_below if is_nulisa else x < max_below))
         elif isinstance(lod_analysis, LodAnalysisData) and len(lod_analysis.above_lod_pct) > 0:
             n_total_mf = len(lod_analysis.above_lod_pct)
-            n_pass_mf = sum(1 for p in lod_analysis.above_lod_pct if float(p) > 70.0)
+            min_above = (1.0 - max_below) * 100
+            n_pass_mf = sum(
+                1 for p in lod_analysis.above_lod_pct if (float(p) >= min_above if is_nulisa else float(p) > min_above)
+            )
+        if is_nulisa:
+            lod_row_label = "Targets detected in &ge;50% of study samples (above LOD)"
+        elif "MissingFreq" in features.columns:
+            lod_row_label = "Assays with &lt;30% of samples below LOD (MissingFreq)"
+        else:
+            lod_row_label = "Assays with &lt;30% of samples below LOD"
 
         if n_pass_mf is not None and n_total_mf is not None and n_total_mf > 0:
             frac_pass = n_pass_mf / n_total_mf
@@ -1169,7 +1254,7 @@ def _render_summary_table(
             rows.append(
                 _summary_row(
                     lod_dot,
-                    "Assays with &lt;30% missing (MissingFreq)",
+                    lod_row_label,
                     f"{n_pass_mf} / {n_total_mf} ({frac_pass:.1%})",
                 )
             )
@@ -1193,7 +1278,10 @@ def _render_summary_table(
     if "Panel" in features.columns:
         panel_counts = features["Panel"].value_counts()
         parts = [f"{html_mod.escape(str(p))}: {c}" for p, c in panel_counts.items()]
-        rows.append(_summary_row("", "Panels", ", ".join(parts)))
+        # Number of panels and assays per panel on separate rows, so "Panel: 249" is not
+        # read as 249 panels
+        rows.append(_summary_row("", "Panels", str(len(panel_counts))))
+        rows.append(_summary_row("", "Assays per panel", ", ".join(parts)))
 
     numeric = expr.apply(pd.to_numeric, errors="coerce")
     proteins_per_sample = numeric.notna().sum(axis=1)
@@ -1259,31 +1347,38 @@ def _render_summary_table(
     )
     if has_cv:
         rows.append(_summary_group("Variability"))
+
+        # Technical precision (replicate controls) first: it is the CV users read as precision
+        rep_cv = plot_data.get("replicate_cv")
+        if isinstance(rep_cv, ReplicateCvData) and rep_cv.technical_cv:
+            scope = f"{len(rep_cv.technical_cv)} assays &gt; LOD" if rep_cv.lod_filtered else "all assays"
+            kind = "intra-plate" if rep_cv.plate_resolved else "pooled, plates unknown"
+            who = f"{rep_cv.control_label.lower()}, n={rep_cv.n_replicates}"
+            rows.append(_summary_row("", f"Technical CV, {kind} ({who})", _cv_spread(rep_cv.technical_cv, scope)))
+            if rep_cv.inter_plate_cv:
+                rows.append(
+                    _summary_row(
+                        "",
+                        f"Technical CV, inter-plate ({rep_cv.n_plates} plates)",
+                        _cv_spread(rep_cv.inter_plate_cv, scope),
+                    )
+                )
+
         if isinstance(cv_data, CvDistributionData) and len(cv_data.cv_values) > 0:
             if n_samples < 2:
-                rows.append(_summary_row("", "Median CV", "N/A (single sample)"))
+                rows.append(_summary_row("", "Median CV across study samples", "N/A (single sample)"))
                 rows.append(_summary_row("", "CV range (5th\u201395th pctl)", "N/A"))
             else:
-                # No traffic-light status: CV across study samples is not a pass/fail metric
+                # No traffic-light status: CV across study samples (biological + technical)
+                # is not a pass/fail metric
                 med_cv = float(np.median(cv_data.cv_values))
-                rows.append(_summary_row("", "Median CV", f"{med_cv:.1%}"))
+                rows.append(_summary_row("", "Median CV across study samples", f"{med_cv:.1%}"))
                 p5, p95 = np.percentile(cv_data.cv_values, [5, 95])
                 rows.append(_summary_row("", "CV range (5th\u201395th pctl)", f"{p5:.1%} \u2013 {p95:.1%}"))
 
         if isinstance(plate_cv_data, PlateCvData) and len(plate_cv_data.inter_cv) > 0:
             med_inter = float(np.median(plate_cv_data.inter_cv))
-            rows.append(_summary_row("", "Median inter-plate CV", f"{med_inter:.1%}"))
-
-        rep_cv = plot_data.get("replicate_cv")
-        if isinstance(rep_cv, ReplicateCvData) and rep_cv.technical_cv:
-            scope = f"{len(rep_cv.technical_cv)} assays &gt; LOD" if rep_cv.lod_filtered else "all assays"
-            rows.append(
-                _summary_row(
-                    "",
-                    f"Technical CV, median ({rep_cv.control_label.lower()}, n={rep_cv.n_replicates})",
-                    f"{float(np.median(rep_cv.technical_cv)):.1%} ({scope})",
-                )
-            )
+            rows.append(_summary_row("", "Median inter-plate CV of study samples", f"{med_inter:.1%}"))
 
     batch = plot_data.get("batch_effect")
     if isinstance(batch, BatchEffectData) and batch.plate_r2:
@@ -1870,6 +1965,7 @@ def qc_report(
             title = _DERIVED_PLOT_TITLES.get(key, key.replace("_", " ").title())
         else:
             title = getattr(data, "title", key.replace("_", " ").title())
+        title = _plot_title(key, title, dataset.platform)
         rendered[key] = (title, plot_html)  # type: ignore[attr-defined]
         logger.debug("qc_report: rendered %s plot", key)
 
@@ -1950,6 +2046,8 @@ def qc_report(
     group_sections: list[str] = []
 
     for group_title, keys in _SECTION_ORDER:
+        if dataset.platform == Platform.NULISA and group_title == "Missing Frequency Distribution":
+            group_title = "Target Detectability"
         cards: list[str] = []
         group_toc_items: list[str] = []
         for key in keys:
@@ -1959,7 +2057,7 @@ def qc_report(
             title = entry[0]
             plot_html = entry[1]
             extra_header = entry[2] if len(entry) > 2 else ""
-            help_html = _HELP_TEXT.get(key, "")
+            help_html = _help_text(key, dataset.platform)
             group_toc_items.append(f'<li><a href="#{key}">{title}</a></li>')
             help_block = f'<div class="help-text">{help_html}</div>' if help_html else ""
             cards.append(
@@ -2083,8 +2181,8 @@ _SPLIT_LAYOUT: list[tuple[str, str, list[tuple[str, str]]]] = [
         [
             ("distribution", "half"),
             ("sample_completeness", "half"),
-            ("cv_distribution", "half"),
             ("replicate_cv", "half"),
+            ("cv_distribution", "half"),
             ("mpi", "half"),
             ("dynamic_range", "half"),
             ("plate_cv", "full"),
@@ -2346,7 +2444,8 @@ def qc_report_split(
             title = _DERIVED_PLOT_TITLES.get(key, key.replace("_", " ").title())
         else:
             title = getattr(data, "title", key.replace("_", " ").title())
-        help_html = _HELP_TEXT.get(key, "")
+        title = _plot_title(key, title, dataset.platform)
+        help_html = _help_text(key, dataset.platform)
         help_toggle = '<button class="help-toggle" title="How to read this plot" aria-label="Help">?</button>'
         help_block = f'<div class="help-text">{help_html}</div>' if help_html else ""
         body = (
@@ -2413,7 +2512,7 @@ def qc_report_split(
 
         toggle_html += '<button class="label-toggle-btn" onclick="toggleDimRedLabels(this)">Show Labels</button>'
 
-        help_text = _HELP_TEXT.get("dimreduction", "")
+        help_text = _help_text("dimreduction", dataset.platform)
         help_toggle = '<button class="help-toggle" title="How to read this plot" aria-label="Help">?</button>'
         body = (
             f'<div class="plot-card"><div class="plot-header">'
