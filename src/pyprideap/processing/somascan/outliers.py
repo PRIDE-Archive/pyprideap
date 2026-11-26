@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, numeric_frame
 
 
 @dataclass
@@ -134,11 +134,11 @@ def calc_outlier_map(
     OutlierMap
         Boolean matrix with outlier flags and metadata.
     """
-    numeric = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric_frame(dataset.expression)
     mat = np.zeros(numeric.shape, dtype=bool)
 
     for j in range(numeric.shape[1]):
-        col_values = numeric.iloc[:, j].values.astype(float)
+        col_values = numeric.iloc[:, j].to_numpy(dtype=float)
         mat[:, j] = _get_outliers_per_analyte(col_values, fc_crit)
 
     outlier_df = pd.DataFrame(

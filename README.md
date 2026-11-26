@@ -8,7 +8,7 @@
 
 Python PRIDE Affinity Proteomics (pyprideap), a library for reading, validating, and analyzing affinity proteomics datasets from the [PRIDE Affinity Archive (PAD)](https://www.ebi.ac.uk/pride/).
 
-Supports **Olink** (Explore, Explore HT, Target, Reveal) and **SomaScan** platforms.
+Supports **Olink** (Explore, Explore HT, Target, Reveal), **SomaScan** and **NULISA** (Alamar NULISAseq) platforms.
 
 ## Installation
 
@@ -131,6 +131,21 @@ Or via `python -m`:
 python -m pyprideap report data.npx.csv
 ```
 
+### Download from PRIDE
+
+With `-a PAD…` the dataset files are downloaded in parallel from the EBI FIRE object store
+(`https://hh.fire.sdo.ebi.ac.uk`, bucket `pride-public`), falling back to `https://ftp.pride.ebi.ac.uk`.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PYPRIDEAP_DOWNLOAD_PROTOCOL` | `fire` | `fire`, `ftp` or `https` — first mirror to try |
+| `PYPRIDEAP_FIRE_URL` | `https://hh.fire.sdo.ebi.ac.uk` | FIRE endpoint (use the internal one inside EBI) |
+| `PYPRIDEAP_DOWNLOAD_WORKERS` | `8` | Parallel downloads |
+
+Only data files typed **RESULT** or **RAW** in PRIDE are read; files typed OTHER or SEARCH
+(the same data in another layout, sample sheets, analysis outputs) are skipped. When a dataset
+has no RESULT or RAW data file, every data file is read.
+
 ### Verbose mode
 
 Use `-v` / `--verbose` to enable detailed debug logging. This shows progress through each processing stage:
@@ -163,6 +178,7 @@ The HTML report is a self-contained, interactive document with a sidebar table o
 | **Variability** | CV distribution, intra/inter-plate CV |
 | **Assay QC** | IQR/Median outlier detection, UniProt duplicate mapping (Olink) |
 | **SomaScan QC** | ColCheck pass/flag summary (SomaScan) |
+| **NULISA QC** | Sample QC metrics (reads, internal-control reads, IC median, detectability) with the vendor thresholds; run QC (IC CV, IPC CV, IPC target CV, reads) in the summary |
 | **Differential Expression** | Volcano plots per variable (requires SDRF metadata) |
 
 Each plot has a **?** help button with guidance on interpretation.
@@ -266,9 +282,16 @@ Each plot has a **Case/control: yes/no** tag and a **?** help panel with *What t
 | `.xlsx` | Olink | `pp.read()` |
 | `.adat` | SomaScan | `pp.read()` |
 | `.csv` (SomaScan) | SomaScan | `pp.read()` |
+| NPQ long format `.csv` | NULISA (Alamar NULISAseq) | `pp.read()` |
+| NPQ workbook `.xlsx` (`NPQ`, `Annotation-Targets` sheets) | NULISA | `pp.read()` |
 | `.sdrf.tsv` | Any | `read_sdrf()` |
 
 All readers produce an `AffinityDataset` with a unified structure regardless of input format.
+
+NULISA exports carry gene symbols but no UniProt accessions. When the instrument output XML
+(`<NULISAseq>`, the file named in the `PlateID` column) is next to the NPQ export, pyprideap reads
+UniProt IDs, protein names and the plate QC metrics from it; `pyprideap report -a PADxxxxxx`
+downloads it automatically. Values are NPQ (log2), so CV-based metrics use 2^NPQ, as for Olink NPX.
 
 ## Data Model
 

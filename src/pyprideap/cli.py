@@ -32,9 +32,11 @@ Examples:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import click
@@ -95,22 +97,116 @@ def _discover_sdrf(data_path: Path) -> Path | None:
     return unique[0]
 
 
+_PRIDE_FTP = "ftp://ftp.pride.ebi.ac.uk/"
+_PRIDE_HTTPS = "https://ftp.pride.ebi.ac.uk/"
+_ARCHIVE_PREFIX = "pride/data/archive/"
+# EBI FIRE object store (S3-compatible, public bucket, unsigned reads), as in pridepy
+_FIRE_URL = "https://hh.fire.sdo.ebi.ac.uk"
+_FIRE_BUCKET = "pride-public"
+_DOWNLOAD_TIMEOUT = 300
+_CHUNK = 1 << 20
+
+
+def _download_workers(n_files: int) -> int:
+    """Parallel downloads; ``PYPRIDEAP_DOWNLOAD_WORKERS`` overrides the default of 8."""
+    try:
+        workers = int(os.environ.get("PYPRIDEAP_DOWNLOAD_WORKERS", "8"))
+    except ValueError:
+        workers = 8
+    return max(1, min(workers, n_files or 1))
+
+
+def _candidate_urls(url: str) -> list[str]:
+    """URLs to try, in order, for a PRIDE archive file.
+
+    ``PYPRIDEAP_DOWNLOAD_PROTOCOL`` picks the first one (default ``fire``):
+
+    - ``fire``: EBI FIRE object store (``PYPRIDEAP_FIRE_URL``, default
+      https://hh.fire.sdo.ebi.ac.uk). Fastest, especially inside EBI.
+    - ``ftp``: ftp://ftp.pride.ebi.ac.uk (often blocked in containers).
+    - ``https``: the https://ftp.pride.ebi.ac.uk gateway (~10 s to first byte per file).
+
+    The HTTPS gateway is always the last fallback.
+    """
+    path = None
+    for base in (_PRIDE_FTP, _PRIDE_HTTPS):
+        if url.startswith(base):
+            path = url[len(base) :]
+    if path is None:
+        return [url]
+    https = _PRIDE_HTTPS + path
+    protocol = os.environ.get("PYPRIDEAP_DOWNLOAD_PROTOCOL", "fire").lower()
+    first = None
+    if protocol == "fire" and path.startswith(_ARCHIVE_PREFIX):
+        fire = os.environ.get("PYPRIDEAP_FIRE_URL", _FIRE_URL).rstrip("/")
+        first = f"{fire}/{_FIRE_BUCKET}/{path[len(_ARCHIVE_PREFIX) :]}"
+    elif protocol == "ftp":
+        first = _PRIDE_FTP + path
+    return [first, https] if first else [https]
+
+
+def _fetch(url: str, dest: Path) -> Path:
+    """Download one file to *dest* in 1 MiB chunks, falling back across mirrors."""
+    import shutil
+    import urllib.request
+
+    candidates = _candidate_urls(url)
+    for i, candidate in enumerate(candidates):
+        logger.debug("URL: %s -> %s", candidate, dest)
+        try:
+            with urllib.request.urlopen(candidate, timeout=_DOWNLOAD_TIMEOUT) as resp, dest.open("wb") as fh:
+                shutil.copyfileobj(resp, fh, _CHUNK)
+            return dest
+        except OSError as exc:
+            if i == len(candidates) - 1:
+                raise
+            logger.debug("Download from %s failed (%s); trying %s", candidate, exc, candidates[i + 1])
+    return dest
+
+
+# Files the submitter typed as RESULT or RAW hold the measurements; OTHER and
+# SEARCH files next to them are usually the same data in another layout, sample
+# sheets or analysis outputs, and would add duplicate or failing reports.
+_QC_FILE_CATEGORIES = ("RESULT", "RAW")
+
+
+def _select_data_files(files: dict[str, tuple[str, str | None]]) -> dict[str, str]:
+    """Data files to QC: those typed RESULT or RAW, or all of them when none is."""
+    typed = {name: url for name, (url, category) in files.items() if category in _QC_FILE_CATEGORIES}
+    if typed:
+        skipped = sorted(set(files) - set(typed))
+        if skipped:
+            logger.debug("Skipping data files not typed RESULT/RAW: %s", skipped)
+        return typed
+    return {name: url for name, (url, _category) in files.items()}
+
+
 def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Path | None]:
     """Download NPX/ADAT files (and SDRF if present) from PRIDE for a PAD accession."""
     from pyprideap.api.pride import PrideClient
 
     client = PrideClient()
     logger.debug("Fetching file list for %s from PRIDE API...", accession)
-    urls = client.get_download_urls(accession)
+    files = client.get_download_files(accession)
+    urls = {name: url for name, (url, _category) in files.items()}
 
     # Filter for supported data files
     data_extensions = {".csv", ".parquet", ".xlsx", ".adat"}
-    data_urls = {
-        name: url
-        for name, url in urls.items()
-        if any(name.lower().endswith(ext) for ext in data_extensions) and "checksum" not in name.lower()
-    }
     sdrf_urls = {name: url for name, url in urls.items() if _is_sdrf_filename(name) and "checksum" not in name.lower()}
+    data_urls = _select_data_files(
+        {
+            name: entry
+            for name, entry in files.items()
+            if any(name.lower().endswith(ext) for ext in data_extensions)
+            and "checksum" not in name.lower()
+            and name not in sdrf_urls
+        }
+    )
+    # Instrument XMLs are not QC'd themselves but annotate data files next to them
+    # (NULISAseq: UniProt IDs and plate QC for the NPQ exports)
+    aux_urls = {
+        name: url for name, url in urls.items() if name.lower().endswith(".xml") and "checksum" not in name.lower()
+    }
 
     if not data_urls:
         click.echo(f"Error: No supported data files found for {accession}", err=True)
@@ -121,18 +217,31 @@ def _download_pad_files(accession: str, dest_dir: Path) -> tuple[list[Path], Pat
     if sdrf_urls:
         logger.debug("Found %d SDRF file(s): %s", len(sdrf_urls), list(sdrf_urls.keys()))
 
+    jobs = [(name, url, dest_dir / Path(name).name) for name, url in {**data_urls, **sdrf_urls, **aux_urls}.items()]
+    for name, _url, _dest in jobs:
+        click.echo(f"Downloading {name}...", err=True)
+
+    # The PRIDE HTTPS gateway takes ~10 s before the first byte of every file, so
+    # downloading one file after another dominates the run time. Fetch in parallel.
+    failed: dict[str, BaseException] = {}
+    with ThreadPoolExecutor(max_workers=_download_workers(len(jobs))) as pool:
+        futures = {pool.submit(_fetch, url, dest): name for name, url, dest in jobs}
+        for future in as_completed(futures):
+            exc = future.exception()
+            if exc is not None:
+                failed[futures[future]] = exc
+
     downloaded: list[Path] = []
     sdrf_files: list[Path] = []
-    for name, url in {**data_urls, **sdrf_urls}.items():
-        dest = dest_dir / Path(name).name  # sanitize: strip directory components
-        # Convert FTP URLs to HTTPS for broader compatibility
-        if url.startswith("ftp://ftp.pride.ebi.ac.uk/"):
-            url = url.replace("ftp://ftp.pride.ebi.ac.uk/", "https://ftp.pride.ebi.ac.uk/", 1)
-        click.echo(f"Downloading {name}...")
-        logger.debug("URL: %s -> %s", url, dest)
-        import urllib.request
-
-        urllib.request.urlretrieve(url, dest)
+    for name, _url, dest in jobs:
+        if name in failed:
+            if name in aux_urls:
+                # Annotation files only: a failed download must not stop the report
+                logger.warning("Could not download auxiliary file %s: %s", name, failed[name])
+                continue
+            raise failed[name]
+        if name in aux_urls:
+            continue
         if _is_sdrf_filename(name):
             sdrf_files.append(dest)
         else:
@@ -213,7 +322,7 @@ def main() -> None:
 @click.option(
     "-p",
     "--platform",
-    type=click.Choice(["olink", "somascan"], case_sensitive=False),
+    type=click.Choice(["olink", "somascan", "nulisa"], case_sensitive=False),
     default=None,
     help="Force platform type (default: auto-detect).",
 )
@@ -308,7 +417,7 @@ def report(
 @click.option(
     "-p",
     "--platform",
-    type=click.Choice(["olink", "somascan"], case_sensitive=False),
+    type=click.Choice(["olink", "somascan", "nulisa"], case_sensitive=False),
     default=None,
     help="Force platform type (default: auto-detect).",
 )
@@ -394,7 +503,7 @@ def proteins_above_lod(
 @click.option(
     "-p",
     "--platform",
-    type=click.Choice(["olink", "somascan"], case_sensitive=False),
+    type=click.Choice(["olink", "somascan", "nulisa"], case_sensitive=False),
     default=None,
     help="Force platform type (default: auto-detect).",
 )

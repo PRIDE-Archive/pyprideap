@@ -26,7 +26,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
-from pyprideap.core import AffinityDataset
+from pyprideap.core import AffinityDataset, numeric_frame
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +295,7 @@ def select_bridge_samples(
     ValueError
         If fewer than *n* samples satisfy the selection criteria.
     """
-    expr = dataset.expression.apply(pd.to_numeric, errors="coerce")
+    expr = numeric_frame(dataset.expression)
 
     # Build sample index → sample ID mapping
     sid_col = "SampleID"
@@ -523,10 +523,10 @@ def assess_cross_product_bridgeability(
 
     aligned1, aligned2, common_samples = _resolve_common_samples(dataset1, dataset2)
 
-    numeric1 = dataset1.expression[overlapping].apply(pd.to_numeric, errors="coerce")
-    numeric2 = dataset2.expression[overlapping].apply(pd.to_numeric, errors="coerce")
-    aligned_numeric1 = aligned1[overlapping].apply(pd.to_numeric, errors="coerce")
-    aligned_numeric2 = aligned2[overlapping].apply(pd.to_numeric, errors="coerce")
+    numeric1 = numeric_frame(dataset1.expression[overlapping])
+    numeric2 = numeric_frame(dataset2.expression[overlapping])
+    aligned_numeric1 = numeric_frame(aligned1[overlapping])
+    aligned_numeric2 = numeric_frame(aligned2[overlapping])
 
     records: list[dict] = []
     for protein in overlapping:
@@ -694,8 +694,8 @@ def quantile_smooth_normalize(
     if overlapping.empty:
         raise ValueError("No overlapping proteins between reference and target.")
 
-    ref_numeric = reference.expression[overlapping].apply(pd.to_numeric, errors="coerce")
-    tgt_numeric = target.expression[overlapping].apply(pd.to_numeric, errors="coerce")
+    ref_numeric = numeric_frame(reference.expression[overlapping])
+    tgt_numeric = numeric_frame(target.expression[overlapping])
     normalized = tgt_numeric.copy()
 
     # Bridge sample indices in each dataset

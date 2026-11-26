@@ -165,7 +165,10 @@ def _positions(values: pd.Series, labels: pd.Index) -> np.ndarray:
         codes = values.cat.codes.to_numpy()
         return np.where(codes >= 0, lookup[codes], -1)
     if as_text:
-        values = values.map(lambda v: v if pd.isna(v) else str(v))
+        # One str() per distinct value, not per row
+        codes, uniques = pd.factorize(values)
+        lookup = labels.get_indexer(pd.Index([str(u) for u in uniques], dtype=object))
+        return cast(np.ndarray, np.where(codes >= 0, lookup[codes] if len(lookup) else -1, -1))
     return np.asarray(labels.get_indexer(pd.Index(values)))
 
 
@@ -175,7 +178,9 @@ def _first_per_cell(rows: np.ndarray, cols: np.ndarray, n_cols: int) -> np.ndarr
     return cast(np.ndarray, np.logical_not(duplicated))
 
 
-def _long_to_wide(df: pd.DataFrame, sample_key: str, sample_order: pd.Index, value_col: str) -> pd.DataFrame:
+def _long_to_wide(
+    df: pd.DataFrame, sample_key: str, sample_order: pd.Index, value_col: str, assay_col: str = "OlinkID"
+) -> pd.DataFrame:
     """Samples x assays matrix of *value_col*, equivalent to
     ``pivot_table(index=sample_key, columns="OlinkID", aggfunc="first")`` reindexed to
     *sample_order*: first non-missing value per cell, assays sorted, assays without
@@ -183,7 +188,7 @@ def _long_to_wide(df: pd.DataFrame, sample_key: str, sample_order: pd.Index, val
     pivot_table on multi-million-row exports.
     """
     values = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
-    assay_ids = df["OlinkID"]
+    assay_ids = df[assay_col]
     labels = pd.Index(
         sorted(assay_ids.cat.categories.astype(str))
         if isinstance(assay_ids.dtype, pd.CategoricalDtype)
@@ -198,7 +203,7 @@ def _long_to_wide(df: pd.DataFrame, sample_key: str, sample_order: pd.Index, val
     matrix[r[first], c[first]] = v[first]
     keep = np.zeros(len(labels), dtype=bool)
     keep[np.unique(c)] = True
-    wide = pd.DataFrame(matrix[:, keep], columns=pd.Index(labels[keep], name="OlinkID"))
+    wide = pd.DataFrame(matrix[:, keep], columns=pd.Index(labels[keep], name=assay_col))
     return cast(pd.DataFrame, wide)
 
 
@@ -233,7 +238,9 @@ def _qc_flag_matrices(df: pd.DataFrame, sample_key: str, sample_order: object, a
         first = _first_per_cell(r, c, len(assays))
         coded[r[first], c[first]] = v[first]
         lookup = np.array([*labels.astype(object).where(labels.notna(), None), None], dtype=object)
-        matrices[key] = pd.DataFrame(lookup[coded], columns=assays).astype("string")
+        # One object block (None = no flag); thousands of Arrow string columns make
+        # row selection and per-cell access slow
+        matrices[key] = pd.DataFrame(lookup[coded], columns=assays, dtype=object)
     return matrices
 
 
@@ -366,7 +373,26 @@ def read_olink_csv(path: str | Path) -> AffinityDataset:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    df = _apply_olink_aliases(_read_delimited(path))
+    from pyprideap.io.readers.olink_wide import is_olink_wide_csv, read_olink_wide
+
+    if is_olink_wide_csv(path):
+        # NPX Manager / NPX Signature "NPX data" export: one column per assay
+        return olink_long_to_dataset(read_olink_wide(path), path)
+    return olink_long_to_dataset(_apply_olink_aliases(_read_delimited(path)), path)
+
+
+def read_olink_wide_dataset(path: str | Path) -> AffinityDataset:
+    """Wide NPX export (CSV, or every wide sheet of a workbook)."""
+    from pyprideap.io.readers.olink_wide import read_olink_wide
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    return olink_long_to_dataset(read_olink_wide(path), path)
+
+
+def olink_long_to_dataset(df: pd.DataFrame, path: Path) -> AffinityDataset:
+    """Build the dataset from a long Olink table (one row per sample x assay)."""
     missing = _REQUIRED_COLS - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns in {path.name}: {sorted(missing)}")

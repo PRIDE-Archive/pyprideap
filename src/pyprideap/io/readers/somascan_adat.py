@@ -28,7 +28,10 @@ def read_somascan_adat(path: str | Path) -> AffinityDataset:
     sample_cols = [c for c in row_data.columns if c not in soma_ids]
 
     samples = row_data[sample_cols].reset_index(drop=True)
-    expression = row_data[soma_ids].astype(float).reset_index(drop=True)
+    # One float block: column-by-column frames (one block per SeqId) make every
+    # later whole-matrix operation many times slower
+    values = row_data[soma_ids]
+    expression = pd.DataFrame(values.astype(float).to_numpy(), columns=values.columns)
     logger.debug("ADAT shape: %d samples x %d features", len(samples), len(features))
 
     dataset = AffinityDataset(
